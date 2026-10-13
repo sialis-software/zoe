@@ -157,6 +157,39 @@ impl App {
             TabSave::Note { path } => {
                 self.sh.notes.contains_key(path).then(|| self.new_note(path.clone()))
             }
+            TabSave::Backlinks { passage } => {
+                let passage = scripture::RefRange::from_osis(passage)?;
+                let id = self.take_id();
+                Some(Tab::Backlinks(Box::new(crate::backlinks_tab::BacklinksTab::new(id, crate::backlinks_tab::Target::Passage(passage)))))
+            }
+            TabSave::NoteBacklinks { path } => {
+                self.sh.notes.contains_key(path).then(|| {
+                    let id = self.take_id();
+                    Tab::Backlinks(Box::new(crate::backlinks_tab::BacklinksTab::new(id, crate::backlinks_tab::Target::Note(path.clone()))))
+                })
+            }
+            TabSave::Search { module, query, case, stem, best } => {
+                let module = ModuleId(module.clone());
+                self.sh.backend.modules().iter().any(|m| m.id == module).then(|| {
+                    let id = self.take_id();
+                    let mut tab = crate::search_tab::SearchTab::new(id, module);
+                    tab.options = crate::bible_search::Options { case: *case, stem: *stem, by_relevance: *best };
+                    tab.draft = query.clone();
+                    // Searched again if that costs nothing (the index is made).
+                    if !query.trim().is_empty() && self.sh.bible_index_ready(&tab.module) {
+                        let _ = tab.run(&self.sh);
+                    }
+                    Tab::Search(Box::new(tab))
+                })
+            }
+            TabSave::Commentary { module, book, chapter } => {
+                let module = ModuleId(module.clone());
+                let book = Book::from_osis(book)?;
+                self.sh.backend.commentaries().iter().any(|c| c.id == module).then(|| {
+                    let id = self.take_id();
+                    Tab::Commentary(Box::new(crate::commentary_tab::CommentaryTab::new(id, &self.sh, module, book, (*chapter).max(1), None)))
+                })
+            }
             TabSave::Dict { module, key } => {
                 let module = ModuleId(module.clone());
                 self.sh.backend.dictionaries().iter().any(|d| d.id == module).then(|| {
@@ -204,6 +237,12 @@ fn save_tab(tab: &Tab) -> TabSave {
         },
         Tab::Note(t) => TabSave::Note { path: t.path.clone() },
         Tab::Dict(t) => TabSave::Dict { module: t.module.0.clone(), key: t.key.clone() },
+        Tab::Search(t) => TabSave::Search { module: t.module.0.clone(), query: t.draft.clone(), case: t.options.case, stem: t.options.stem, best: t.options.by_relevance },
+        Tab::Commentary(t) => TabSave::Commentary { module: t.module.0.clone(), book: t.book.osis().to_string(), chapter: t.chapter },
+        Tab::Backlinks(t) => match &t.target {
+            crate::backlinks_tab::Target::Passage(range) => TabSave::Backlinks { passage: range.osis() },
+            crate::backlinks_tab::Target::Note(path) => TabSave::NoteBacklinks { path: path.clone() },
+        },
     }
 }
 

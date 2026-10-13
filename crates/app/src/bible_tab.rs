@@ -124,6 +124,12 @@ pub enum BibleMsg {
     DeleteMarkAt(usize),
     UnlinkMarkAt(usize),
     OpenMarkInWriter(usize),
+    /// The notes that link to the verses selected.
+    OpenBacklinks,
+    /// Read a commentary on this chapter (or the selected verse).
+    OpenCommentary,
+    /// Search the Bible for the selected words.
+    SearchSelection,
     /// Marks under a click in the reader (several when they overlap); empty = dismissed.
     MarksClicked(Vec<usize>),
     AutoScroll(f32),
@@ -187,6 +193,12 @@ pub enum Request {
     OpenMark(usize),
     /// Show the note at this path in a note tab.
     OpenNote(String),
+    /// Show the notes that link to this passage in a tab.
+    OpenBacklinks(RefRange),
+    /// A commentary at a chapter, and the verse if one is selected.
+    OpenCommentary(Book, u16, Option<u16>),
+    /// A search for these words.
+    Search(String),
 }
 
 /// A book and chapter number.
@@ -228,6 +240,8 @@ pub struct BibleTab {
     pub chapter: Result<Chapter, String>,
     /// Pending "select these verses' text" request for the reader: (token, first, last).
     pub select_request: Option<(u64, u16, u16)>,
+    /// Words to select in the reader (from the first to the last), once.
+    pub select_words: Option<(u64, CanonSlice)>,
     pub select_token: u64,
     /// Whether the reader is wide enough to show its margin (reported by the reader).
     pub margin_showing: bool,
@@ -303,7 +317,7 @@ fn reader_message(event: reader::Event) -> BibleMsg {
 /// The toolbar the reader floats under a text selection. Each pen is its own name written the
 /// way it marks: highlighted behind the word, or underlined in its colour. Beside them, the
 /// comment button and two icon buttons that copy the selection to the clipboard.
-fn pen_toolbar(sh: &Shared) -> Element<'static, BibleMsg> {
+fn pen_toolbar(sh: &Shared, backlinks: bool) -> Element<'static, BibleMsg> {
     use iced::widget::{stack, tooltip};
     let mut bar = row![].spacing(2).align_y(iced::Center);
     for (i, pen) in sh.settings.pens.iter().enumerate() {
@@ -335,7 +349,7 @@ fn pen_toolbar(sh: &Shared) -> Element<'static, BibleMsg> {
         };
         bar = bar.push(button(label).padding([5, 8]).style(button::text).on_press(BibleMsg::ApplyPen(i)));
     }
-    let bar = bar.push(button(text("Comment").size(13)).padding([5, 8]).style(button::text).on_press(BibleMsg::AddComment));
+    let bar = bar.push(button(text("Add Note").size(13)).padding([5, 8]).style(button::text).on_press(BibleMsg::AddComment));
     // What can be taken to a note: plain text on the clipboard, pasted wherever it is wanted.
     let icon = |picture: crate::icons::Icon, tip: &'static str, msg: BibleMsg| {
         tooltip(
@@ -349,11 +363,16 @@ fn pen_toolbar(sh: &Shared) -> Element<'static, BibleMsg> {
             tooltip::Position::Bottom,
         )
     };
-    let copy = row![
+    let mut copy = row![
         icon(crate::icons::Icon::Link, "Copy reference", BibleMsg::CopyReference),
         icon(crate::icons::Icon::Quote, "Copy quote", BibleMsg::CopyQuote),
+        icon(crate::icons::Icon::Search, "Search the Bible for these words", BibleMsg::SearchSelection),
     ]
     .spacing(4);
+    // Where the selected verses are green (a note links to them): the notes that do.
+    if backlinks {
+        copy = copy.push(icon(crate::icons::Icon::Backlinks, "Backlinks: the notes that link here", BibleMsg::OpenBacklinks));
+    }
     // The two kinds of action are set apart: marking the text, and copying it away.
     let divider = container(space::horizontal()).width(1).height(18).style(|theme: &Theme| container::Style {
         background: Some(theme.extended_palette().background.strong.color.into()),
@@ -500,6 +519,7 @@ impl BibleTab {
             chapter_no: 3,
             chapter: Err(String::new()),
             select_request: None,
+            select_words: None,
             select_token: 0,
             margin_showing: false,
             editing: None,
@@ -587,6 +607,7 @@ impl BibleTab {
         self.book = book;
         self.chapter_no = chapter;
         self.select_request = None;
+        self.select_words = None;
         self.stop_edit(sh);
         self.editing = None;
         self.reveal = None;
@@ -614,6 +635,7 @@ impl BibleTab {
             return;
         }
         sh.status.clear();
+        self.select_words = None;
         self.history.current_mut().scroll = self.scroll_y;
         if (target.book, target.chapter) != (self.book, self.chapter_no) {
             self.load_raw(sh, target.book, target.chapter);
@@ -727,6 +749,18 @@ impl BibleTab {
             .collect()
     }
 
+    /// The verses the selection touches, from the first to the last as one passage.
+    pub fn selection_span(&self) -> Option<RefRange> {
+        let verses: Vec<u16> = self.text_selection.iter().flatten().map(|s| s.verse).collect();
+        let (first, last) = (verses.iter().min()?, verses.iter().max()?);
+        Some(RefRange { book: self.book, chapter: self.chapter_no, verses: Some((*first, *last)) })
+    }
+
+    /// Whether any note links to a verse of the selection: those verses are green in the text.
+    pub fn selection_has_backlinks(&self, sh: &Shared) -> bool {
+        self.selection_span().is_some_and(|span| !sh.backlinks(&span).is_empty())
+    }
+
     /// "John 3:1-3, 5": the marked verses as one label.
     pub fn selection_label(&self) -> String {
         let refs = self.selected_refs();
@@ -772,6 +806,15 @@ impl BibleTab {
     }
 
     /// Marks of the open chapter, resolved for painting.
+    /// Select these words of `verse` (canonical offsets) in the reader, from the first to the last,
+    /// in place of the whole verse.
+    pub fn select_found(&mut self, verse: u16, words: &[(usize, usize)]) {
+        let (Some(start), Some(end)) = (words.iter().map(|w| w.0).min(), words.iter().map(|w| w.1).max()) else { return };
+        self.select_request = None;
+        self.select_token += 1;
+        self.select_words = Some((self.select_token, CanonSlice { verse, start, end }));
+    }
+
     pub fn mark_draws(&self, sh: &Shared) -> Vec<MarkDraw> {
         let mut out = Vec::new();
         for (index, slices) in self.visible_marks(sh) {
@@ -837,7 +880,7 @@ impl BibleTab {
     }
 
     /// Mark the selected text with pen `pen`, and open the mark's card to write a note in, as
-    /// "Comment" does.
+    /// "Add Note" does.
     pub fn apply_pen(&mut self, sh: &mut Shared, pen: usize) -> Task<BibleMsg> {
         let Some(pen) = sh.settings.pens.get(pen).cloned() else { return Task::none() };
         self.stop_edit(sh);
@@ -1020,6 +1063,30 @@ impl BibleTab {
                 let kept = sh.marks.get(i).map(|mark| mark.unlinked_note().0);
                 self.unlink_mark(sh, i);
                 request = kept.map(Request::OpenNote);
+                Task::none()
+            }
+            BibleMsg::SearchSelection => {
+                // The selected words (the first verse's, if it runs over several), as typed in the search box.
+                let words = self.selection_context().map(|(slices, canon)| {
+                    slices
+                        .iter()
+                        .filter_map(|s| canon.get(&s.verse).and_then(|t| t.get(s.start..s.end)))
+                        .next()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                });
+                request = words.filter(|w| !w.is_empty()).map(|w| Request::Search(if w.contains(' ') { format!("\"{w}\"") } else { w }));
+                Task::none()
+            }
+            BibleMsg::OpenCommentary => {
+                self.menu_open = false;
+                let verse = self.selection_span().and_then(|r| r.verses).map(|(a, _)| a);
+                request = Some(Request::OpenCommentary(self.book, self.chapter_no, verse));
+                Task::none()
+            }
+            BibleMsg::OpenBacklinks => {
+                request = self.selection_span().map(Request::OpenBacklinks);
                 Task::none()
             }
             BibleMsg::OpenMarkInWriter(i) => {
@@ -1261,7 +1328,7 @@ impl BibleTab {
                 .height(Length::Fill);
             (dismiss(BibleMsg::CloseHistory), panel.into())
         } else if self.menu_open {
-            let panel = container(iced::widget::opaque(self.menu_panel()))
+            let panel = container(iced::widget::opaque(self.menu_panel(sh)))
                 .padding(iced::Padding { top: 8.0 + 31.0 + 3.0, right: 16.0, bottom: 0.0, left: 0.0 })
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -1285,7 +1352,7 @@ impl BibleTab {
     }
 
     /// What the reader shows: each kind of thing in the text, on or off.
-    fn menu_panel(&self) -> Element<'_, BibleMsg> {
+    fn menu_panel(&self, sh: &Shared) -> Element<'_, BibleMsg> {
         let item = |label: &'static str, on: bool, msg: fn(bool) -> BibleMsg| {
             checkbox(on).label(label).on_toggle(msg).size(16).text_size(14)
         };
@@ -1295,6 +1362,7 @@ impl BibleTab {
                 item("Marks", self.show_marks, BibleMsg::ToggleMarks),
                 item("Footnotes", self.show_footnotes, BibleMsg::ToggleFootnotes),
                 item("References", self.show_refs, BibleMsg::ToggleRefs),
+                button(text("Commentary\u{2026}").size(14)).padding([2, 0]).style(button::text).on_press_maybe((!sh.backend.commentaries().is_empty()).then_some(BibleMsg::OpenCommentary)),
             ]
             .spacing(10),
         )
@@ -1378,6 +1446,7 @@ impl BibleTab {
     pub(crate) fn view_options(&self, sh: &Shared) -> reader::ViewOptions {
         reader::ViewOptions {
             select: self.select_request,
+            select_words: self.select_words,
             annotated: sh.annotated_verses(self.book, self.chapter_no),
             reveal: self.reveal,
             marks: self.mark_draws(sh),
@@ -1764,7 +1833,7 @@ impl BibleTab {
             let card = container(self.card_view(sh, index, true)).padding(6).width(360).style(container::rounded_box);
             return Some((FloatKind::UnderSelection, card.into()));
         }
-        self.text_selection.is_some().then(|| (FloatKind::UnderSelection, pen_toolbar(sh)))
+        self.text_selection.is_some().then(|| (FloatKind::UnderSelection, pen_toolbar(sh, self.selection_has_backlinks(sh))))
     }
 
     fn reader_pane<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {

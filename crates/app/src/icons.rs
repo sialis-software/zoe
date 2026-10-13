@@ -13,6 +13,8 @@ pub enum Icon {
     Trash,
     Pencil,
     Plus,
+    /// The notes that link to something.
+    Backlinks,
     /// The hamburger of a menu.
     Menu,
     Back,
@@ -27,6 +29,7 @@ pub enum Icon {
     PanesDown,
     ChevronDown,
     ChevronUp,
+    Search,
 }
 
 impl Icon {
@@ -37,6 +40,7 @@ impl Icon {
             Icon::Trash => include_bytes!("../assets/icons/trash.svg"),
             Icon::Pencil => include_bytes!("../assets/icons/pencil.svg"),
             Icon::Plus => include_bytes!("../assets/icons/plus.svg"),
+            Icon::Backlinks => include_bytes!("../assets/icons/backlinks.svg"),
             Icon::Menu => include_bytes!("../assets/icons/menu.svg"),
             Icon::Back => include_bytes!("../assets/icons/arrow-left.svg"),
             Icon::Forward => include_bytes!("../assets/icons/arrow-right.svg"),
@@ -46,6 +50,7 @@ impl Icon {
             Icon::PanesDown => include_bytes!("../assets/icons/pane-down.svg"),
             Icon::ChevronDown => include_bytes!("../assets/icons/chevron-down.svg"),
             Icon::ChevronUp => include_bytes!("../assets/icons/chevron-up.svg"),
+            Icon::Search => include_bytes!("../assets/icons/search.svg"),
         }
     }
 
@@ -73,12 +78,13 @@ impl Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 14] = [
+    const ALL: [Icon; 16] = [
         Icon::Link,
         Icon::Quote,
         Icon::Trash,
         Icon::Pencil,
         Icon::Plus,
+        Icon::Backlinks,
         Icon::Menu,
         Icon::Back,
         Icon::Forward,
@@ -88,6 +94,7 @@ mod tests {
         Icon::PanesDown,
         Icon::ChevronDown,
         Icon::ChevronUp,
+        Icon::Search,
     ];
 
     #[test]

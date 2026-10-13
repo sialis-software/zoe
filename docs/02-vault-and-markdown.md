@@ -56,7 +56,7 @@ query them.
 | Key | Used by | Meaning |
 |---|---|---|
 | `type` | all | `margin`, `plan`, `book`, `commentary`; absent = ordinary document |
-| `title` | documents | display title; falls back to first heading, then filename |
+| `title` | documents | not written by the app: a note's title is its file name and its first heading. A `title:` already in a note is kept as it is (and followed when the note is renamed) |
 | `tags` | all | list of topics (see §4) |
 | `created` | all | ISO-8601 timestamp |
 | `aliases` | documents | alternative names for link resolution |

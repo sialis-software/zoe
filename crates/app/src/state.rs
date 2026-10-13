@@ -8,7 +8,7 @@
 use iced::{Font, Theme};
 use serde::{Deserialize, Serialize};
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::{fs, io};
 
@@ -62,18 +62,22 @@ impl PenDef {
     }
 }
 
-/// The colors a pen can be.
-pub const PEN_COLORS: [&str; 8] = ["#F5D90A", "#4DA3FF", "#5FD38D", "#FF7AB6", "#FF9F43", "#B388FF", "#2EC4B6", "#FF6B6B"];
+/// The color a pen has when none valid is given: the medium yellow.
+pub const DEFAULT_PEN_COLOR: usize = 10;
 
-/// The pens a new vault starts with.
+/// The colors a pen can be: three rows of eight, light, medium and deep, each in hue order.
+pub const PEN_COLORS: [&str; 24] = [
+    // Light, in hue order: red, orange, yellow, green, teal, blue, purple, pink.
+    "#FF9E9E", "#FFC285", "#FFF176", "#A5E6A0", "#8FE6DC", "#9CCBFF", "#D0B8FF", "#FFB3D9",
+    // Medium.
+    "#FF5252", "#FF9F43", "#F5D90A", "#5FD38D", "#2EC4B6", "#4DA3FF", "#B388FF", "#FF7AB6",
+    // Deep.
+    "#C62828", "#E65100", "#C9A800", "#2E9E5B", "#00897B", "#1E6FD9", "#7C4DFF", "#D81B7A",
+];
+
+/// A new vault starts with no pens: they are the person's own.
 pub fn default_pens() -> Vec<PenDef> {
-    let pen = |tag: &str, color: &str, style| PenDef { tag: tag.into(), color: color.into(), style };
-    vec![
-        pen("promise", "#F5D90A", PenStyle::Highlight),
-        pen("command", "#4DA3FF", PenStyle::Underline),
-        pen("growth", "#5FD38D", PenStyle::Highlight),
-        pen("prayer", "#FF7AB6", PenStyle::Highlight),
-    ]
+    Vec::new()
 }
 
 impl Default for Settings {
@@ -95,7 +99,7 @@ impl Settings {
             pen.tag = study_core::frontmatter::normalize_tag(&pen.tag);
             let color_ok = pen.color.len() == 7 && pen.color.starts_with('#') && pen.color[1..].chars().all(|c| c.is_ascii_hexdigit());
             if !color_ok {
-                pen.color = PEN_COLORS[0].to_string();
+                pen.color = PEN_COLORS[DEFAULT_PEN_COLOR].to_string();
             }
             let fresh = !pen.tag.is_empty() && !seen.contains(&pen.tag);
             seen.push(pen.tag.clone());
@@ -200,6 +204,13 @@ pub enum TabSave {
     },
     Note { path: String },
     Dict { module: String, key: String },
+    Commentary { module: String, book: String, chapter: u16 },
+    /// A Bible search: the words typed and how they match.
+    Search { module: String, query: String, case: bool, stem: bool, best: bool },
+    /// The notes that link to a passage (as OSIS, `John.3.16`).
+    Backlinks { passage: String },
+    /// The notes that link to a note.
+    NoteBacklinks { path: String },
 }
 
 /// Which kinds of note sit in a reader's margin (the rest pop over the text where clicked).
@@ -222,6 +233,34 @@ impl Default for MarginKinds {
 pub struct NamedLayout {
     pub name: String,
     pub workspace: Workspace,
+}
+
+/// The one choice kept outside the vault and the state folder, since it says where they are: the
+/// vault in use. A file in the data folder.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub vault: Option<PathBuf>,
+    /// Folders of SWORD modules the person added, searched before the usual places.
+    #[serde(default)]
+    pub module_folders: Vec<PathBuf>,
+}
+
+impl Config {
+    const FILE: &'static str = "config.json";
+
+    pub fn load(home: &Path) -> Config {
+        fs::read_to_string(home.join(Self::FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self, home: &Path) -> io::Result<()> {
+        fs::create_dir_all(home)?;
+        let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        let path = home.join(Self::FILE);
+        let temp = path.with_extension("json.tmp");
+        fs::write(&temp, text)?;
+        fs::rename(&temp, &path)
+    }
 }
 
 // ---- the files -----------------------------------------------------------------------------

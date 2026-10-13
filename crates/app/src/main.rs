@@ -3,13 +3,18 @@
 //! `Shared` notes, marks and backend. This file lays the tabs out in panes and carries out
 //! what one tab asks of another (a note's link shows a verse in a Bible tab).
 
+mod backlinks_tab;
+mod bible_search;
 mod bible_tab;
+mod commentary_tab;
 mod dict_tab;
 mod drag;
 mod fonts;
 mod history;
 mod icons;
 mod live;
+mod module_folders;
+mod link_area;
 mod live_editor;
 mod native;
 mod note_tab;
@@ -20,12 +25,16 @@ mod persist;
 mod reader;
 mod reader_cards;
 mod reader_text;
+mod search_tab;
 mod shared;
 mod split;
 mod state;
+mod vault_setup;
 mod workspace;
 
+use backlinks_tab::{BacklinksMsg, BacklinksTab, Target};
 use bible_tab::{BibleMsg, BibleTab};
+use commentary_tab::{CommentaryMsg, CommentaryTab};
 use dict_tab::{DictMsg, DictTab};
 use drag::{Drag, Over, Payload, Pressed, Zone};
 use iced::widget::operation::{RelativeOffset, snap_to};
@@ -33,6 +42,7 @@ use iced::widget::{button, column, container, pick_list, row, rule, space, stack
 use iced::{Element, Length, Task, Theme};
 use note_tab::{NoteMsg, NoteTab};
 use opening::{Dest, Spec};
+use search_tab::{SearchMsg, SearchTab};
 use panes::{Node, PaneId, SplitId};
 use persist::Persist;
 use shared::{Event, Shared, TabId};
@@ -60,6 +70,12 @@ enum Tab {
     Bible(Box<BibleTab>),
     Note(Box<NoteTab>),
     Dict(Box<DictTab>),
+    /// A search of the words of a Bible.
+    Search(Box<SearchTab>),
+    /// A commentary's notes on a chapter.
+    Commentary(Box<CommentaryTab>),
+    /// The notes that link to a passage.
+    Backlinks(Box<BacklinksTab>),
 }
 
 /// A column of tabs, one of them showing.
@@ -67,6 +83,77 @@ struct Pane {
     id: PaneId,
     tabs: Vec<TabId>,
     active: Option<TabId>,
+}
+
+/// A page of the settings window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettingsTab {
+    Appearance,
+    Pens,
+    Vault,
+    Modules,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 4] = [SettingsTab::Appearance, SettingsTab::Pens, SettingsTab::Vault, SettingsTab::Modules];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsTab::Appearance => "Appearance",
+            SettingsTab::Pens => "Pens",
+            SettingsTab::Vault => "Vault",
+            SettingsTab::Modules => "Modules",
+        }
+    }
+}
+
+/// A group of settings: a heading over a panel a shade off the page.
+fn section<'a>(title: &'static str, content: Element<'a, Message>) -> Element<'a, Message> {
+    column![
+        text(title).size(15),
+        container(content).padding(14).width(Length::Fill).style(|theme: &Theme| {
+            let p = theme.extended_palette();
+            container::Style {
+                background: Some(p.background.weak.color.into()),
+                border: iced::Border { color: iced::Color { a: 0.5, ..p.background.strong.color }, width: 1.0, radius: 8.0.into() },
+                ..container::Style::default()
+            }
+        }),
+    ]
+    .spacing(8)
+    .into()
+}
+
+/// The colors a pen can be, as a grid of dots with `chosen` ringed; `on` makes the message for the
+/// one pressed (its place in `state::PEN_COLORS`).
+fn color_grid<'a, M: Clone + 'a>(chosen: usize, on: impl Fn(usize) -> M) -> Element<'a, M> {
+    let mut grid = column![].spacing(6);
+    for (r, line) in state::PEN_COLORS.chunks(8).enumerate() {
+        let mut cells = row![].spacing(6);
+        for (c, hex) in line.iter().enumerate() {
+            let i = r * 8 + c;
+            let color = bible_tab::hex_color(hex, 1.0).unwrap_or(iced::Color::WHITE);
+            let ringed = i == chosen % state::PEN_COLORS.len().max(1) && chosen != usize::MAX;
+            cells = cells.push(
+                button(space::horizontal())
+                    .width(22)
+                    .height(22)
+                    .padding(0)
+                    .style(move |theme: &Theme, _| button::Style {
+                        background: Some(color.into()),
+                        border: iced::Border {
+                            radius: 11.0.into(),
+                            color: if ringed { theme.extended_palette().background.base.text } else { iced::Color { a: 0.3, ..iced::Color::WHITE } },
+                            width: if ringed { 2.5 } else { 1.0 },
+                        },
+                        ..button::Style::default()
+                    })
+                    .on_press(on(i)),
+            );
+        }
+        grid = grid.push(cells);
+    }
+    grid.into()
 }
 
 /// Pop-ups float over panes that are themselves panel-colored, so they get the page's own
@@ -82,22 +169,15 @@ fn popup_style(theme: &Theme) -> container::Style {
     }
 }
 
-/// What a blank tab can become.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What a blank tab can become: a kind of tab. Which Bible, dictionary or note it shows is
+/// chosen in the tab afterwards, with its own controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Choice {
-    Bible(ModuleId, String),
-    Note(String),
-    Dict(ModuleId, String),
-}
-
-impl fmt::Display for Choice {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Choice::Bible(_, abbreviation) => write!(f, "Bible · {abbreviation}"),
-            Choice::Note(path) => write!(f, "Note · {}", path.trim_end_matches(".md")),
-            Choice::Dict(_, abbreviation) => write!(f, "Dictionary · {abbreviation}"),
-        }
-    }
+    Bible,
+    Dict,
+    Commentary,
+    Search,
+    Note,
 }
 
 struct App {
@@ -133,9 +213,20 @@ struct App {
     /// The tag typed for a new pen, and the color it will have (an index into `state::PEN_COLORS`).
     pen_draft: String,
     pen_color: usize,
+    /// The pen whose colors are showing in the settings.
+    pen_editing: Option<usize>,
+    settings_tab: SettingsTab,
     /// What is typed in the box that names a layout to save, and whether that box is showing.
     layout_draft: String,
     naming: bool,
+    /// The data folder, when there is one: the vault choice, settings and session are kept in it.
+    home: Option<std::path::PathBuf>,
+    /// Set while there is no vault: the welcome page covers the window.
+    onboarding: Option<live::Onboarding>,
+    /// No SWORD module was found at start-up: sample text stands in, and no session is kept.
+    no_modules: bool,
+    /// The card that confirms a folder for a vault, while it is open.
+    setup: Option<vault_setup::Setup>,
     /// The font families to choose from, listed when the settings panel opens.
     families: Vec<String>,
     /// The workspace as last written as the session, and one changed since that is waiting for
@@ -182,6 +273,11 @@ enum Message {
     Bible(TabId, BibleMsg),
     Note(TabId, NoteMsg),
     Dict(TabId, DictMsg),
+    Backlinks(TabId, BacklinksMsg),
+    Commentary(TabId, CommentaryMsg),
+    Search(TabId, SearchMsg),
+    /// Open a search tab (or bring the one there is forward), ready to type in.
+    OpenSearch,
     CloseTab(TabId),
     /// A new blank tab at the end of a pane.
     NewTab(PaneId),
@@ -196,16 +292,25 @@ enum Message {
     SetNotesSize(f32),
     SetFont(FontChoice),
     ResetSettings,
+    /// Which page of the settings window shows.
+    SettingsTab(SettingsTab),
     /// The pens (tag shortcuts): the one being named, and changes to them.
     PenDraft(String),
     AddPen,
     RemovePen(usize),
-    CyclePenColor(usize),
+    /// Open (or put away) the colors to choose from for a pen.
+    EditPenColor(usize),
+    /// A pen's new color, by its place in `state::PEN_COLORS`.
+    SetPenColor(usize, usize),
     CyclePenStyle(usize),
-    CycleDraftColor,
+    SetDraftColor(usize),
     TogglePanel(Panel),
     /// Show the settings window (or bring it forward).
     OpenSettings,
+    Vault(vault_setup::VaultMsg),
+    Modules(module_folders::ModulesMsg),
+    /// Escape: put away the card that is open.
+    EscapeCard,
     /// Ask for a name to save the workspace as a layout under.
     NameLayout,
     CancelNaming,
@@ -256,7 +361,10 @@ impl App {
         // Marks are files like any other note; the writer can open and edit them.
         notes.extend(backend.mark_files());
         notes.extend(study_core::templates::builtin());
-        App::build(Box::new(backend), notes, None)
+        let mut app = App::build(Box::new(backend), notes, None);
+        // A vault starts with no pens; the tests use some.
+        app.sh.settings.pens = tests::test_pens();
+        app
     }
 
     /// Real SWORD modules and the vault on disk, seeded on first run.
@@ -264,6 +372,10 @@ impl App {
         let boot = live::boot();
         let mut app = App::build(boot.backend, boot.notes, boot.persist);
         app.sh.status = boot.status;
+        app.sh.vault = boot.vault;
+        app.onboarding = boot.onboarding;
+        app.no_modules = boot.no_modules;
+        app.home = boot.home.clone();
         let (main, open) = iced::window::open(iced::window::Settings {
             size: iced::Size::new(1280.0, 800.0),
             // Closing saves the session first (see `Message::CloseRequested`).
@@ -276,7 +388,10 @@ impl App {
             let store = Store::new(home.join("state"));
             let session = store.session();
             app.sh.attach(store);
+            app.sh.cache_dir = Some(home.join("cache"));
+            app.sh.load_pens(true);
             // Pick up where the last run left off.
+            let session = session.filter(|_| app.onboarding.is_none() && !app.no_modules);
             if let Some(Ok(restored)) = session.map(|s| app.apply_workspace(&s)) {
                 task = Task::batch([task, restored]);
             }
@@ -309,9 +424,15 @@ impl App {
             settings_window: None,
             panel: None,
             pen_draft: String::new(),
-            pen_color: 0,
+            pen_color: state::DEFAULT_PEN_COLOR,
+            pen_editing: None,
+            settings_tab: SettingsTab::Appearance,
             layout_draft: String::new(),
             naming: false,
+            home: None,
+            onboarding: None,
+            no_modules: false,
+            setup: None,
             families: Vec::new(),
             saved: None,
             unsaved: None,
@@ -369,6 +490,9 @@ impl App {
             Tab::Bible(t) => t.id,
             Tab::Note(t) => t.id,
             Tab::Dict(t) => t.id,
+            Tab::Commentary(t) => t.id,
+            Tab::Search(t) => t.id,
+            Tab::Backlinks(t) => t.id,
         }
     }
 
@@ -383,7 +507,7 @@ impl App {
             Tab::Bible(_) => self.last_bible = Some(id),
             Tab::Note(_) => self.last_note = Some(id),
             Tab::Dict(_) => self.last_dict = Some(id),
-            Tab::Blank(_) => {}
+            Tab::Blank(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) => {}
         }
         self.tabs.insert(id, tab);
         let pane = pane.min(self.panes.len() - 1);
@@ -487,6 +611,89 @@ impl App {
         }
     }
 
+    /// Show the backlinks of `target`, asked for from tab `from`: in the tab that shows
+    /// backlinks already, else in a new tab in another pane.
+    fn show_backlinks(&mut self, from: TabId, target: Target) {
+        let existing = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Backlinks(_)).then_some(*id));
+        if let Some(id) = existing {
+            if let Some(Tab::Backlinks(tab)) = self.tabs.get_mut(&id) {
+                tab.target = target;
+            }
+            self.activate(id);
+            return;
+        }
+        let from_pane = self.pane_of(from).unwrap_or(self.panes.len() - 1);
+        let pane = self.target_pane(from_pane, Dest::OtherPane);
+        let id = self.take_id();
+        let tab = Tab::Backlinks(Box::new(BacklinksTab::new(id, target)));
+        let id = self.add_tab(pane, tab);
+        self.activate(id);
+    }
+
+    /// The Bible a search looks in to begin with: the one being read, else the first.
+    fn search_module(&self) -> Option<ModuleId> {
+        self.reference_bible_id()
+            .and_then(|b| self.bible_tab(b))
+            .map(|t| t.module.clone())
+            .or_else(|| self.sh.backend.modules().first().map(|m| m.id.clone()))
+    }
+
+    /// Bring the search tab forward (making one beside the reader if there is none), and, given
+    /// words, search for them.
+    fn show_search(&mut self, words: Option<String>) -> Task<Message> {
+        let existing = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Search(_)).then_some(*id));
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let Some(module) = self.search_module() else { return Task::none() };
+                let from = self.reference_bible_id().unwrap_or(0);
+                let from_pane = self.pane_of(from).unwrap_or(self.panes.len() - 1);
+                let pane = self.target_pane(from_pane, Dest::OtherPane);
+                let id = self.take_id();
+                self.add_tab(pane, Tab::Search(Box::new(SearchTab::new(id, module))))
+            }
+        };
+        self.activate(id);
+        let Some(Tab::Search(tab)) = self.tabs.get_mut(&id) else { return Task::none() };
+        let input = iced::widget::operation::focus(tab.input_id());
+        match words {
+            Some(words) => tab.search_for(&self.sh, &words).map(move |m| Message::Search(id, m)),
+            None => input,
+        }
+    }
+
+    /// Where the Bible tab others work with is reading: its chapter, and its selected verse.
+    fn reference_place(&self) -> (scripture::Book, u16, Option<u16>) {
+        match self.reference_bible_id().and_then(|b| self.bible_tab(b)) {
+            Some(t) => (t.book, t.chapter_no, None),
+            None => (scripture::Book::GENESIS, 1, None),
+        }
+    }
+
+    /// Show a commentary on a chapter, asked for from tab `from`: in the commentary tab there
+    /// already is, else in a new one in another pane.
+    fn show_commentary(&mut self, from: TabId, book: scripture::Book, chapter: u16, verse: Option<u16>) -> Task<Message> {
+        let Some(module) = self.sh.backend.commentaries().first().map(|c| c.id.clone()) else {
+            self.sh.status = "No commentaries are installed".into();
+            return Task::none();
+        };
+        let existing = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Commentary(_)).then_some(*id));
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let from_pane = self.pane_of(from).unwrap_or(self.panes.len() - 1);
+                let pane = self.target_pane(from_pane, Dest::OtherPane);
+                let id = self.take_id();
+                let tab = CommentaryTab::new(id, &self.sh, module, book, chapter, verse);
+                self.add_tab(pane, Tab::Commentary(Box::new(tab)))
+            }
+        };
+        self.activate(id);
+        let Some(Tab::Commentary(tab)) = self.tabs.get_mut(&id) else { return Task::none() };
+        tab.show(&self.sh, book, chapter, verse);
+        Task::none()
+    }
+
     /// Show a note in a note tab: the one already holding it, else the one last used (which
     /// follows the link), else a new one in the last pane.
     fn show_note(&mut self, path: String) {
@@ -526,27 +733,34 @@ impl App {
         self.add_tab(0, tab)
     }
 
-    /// What a blank tab can turn into: each Bible module, each note.
-    fn choices(&self) -> Vec<Choice> {
-        let modules = self.sh.backend.modules().into_iter().map(|m| Choice::Bible(m.id, m.abbreviation));
-        let notes = self.sh.notes.keys().filter(|p| !p.starts_with("margins/") && !study_core::templates::is_template(p)).cloned().map(Choice::Note);
-        let dictionaries = self.sh.backend.dictionaries().into_iter().map(|d| Choice::Dict(d.id, d.abbreviation));
-        modules.chain(dictionaries).chain(notes).collect()
-    }
-
     /// Turn blank tab `id` into what was chosen, keeping its place in its pane.
     fn open_choice(&mut self, id: TabId, choice: Choice) {
         if !matches!(self.tabs.get(&id), Some(Tab::Blank(_))) {
             return;
         }
         let tab = match choice {
-            Choice::Bible(module, _) => {
+            // The module the other Bible tab is reading, else the first; and the first dictionary
+            // and note: the tab has its own pickers for the rest.
+            Choice::Bible => {
                 let near = self.reference_bible_id();
+                let module = near.and_then(|n| self.bible_tab(n)).map_or_else(|| self.first_module(), |t| t.module.clone());
                 let tab = BibleTab::started(id, &self.sh, module, near.and_then(|n| self.bible_tab(n)));
                 Tab::Bible(Box::new(tab))
             }
-            Choice::Note(path) => Tab::Note(Box::new(NoteTab::new(id, &self.sh, path))),
-            Choice::Dict(module, _) => Tab::Dict(Box::new(DictTab::new(id, &self.sh, module, ""))),
+            Choice::Note => Tab::Note(Box::new(NoteTab::new(id, &self.sh, self.sh.first_ordinary_note()))),
+            Choice::Commentary => {
+                let Some(module) = self.sh.backend.commentaries().first().map(|c| c.id.clone()) else { return };
+                let (book, chapter, verse) = self.reference_place();
+                Tab::Commentary(Box::new(CommentaryTab::new(id, &self.sh, module, book, chapter, verse)))
+            }
+            Choice::Search => {
+                let Some(module) = self.search_module() else { return };
+                Tab::Search(Box::new(SearchTab::new(id, module)))
+            }
+            Choice::Dict => {
+                let Some(module) = self.sh.backend.dictionaries().first().map(|d| d.id.clone()) else { return };
+                Tab::Dict(Box::new(DictTab::new(id, &self.sh, module, "")))
+            }
         };
         self.tabs.insert(id, tab);
         self.activate(id);
@@ -578,6 +792,10 @@ impl App {
     /// Write the workspace, if it changed since it was last written.
     fn save_session(&mut self) {
         let Some(now) = self.unsaved.take() else { return };
+        // The tabs of a window with no vault are not a session worth keeping.
+        if self.onboarding.is_some() || self.no_modules {
+            return;
+        }
         let Some(store) = &self.sh.store else { return };
         match store.save_session(&now) {
             Ok(()) => self.saved = Some(now),
@@ -638,7 +856,7 @@ impl App {
                     t.margin_menu_open = false;
                     t.history_open = false;
                 }
-                Tab::Blank(_) | Tab::Dict(_) => {}
+                Tab::Blank(_) | Tab::Dict(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) => {}
             }
         }
         match message {
@@ -693,6 +911,9 @@ impl App {
                         }
                     }
                     Some(bible_tab::Request::OpenNote(path)) => self.show_note(path),
+                    Some(bible_tab::Request::OpenBacklinks(passage)) => self.show_backlinks(id, Target::Passage(passage)),
+                    Some(bible_tab::Request::Search(words)) => return Task::batch([task, self.show_search(Some(words))]),
+                    Some(bible_tab::Request::OpenCommentary(book, chapter, verse)) => return Task::batch([task, self.show_commentary(id, book, chapter, verse)]),
                     None => {}
                 }
                 task
@@ -716,11 +937,72 @@ impl App {
                         self.start_drag(Payload::Link(spec), at);
                         task
                     }
+                    Some(note_tab::Request::Backlinks(path)) => {
+                        self.show_backlinks(id, Target::Note(path));
+                        task
+                    }
                     None => task,
                 }
             }
+            Message::Search(id, msg) => {
+                self.touch(id);
+                // A verse chosen is shown in the reader, with the words that matched pointed out.
+                if let SearchMsg::Open(range, module, words) = msg {
+                    let dest = Dest::from_modifiers(self.modifiers);
+                    let task = self.open_verse(id, range, dest);
+                    let shown = self.last_bible.and_then(|b| self.tabs.get_mut(&b));
+                    if let (Some(Tab::Bible(tab)), Some((verse, _))) = (shown, range.verses)
+                        && tab.module == module
+                        && (tab.book, tab.chapter_no) == (range.book, range.chapter)
+                    {
+                        tab.select_found(verse, &words);
+                    }
+                    return task;
+                }
+                match self.tabs.get_mut(&id) {
+                    Some(Tab::Search(tab)) => tab.update(&mut self.sh, msg).map(move |m| Message::Search(id, m)),
+                    _ => Task::none(),
+                }
+            }
+            Message::OpenSearch => self.show_search(None),
+            Message::Commentary(id, msg) => {
+                self.touch(id);
+                // A link in the notes shows its verse in the reader.
+                if let CommentaryMsg::Link(study_core::markdown::LinkTarget::Verse { range, .. }) = &msg {
+                    let dest = Dest::from_modifiers(self.modifiers);
+                    return self.open_verse(id, *range, dest);
+                }
+                if let Some(Tab::Commentary(tab)) = self.tabs.get_mut(&id) {
+                    tab.update(&mut self.sh, msg);
+                }
+                Task::none()
+            }
+            Message::Backlinks(id, msg) => {
+                self.touch(id);
+                let picked = match self.tabs.get_mut(&id) {
+                    Some(Tab::Backlinks(tab)) => tab.update(msg),
+                    _ => None,
+                };
+                if let Some(path) = picked {
+                    self.show_note(path);
+                }
+                Task::none()
+            }
             Message::Dict(id, msg) => {
                 self.touch(id);
+                if let DictMsg::OpenVerse(range, module, words) = msg {
+                    let dest = Dest::from_modifiers(self.modifiers);
+                    let task = self.open_verse(id, range, dest);
+                    // The verse is shown with the words selected, not the whole verse.
+                    let shown = self.last_bible.and_then(|b| self.tabs.get_mut(&b));
+                    if let (Some(Tab::Bible(tab)), Some((verse, _))) = (shown, range.verses)
+                        && tab.module == module
+                        && (tab.book, tab.chapter_no) == (range.book, range.chapter)
+                    {
+                        tab.select_found(verse, &words);
+                    }
+                    return task;
+                }
                 if let Some(Tab::Dict(tab)) = self.tabs.get_mut(&id) {
                     tab.update(&mut self.sh, msg);
                 }
@@ -810,7 +1092,16 @@ impl App {
             Message::SetBibleSize(size) => self.change_settings(|s| s.bible_size = size.round()),
             Message::SetNotesSize(size) => self.change_settings(|s| s.notes_size = size.round()),
             Message::SetFont(FontChoice(font)) => self.change_settings(|s| s.font = font),
-            Message::ResetSettings => self.change_settings(|s| *s = Settings::default()),
+            // The look of the app only: the pens are the vault's own and are kept.
+            Message::ResetSettings => self.change_settings(|s| {
+                let pens = std::mem::take(&mut s.pens);
+                *s = Settings { pens, ..Settings::default() };
+            }),
+            Message::SettingsTab(tab) => {
+                self.settings_tab = tab;
+                self.pen_editing = None;
+                Task::none()
+            }
             Message::PenDraft(text) => {
                 self.pen_draft = text;
                 Task::none()
@@ -822,7 +1113,6 @@ impl App {
                 }
                 let color = state::PEN_COLORS[self.pen_color % state::PEN_COLORS.len()].to_string();
                 self.pen_draft.clear();
-                self.pen_color = (self.pen_color + 1) % state::PEN_COLORS.len();
                 self.change_settings(|s| {
                     // A pen for a tag there already is one for changes that pen's color instead.
                     match s.pens.iter_mut().find(|p| p.tag == tag) {
@@ -831,17 +1121,26 @@ impl App {
                     }
                 })
             }
-            Message::RemovePen(i) => self.change_settings(|s| {
-                if i < s.pens.len() {
-                    s.pens.remove(i);
-                }
-            }),
-            Message::CyclePenColor(i) => self.change_settings(|s| {
-                if let Some(pen) = s.pens.get_mut(i) {
-                    let at = state::PEN_COLORS.iter().position(|c| c.eq_ignore_ascii_case(&pen.color)).map_or(0, |n| n + 1);
-                    pen.color = state::PEN_COLORS[at % state::PEN_COLORS.len()].to_string();
-                }
-            }),
+            Message::RemovePen(i) => {
+                self.pen_editing = None;
+                self.change_settings(move |s| {
+                    if i < s.pens.len() {
+                        s.pens.remove(i);
+                    }
+                })
+            }
+            Message::EditPenColor(i) => {
+                self.pen_editing = if self.pen_editing == Some(i) { None } else { Some(i) };
+                Task::none()
+            }
+            Message::SetPenColor(i, color) => {
+                self.pen_editing = None;
+                self.change_settings(|s| {
+                    if let (Some(pen), Some(color)) = (s.pens.get_mut(i), state::PEN_COLORS.get(color)) {
+                        pen.color = color.to_string();
+                    }
+                })
+            }
             Message::CyclePenStyle(i) => self.change_settings(|s| {
                 if let Some(pen) = s.pens.get_mut(i) {
                     pen.style = match pen.style {
@@ -850,8 +1149,8 @@ impl App {
                     };
                 }
             }),
-            Message::CycleDraftColor => {
-                self.pen_color = (self.pen_color + 1) % state::PEN_COLORS.len();
+            Message::SetDraftColor(i) => {
+                self.pen_color = i % state::PEN_COLORS.len();
                 Task::none()
             }
             Message::TogglePanel(panel) => {
@@ -868,7 +1167,7 @@ impl App {
                 // A fixed-size accessory of the workspace window: it cannot be zoomed, full
                 // screened or minimized by itself (see `native::attach` for the rest).
                 let (id, open) = iced::window::open(iced::window::Settings {
-                    size: iced::Size::new(380.0, 600.0),
+                    size: iced::Size::new(520.0, 600.0),
                     resizable: false,
                     minimizable: false,
                     exit_on_close_request: false,
@@ -877,6 +1176,17 @@ impl App {
                 self.settings_window = Some(id);
                 let main = self.main;
                 open.then(move |_| native::attach(main, id)).discard()
+            }
+            Message::Vault(message) => self.vault_message(message),
+            Message::Modules(message) => self.modules_message(message),
+            Message::EscapeCard => {
+                if self.setup.is_some() {
+                    self.setup = None;
+                } else {
+                    self.naming = false;
+                    self.layout_draft.clear();
+                }
+                Task::none()
             }
             Message::NameLayout => {
                 self.panel = None;
@@ -1164,6 +1474,17 @@ impl App {
     }
 
     /// Follow a link from tab `from`, as `dest` says.
+    /// The Bible whose verses a Strong's entry lists: the one last read if it has Strong's numbers,
+    /// else the first that does.
+    fn strongs_module(&self) -> Option<ModuleId> {
+        let modules = self.sh.backend.modules();
+        let last = self.last_bible.and_then(|id| match self.tabs.get(&id) {
+            Some(Tab::Bible(t)) => Some(t.module.clone()),
+            _ => None,
+        });
+        last.filter(|m| modules.iter().any(|i| i.id == *m && i.has_strongs)).or_else(|| modules.into_iter().find(|m| m.has_strongs).map(|m| m.id))
+    }
+
     fn open_spec(&mut self, from: TabId, spec: Spec, dest: Dest) -> Task<Message> {
         match spec {
             Spec::Verse { range, .. } => self.open_verse(from, range, dest),
@@ -1245,7 +1566,15 @@ impl App {
             self.activate(natural);
             return self.show_verse_in(natural, range);
         }
-        let from_pane = self.pane_of(natural).unwrap_or(0);
+        // A new tab goes beside the Bible tab the link belongs with. "Other pane" and "new pane" are
+        // relative to where the link is (a note's, say), which is not that tab's pane when the Bible
+        // tab is the other pane already.
+        let belongs = self.pane_of(natural);
+        let from_pane = match dest {
+            Dest::NewTab => belongs,
+            _ => self.pane_of(from).or(belongs),
+        }
+        .unwrap_or(0);
         let pane = self.target_pane(from_pane, dest);
         // The other pane's own Bible tab is used if it is showing one.
         let reusable = (dest == Dest::OtherPane)
@@ -1366,7 +1695,7 @@ impl App {
 
     fn window_view(&self, window: iced::window::Id) -> Element<'_, Message> {
         if Some(window) == self.settings_window {
-            iced::widget::scrollable(container(self.settings_panel()).padding(18).width(Length::Fill)).height(Length::Fill).into()
+            self.settings_panel()
         } else {
             self.view()
         }
@@ -1384,6 +1713,7 @@ impl App {
                     iced::keyboard::Key::Character("]") => Some(Message::Navigate { back: false }),
                     // The platform's shortcut for preferences (on a Mac the menu bar item takes it).
                     iced::keyboard::Key::Character(",") => Some(Message::OpenSettings),
+                    iced::keyboard::Key::Character("f" | "F") if modifiers.shift() => Some(Message::OpenSearch),
                     _ => None,
                 }
             }
@@ -1396,12 +1726,13 @@ impl App {
             iced::window::close_requests().map(Message::CloseRequested),
             native::settings_chosen().map(|()| Message::OpenSettings),
         ];
-        if self.naming {
+        // Escape puts away whichever card is open.
+        if self.naming || self.setup.is_some() {
             all.push(iced::event::listen_with(|event, _status, _window| match event {
                 iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                     ..
-                }) => Some(Message::CancelNaming),
+                }) => Some(Message::EscapeCard),
                 _ => None,
             }));
         }
@@ -1461,6 +1792,12 @@ impl App {
         if self.naming {
             layers.push(self.name_layout_view());
         }
+        if let Some(why) = &self.onboarding {
+            layers.push(self.welcome_view(why));
+        }
+        if let Some(setup) = &self.setup {
+            layers.push(self.setup_view(setup));
+        }
         if let Some(menu) = &self.link_menu {
             layers.push(self.link_menu_view(menu));
         }
@@ -1515,33 +1852,77 @@ impl App {
             .into()
     }
 
+    /// The settings window: a strip of pages across the top, and the page chosen below.
     fn settings_panel(&self) -> Element<'_, Message> {
+        let strip = SettingsTab::ALL.iter().fold(row![].spacing(2), |strip, &tab| {
+            let on = tab == self.settings_tab;
+            strip.push(
+                button(container(text(tab.label()).size(14)).center_x(Length::Fill).padding([6, 0]))
+                    .width(Length::Fill)
+                    .padding(0)
+                    .style(move |theme: &Theme, status| {
+                        let p = theme.extended_palette();
+                        let lit = on || matches!(status, button::Status::Hovered);
+                        button::Style {
+                            background: lit.then(|| iced::Color { a: if on { 1.0 } else { 0.5 }, ..p.background.weak.color }.into()),
+                            text_color: if on { p.background.base.text } else { iced::Color { a: 0.7, ..p.background.base.text } },
+                            border: iced::Border { radius: 6.0.into(), ..iced::Border::default() },
+                            ..button::Style::default()
+                        }
+                    })
+                    .on_press(Message::SettingsTab(tab)),
+            )
+        });
+        let page = match self.settings_tab {
+            SettingsTab::Appearance => self.appearance_page(),
+            SettingsTab::Pens => section("Pens", self.pens_settings()),
+            SettingsTab::Vault => section("Vault", self.vault_settings()),
+            SettingsTab::Modules => section("Bible modules", self.modules_settings()),
+        };
+        column![
+            container(strip).padding([10, 14]),
+            rule::horizontal(1),
+            iced::widget::scrollable(container(page).padding(16).width(Length::Fill)).height(Length::Fill),
+        ]
+        .into()
+    }
+
+    fn appearance_page(&self) -> Element<'_, Message> {
         use iced::widget::slider;
         let settings = &self.sh.settings;
-        let label = |t: &'static str| text(t).size(12).style(text::secondary);
+        let label = |t: &'static str| text(t).size(13);
         let size_row = |value: f32, range: std::ops::RangeInclusive<f32>, msg: fn(f32) -> Message| {
             row![slider(range, value, msg).step(1.0), text(format!("{value:.0}")).size(13).width(26)].spacing(10).align_y(iced::Center)
         };
         let mut fonts = vec![FontChoice(None)];
         fonts.extend(self.families.iter().cloned().map(|f| FontChoice(Some(f))));
         column![
-            text("Settings").size(16),
-            column![
-                label("Color scheme"),
-                pick_list(Theme::ALL, Some(self.sh.theme()), Message::SetTheme).text_size(13).width(Length::Fill)
-            ]
-            .spacing(4),
-            column![label("Bible pane text size"), size_row(settings.bible_size, state::BIBLE_SIZES, Message::SetBibleSize)].spacing(4),
-            column![label("Notes pane text size"), size_row(settings.notes_size, state::NOTES_SIZES, Message::SetNotesSize)].spacing(4),
-            column![
-                label("Bible and note font"),
-                pick_list(fonts, Some(FontChoice(settings.font.clone())), Message::SetFont).text_size(13).width(Length::Fill)
-            ]
-            .spacing(4),
-            self.pens_settings(),
-            button(text("Reset to defaults").size(13)).padding([4, 10]).style(button::secondary).on_press(Message::ResetSettings),
+            section(
+                "Color",
+                column![
+                    label("Color scheme"),
+                    pick_list(Theme::ALL, Some(self.sh.theme()), Message::SetTheme).text_size(13).width(Length::Fill)
+                ]
+                .spacing(6)
+                .into(),
+            ),
+            section(
+                "Text",
+                column![
+                    column![label("Bible pane text size"), size_row(settings.bible_size, state::BIBLE_SIZES, Message::SetBibleSize)].spacing(6),
+                    column![label("Notes pane text size"), size_row(settings.notes_size, state::NOTES_SIZES, Message::SetNotesSize)].spacing(6),
+                    column![
+                        label("Bible and note font"),
+                        pick_list(fonts, Some(FontChoice(settings.font.clone())), Message::SetFont).text_size(13).width(Length::Fill)
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(16)
+                .into(),
+            ),
+            button(text("Reset appearance").size(13)).padding([4, 10]).style(button::secondary).on_press(Message::ResetSettings),
         ]
-        .spacing(12)
+        .spacing(16)
         .into()
     }
 
@@ -1570,7 +1951,7 @@ impl App {
             };
             list = list.push(
                 row![
-                    swatch(&pen.color, Message::CyclePenColor(i)),
+                    swatch(&pen.color, Message::EditPenColor(i)),
                     text(format!("#{}", pen.tag)).size(13).width(Length::Fill),
                     button(text(style).size(12)).padding([1, 8]).style(button::secondary).on_press(Message::CyclePenStyle(i)),
                     button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(Message::RemovePen(i)),
@@ -1578,15 +1959,20 @@ impl App {
                 .spacing(8)
                 .align_y(iced::Center),
             );
+            // Its colors, under it, with the one it has ringed.
+            if self.pen_editing == Some(i) {
+                let at = state::PEN_COLORS.iter().position(|c| c.eq_ignore_ascii_case(&pen.color)).unwrap_or(usize::MAX);
+                list = list.push(container(color_grid(at, move |color| Message::SetPenColor(i, color))).padding([4, 0]));
+            }
         }
         let draft = &self.pen_draft;
         let new_pen = row![
-            swatch(state::PEN_COLORS[self.pen_color % state::PEN_COLORS.len()], Message::CycleDraftColor),
             text_input("A tag for a new pen", draft).on_input(Message::PenDraft).on_submit(Message::AddPen).size(13).padding([3, 6]),
             button(text("Add").size(12)).padding([3, 10]).style(button::secondary).on_press_maybe((!draft.trim().is_empty()).then_some(Message::AddPen)),
         ]
         .spacing(8)
         .align_y(iced::Center);
+        let colors = color_grid(self.pen_color, Message::SetDraftColor);
         // Tags already in use that fit what is typed, to take instead of typing the rest.
         let have: Vec<String> = self.sh.settings.pens.iter().map(|p| p.tag.clone()).collect();
         let mut offered = row![].spacing(4);
@@ -1596,10 +1982,10 @@ impl App {
             );
         }
         column![
-            text("Pens").size(12).style(text::secondary),
             text("A pen marks the selected text and makes a note with its tag, in its color.").size(11).style(text::secondary),
             list,
             new_pen,
+            colors,
             offered,
         ]
         .spacing(6)
@@ -1708,7 +2094,20 @@ impl App {
             }
             Some(Tab::Dict(tab)) => {
                 let id = tab.id;
-                tab.view(&self.sh).map(move |m| Message::Dict(id, m))
+                let searched = self.strongs_module();
+                tab.view(&self.sh, searched.as_ref()).map(move |m| Message::Dict(id, m))
+            }
+            Some(Tab::Commentary(tab)) => {
+                let id = tab.id;
+                tab.view(&self.sh).map(move |m| Message::Commentary(id, m))
+            }
+            Some(Tab::Search(tab)) => {
+                let id = tab.id;
+                tab.view(&self.sh).map(move |m| Message::Search(id, m))
+            }
+            Some(Tab::Backlinks(tab)) => {
+                let id = tab.id;
+                tab.view(&self.sh).map(move |m| Message::Backlinks(id, m))
             }
             Some(Tab::Note(tab)) => {
                 let id = tab.id;
@@ -1794,6 +2193,9 @@ impl App {
                 Some(Tab::Bible(t)) => t.title(&self.sh),
                 Some(Tab::Note(t)) => t.title(&self.sh),
                 Some(Tab::Dict(t)) => t.title(&self.sh),
+                Some(Tab::Commentary(t)) => t.title(&self.sh),
+                Some(Tab::Search(t)) => t.title(&self.sh),
+                Some(Tab::Backlinks(t)) => t.title(&self.sh),
                 _ => "New tab".to_string(),
             },
             Payload::Link(spec) => spec.label(),
@@ -1848,11 +2250,48 @@ impl App {
 
     /// A new tab: choose what it becomes.
     fn blank_view(&self, id: TabId) -> Element<'_, Message> {
-        let choices = pick_list(self.choices(), None::<Choice>, move |c| Message::Open(id, c)).placeholder("Open…");
+        // What kind of tab: the Bible, a dictionary, the notes. Which one comes after.
+        let kind = |title: &'static str, about: &'static str, choice: Choice, on: bool| {
+            // The words in the page's own text color (the faint one of a secondary button is
+            // nearly the card's color), the card a shade off the page with a fine edge.
+            let faint = |theme: &Theme| text::Style { color: Some(iced::Color { a: 0.7, ..theme.extended_palette().background.base.text }) };
+            let card = button(column![text(title).size(17), text(about).size(13).style(faint)].spacing(4))
+                .width(320)
+                .padding([12, 18])
+                .style(|theme: &Theme, status| {
+                    let palette = theme.extended_palette();
+                    let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(if lit { palette.background.strong.color } else { palette.background.weak.color }.into()),
+                        text_color: palette.background.base.text,
+                        border: iced::Border {
+                            color: iced::Color { a: if lit { 0.9 } else { 0.5 }, ..palette.background.strong.color },
+                            width: 1.0,
+                            radius: 8.0.into(),
+                        },
+                        ..button::Style::default()
+                    }
+                });
+            if on { card.on_press(Message::Open(id, choice)) } else { card }
+        };
+        let has_bible = !self.sh.backend.modules().is_empty();
+        let has_dictionary = !self.sh.backend.dictionaries().is_empty();
+        let has_commentary = !self.sh.backend.commentaries().is_empty();
         container(
-            column![text("New tab").size(22), text("Open a Bible or a note here.").size(14).style(text::secondary), choices]
-                .spacing(12)
-                .align_x(iced::Center),
+            column![
+                text("New tab").size(22),
+                text("What would you like to open?").size(14).style(text::secondary),
+                column![
+                    kind("Bible", "Read a text, with its notes in the margin.", Choice::Bible, has_bible),
+                    kind("Dictionary", "Look up a Strong's number or a word.", Choice::Dict, has_dictionary),
+                    kind("Commentary", "Read a commentary alongside the text.", Choice::Commentary, has_commentary),
+                    kind("Search", "Find words in the Bible.", Choice::Search, has_bible),
+                    kind("Notes", "Write and read your notes.", Choice::Note, true),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .align_x(iced::Center),
         )
         .width(Length::Fill)
         .height(Length::Fill)
@@ -1873,6 +2312,9 @@ impl App {
                 Tab::Bible(t) => t.title(&self.sh),
                 Tab::Note(t) => t.title(&self.sh),
                 Tab::Dict(t) => t.title(&self.sh),
+                Tab::Commentary(t) => t.title(&self.sh),
+                Tab::Search(t) => t.title(&self.sh),
+                Tab::Backlinks(t) => t.title(&self.sh),
             };
             let title: String = if title.chars().count() > 24 {
                 title.chars().take(23).chain(['…']).collect()
@@ -1955,6 +2397,10 @@ mod tests {
     use scripture::{Book, RefRange};
     use study_core::margin::{self, Mark, MarkStyle, Slice};
     use study_core::markdown::LinkTarget;
+    fn text_has_heading(text: &str, heading: &str) -> bool {
+        text.contains(&format!("\n# {heading}\n"))
+    }
+
     fn template_path(name: &str) -> String {
         format!("templates/{name}.md")
     }
@@ -2205,17 +2651,14 @@ mod tests {
         fn add_bible(&mut self, pane: usize) -> TabId {
             let blank = self.new_blank();
             let id = self.add_tab(pane, blank);
-            let module = self.first_module();
-            let abbreviation = self.sh.module_abbreviation(&module);
-            let _ = self.update(Message::Open(id, Choice::Bible(module, abbreviation)));
+            let _ = self.update(Message::Open(id, Choice::Bible));
             id
         }
 
         fn add_note(&mut self, pane: usize) -> TabId {
             let blank = self.new_blank();
             let id = self.add_tab(pane, blank);
-            let path = self.sh.first_ordinary_note();
-            let _ = self.update(Message::Open(id, Choice::Note(path)));
+            let _ = self.update(Message::Open(id, Choice::Note));
             id
         }
 
@@ -2361,11 +2804,24 @@ mod tests {
         );
     }
 
+    /// The pens the tests use.
+    pub(crate) fn test_pens() -> Vec<state::PenDef> {
+        let pen = |tag: &str, color: &str, style| state::PenDef { tag: tag.into(), color: color.into(), style };
+        vec![
+            pen("promise", "#F5D90A", state::PenStyle::Highlight),
+            pen("command", "#4DA3FF", state::PenStyle::Underline),
+            pen("growth", "#5FD38D", state::PenStyle::Highlight),
+            pen("prayer", "#FF7AB6", state::PenStyle::Highlight),
+        ]
+    }
+
     /// A live app (real modules, a vault in `home`), or `None` where ASV is not installed.
     fn live_app(home: &std::path::Path) -> Option<App> {
         let boot = live::boot_at(home, &sword::default_roots(), false);
         boot.persist.as_ref()?;
-        Some(App::build(boot.backend, boot.notes, boot.persist))
+        let mut app = App::build(boot.backend, boot.notes, boot.persist);
+        app.sh.settings.pens = test_pens();
+        Some(app)
     }
 
     #[test]
@@ -2753,7 +3209,7 @@ mod tests {
         let mut h = Harness::new(App::new());
         let marks = h.app.sh.marks.len();
         h.select_some_reader_text();
-        let (x, y) = h.center_of("Comment").expect("the pen toolbar offers Comment");
+        let (x, y) = h.center_of("Add Note").expect("the pen toolbar offers Add Note");
         h.move_to(x, y);
         h.press();
         h.release();
@@ -2769,6 +3225,284 @@ mod tests {
         assert!(h.app.bible().editing.is_none());
         assert_eq!(h.app.sh.marks.len(), marks, "an empty comment is not kept");
         assert!(h.center_of("Delete").is_none(), "and the card is gone");
+    }
+
+    #[test]
+    fn a_note_view_with_no_notes_is_just_a_create_button() {
+        let mut app = App::new();
+        let ordinary: Vec<String> = app.sh.notes.keys().filter(|p| !p.starts_with("templates/")).cloned().collect();
+        for path in ordinary {
+            app.sh.notes.remove(&path);
+        }
+        let mut h = Harness::new(app);
+        assert!(h.center_of("Create note").is_some(), "the one thing to do");
+        assert!(h.center_of("Write here\u{2026}").is_none(), "no editor");
+        let (x, y) = h.center_of("Create note").unwrap();
+        h.click(x, y);
+        assert!(h.app.note().choosing, "it asks what kind of note");
+    }
+
+    #[test]
+    fn a_margin_notes_look_and_tags_are_edited_in_its_note_but_not_where_it_is() {
+        let mut app = App::new();
+        let index = app.sh.marks.iter().position(|m| !m.body.is_empty()).expect("a mark with a note");
+        let path = app.sh.marks[index].path();
+        let before = app.sh.marks[index].clone();
+        app.open_note(path.clone());
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::MarkStyle(MarkStyle::Underline)));
+        let _ = app.update(Message::Note(id, NoteMsg::MarkColors));
+        assert!(app.note().mark_colors);
+        let _ = app.update(Message::Note(id, NoteMsg::MarkColor(21)));
+        assert!(!app.note().mark_colors, "choosing closes the colors");
+        let _ = app.update(Message::Note(id, NoteMsg::TagDraft("Wisdom Words".into())));
+        let _ = app.update(Message::Note(id, NoteMsg::AddTag));
+        let mark = app.sh.marks[index].clone();
+        assert_eq!(mark.style, MarkStyle::Underline);
+        assert_eq!(mark.color, crate::state::PEN_COLORS[21]);
+        assert!(mark.tags.contains(&"wisdom-words".to_string()));
+        assert_eq!((&mark.anchor, &mark.quote, &mark.prefix, &mark.suffix, &mark.module, &mark.body), (&before.anchor, &before.quote, &before.prefix, &before.suffix, &before.module, &before.body));
+        // The file and the open note agree.
+        let file = app.sh.notes.get(&mark.path()).unwrap();
+        assert!(file.contains("style: underline") && file.contains(crate::state::PEN_COLORS[21]) && file.contains("wisdom-words"));
+        assert_eq!(app.note().doc.source(), file.as_str());
+        let _ = app.update(Message::Note(id, NoteMsg::RemoveTag("wisdom-words".into())));
+        assert!(!app.sh.marks[index].tags.contains(&"wisdom-words".to_string()));
+    }
+
+    #[test]
+    fn a_bare_highlight_changed_in_its_note_is_refiled_and_the_note_follows() {
+        let mut app = App::new();
+        let index = app.sh.marks.iter().position(|m| m.body.is_empty() && m.style == MarkStyle::Highlight).expect("a bare highlight");
+        let old = app.sh.marks[index].path();
+        app.open_note(old.clone());
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::MarkStyle(MarkStyle::Underline)));
+        let new = app.sh.marks[index].path();
+        assert_ne!(old, new);
+        assert!(!app.sh.notes.contains_key(&old) && app.sh.notes.contains_key(&new));
+        assert_eq!(app.note().path, new, "the tab shows the file under its new name");
+    }
+
+    #[test]
+    fn strongs_numbers_are_named_one_way() {
+        use crate::shared::strongs_name;
+        assert_eq!(strongs_name("G26").as_deref(), Some("G26"));
+        assert_eq!(strongs_name("g0026").as_deref(), Some("G26"));
+        assert_eq!(strongs_name(" H430 ").as_deref(), Some("H430"));
+        assert_eq!(strongs_name("26"), None);
+        assert_eq!(strongs_name("Gx"), None);
+        assert_eq!(strongs_name(""), None);
+    }
+
+    #[test]
+    fn a_strongs_entry_lists_every_verse_with_the_word_and_each_opens_in_the_reader() {
+        let home = tempfile::tempdir().unwrap();
+        let Some(mut app) = live_app(home.path()) else { return eprintln!("skipped: no modules") };
+        let Some(module) = app.sh.backend.modules().into_iter().find(|m| m.has_strongs).map(|m| m.id) else {
+            return eprintln!("skipped: no module with Strong's numbers");
+        };
+        let occurrences = app.sh.strongs_occurrences(&module, "G25");
+        let found: Vec<scripture::RefRange> = occurrences.iter().map(|o| o.range).collect();
+        let john316 = scripture::RefRange { book: Book::JOHN, chapter: 3, verses: Some((16, 16)) };
+        assert!(found.contains(&john316), "John 3:16 has 'loved'");
+        assert!(found.len() > 100, "{}", found.len());
+        assert!(found.windows(2).all(|w| (w[0].book.osis(), w[0].chapter) != (w[1].book.osis(), w[1].chapter) || w[0].verses < w[1].verses), "once each, in order within a chapter");
+        assert_eq!(app.sh.strongs_occurrences(&module, "g0025"), occurrences, "however it is spelled");
+        assert!(app.sh.strongs_occurrences(&module, "G99999").is_empty());
+
+        // A link in the dictionary tab shows the verse in the Bible tab.
+        let Some(dict) = app.sh.backend.dictionaries().into_iter().find(|d| d.id.0.starts_with("Strongs")) else { return };
+        let from = app.bid();
+        app.open_dictionary(from, dict.id, "G25".into(), Dest::NewTab);
+        let id = app.last_dict.expect("a dictionary tab");
+        app.bible_mut().chapter_no = 1;
+        let words = occurrences.iter().find(|o| o.range == john316).unwrap().words.clone();
+        let _ = app.update(Message::Dict(id, DictMsg::OpenVerse(john316, module.clone(), words.clone())));
+        assert_eq!((app.bible().book, app.bible().chapter_no), (Book::JOHN, 3));
+        assert!(app.bible().select_request.is_none(), "the verse is not selected whole");
+        // The words are selected, from the first to the last.
+        let canon = app.bible().chapter.as_ref().unwrap().canonical_verses()[&16].clone();
+        let slice = app.bible().select_words.expect("the words are to be selected").1;
+        assert!(canon[slice.start..slice.end].contains("loved"), "{}", &canon[slice.start..slice.end]);
+        // Moving on puts the request away.
+        let bid = app.bid();
+        let _ = app.update(Message::Bible(bid, BibleMsg::PickChapter(ChapterChoice(Book::JOHN, 4))));
+        assert!(app.bible().select_words.is_none());
+    }
+
+    #[test]
+    fn the_settings_pages_are_chosen_by_tab_and_resetting_the_look_keeps_the_pens() {
+        let mut app = App::new();
+        assert_eq!(app.settings_tab, SettingsTab::Appearance);
+        app.pen_editing = Some(0);
+        let _ = app.update(Message::SettingsTab(SettingsTab::Pens));
+        assert_eq!((app.settings_tab, app.pen_editing), (SettingsTab::Pens, None), "an open color list is put away");
+        let _ = app.update(Message::SetBibleSize(30.0));
+        let pens = app.sh.settings.pens.clone();
+        assert!(!pens.is_empty());
+        let _ = app.update(Message::ResetSettings);
+        assert_eq!(app.sh.settings.bible_size, Settings::default().bible_size);
+        assert_eq!(app.sh.settings.pens, pens);
+    }
+
+    #[test]
+    fn a_commentary_is_read_by_chapter_and_opened_from_the_reader_and_kept_with_the_workspace() {
+        let home = tempfile::tempdir().unwrap();
+        let Some(mut app) = live_app(home.path()) else { return eprintln!("skipped: no modules") };
+        let Some(gill) = app.sh.backend.commentaries().into_iter().find(|c| c.id.0 == "Gill") else {
+            return eprintln!("skipped: Gill is not installed");
+        };
+        // The notes: one per verse that has one, the first paragraph naming the verse.
+        let note = app.sh.backend.commentary_note(&gill.id, Book::JOHN, 3, 16).expect("a note on John 3:16");
+        assert_eq!(note[0][0].text, "Ver. 16.");
+        assert!(note.iter().any(|p| p.iter().any(|s| s.bold)), "its heading is bold");
+        assert!(note.iter().flatten().all(|s| !s.text.contains('<')), "no markup is left");
+
+        // From the reader's menu: a commentary tab beside it, on the chapter and verse; once.
+        select_verses(&mut app, &[16]);
+        let bid = app.bid();
+        let before = app.tabs.len();
+        let _ = app.update(Message::Bible(bid, BibleMsg::OpenCommentary));
+        assert_eq!(app.tabs.len(), before + 1);
+        let tab = app.tabs.values().find_map(|t| match t { Tab::Commentary(c) => Some(c), _ => None }).expect("a commentary tab");
+        assert_eq!((tab.module.0.as_str(), tab.book, tab.chapter, tab.verse), ("Gill", Book::JOHN, 3, Some(16)));
+        assert_eq!(tab.title(&app.sh), "Gill \u{b7} John 3");
+        let notes = tab.notes(&app.sh);
+        assert!(notes.iter().any(|(v, _)| *v == 16) && notes.windows(2).all(|w| w[0].0 < w[1].0), "in verse order");
+        let head = tab.doc.selection().head;
+        assert!(tab.doc.source()[head..].starts_with("[[John 3:16]]"), "the text is at the verse asked for");
+        let _ = app.update(Message::Bible(bid, BibleMsg::OpenCommentary));
+        assert_eq!(app.tabs.values().filter(|t| matches!(t, Tab::Commentary(_))).count(), 1, "the same tab");
+
+        // Its pickers and links.
+        let id = app.tabs.iter().find(|(_, t)| matches!(t, Tab::Commentary(_))).map(|(i, _)| *i).unwrap();
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::NextChapter));
+        let Some(Tab::Commentary(tab)) = app.tabs.get(&id) else { unreachable!() };
+        assert_eq!((tab.book, tab.chapter), (Book::JOHN, 4));
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::PickBook(bible_tab::BookChoice(Book::ROMANS))));
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::PrevChapter));
+        let Some(Tab::Commentary(tab)) = app.tabs.get(&id) else { unreachable!() };
+        assert_eq!((tab.book, tab.chapter), (Book::from_osis("Acts").unwrap(), 28), "back from Romans 1 into Acts");
+        app.bible_mut().chapter_no = 1;
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::Link(study_core::markdown::LinkTarget::Verse { range: scripture::RefRange { book: Book::JOHN, chapter: 3, verses: Some((16, 16)) }, module: None })));
+        assert_eq!((app.bible().book, app.bible().chapter_no), (Book::JOHN, 3), "a verse link shows it in the reader");
+
+        // The text selects and moves but cannot be changed; what is copied is the words.
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::PickBook(bible_tab::BookChoice(Book::JOHN))));
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::PickChapter(3)));
+        let before = match app.tabs.get(&id) { Some(Tab::Commentary(t)) => t.doc.source().to_string(), _ => unreachable!() };
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::Action(md_editor::Action::Insert("typed".into()))));
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::Action(md_editor::Action::Backspace)));
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::Action(md_editor::Action::Paste("pasted".into()))));
+        let _ = app.update(Message::Commentary(id, CommentaryMsg::Action(md_editor::Action::SelectAll)));
+        let Some(Tab::Commentary(tab)) = app.tabs.get(&id) else { unreachable!() };
+        assert_eq!(tab.doc.source(), before, "not edited");
+        let selected = tab.doc.selected_text().expect("everything is selected");
+        assert_eq!(selected, before);
+        let copied = crate::commentary_tab::plain_text(&selected);
+        assert!(copied.contains("John 3:16") && !copied.contains("**") && !copied.contains("[["), "{}", &copied[..copied.len().min(200)]);
+        assert!(copied.contains("For God so loved the world, &c.]"), "an escaped bracket copies as itself");
+
+        // Kept in the workspace, and put back.
+        let saved = app.workspace();
+        assert!(saved.panes.iter().any(|p| p.tabs.iter().any(|t| matches!(t, state::TabSave::Commentary { module, .. } if module == "Gill"))));
+        let _ = app.apply_workspace(&saved);
+        assert!(app.tabs.values().any(|t| matches!(t, Tab::Commentary(c) if c.module.0 == "Gill")));
+    }
+
+    #[test]
+    fn searching_the_bible_finds_words_phrases_alternatives_strongs_numbers_and_scopes() {
+        use crate::bible_search::Options;
+        use study_core::search::Query;
+        let home = tempfile::tempdir().unwrap();
+        let Some(app) = live_app(home.path()) else { return eprintln!("skipped: no modules") };
+        let module = app.sh.backend.modules().into_iter().find(|m| m.has_strongs).map(|m| m.id).expect("a module with Strong's numbers");
+        let find = |text: &str, options: Options| app.sh.search_bible(&module, &Query::parse(text), options).unwrap();
+        let places = |r: &crate::bible_search::Results| r.found.iter().map(|f| f.range.to_string()).collect::<Vec<_>>();
+        let started = std::time::Instant::now();
+        let phrase = find("\"only begotten\" in:John", Options::default());
+        eprintln!("index made and searched in {:?}", started.elapsed());
+        assert!(places(&phrase).contains(&"John 3:16".to_string()), "{:?}", places(&phrase));
+        let marked: Vec<&str> = phrase.found[0].spans.iter().map(|&(a, z)| &phrase.found[0].text[a..z]).collect();
+        assert!(marked.iter().any(|w| w.to_lowercase() == "only begotten"), "{marked:?}");
+        assert!(phrase.found.iter().all(|f| f.range.book == Book::JOHN), "only the book asked for");
+        // All the words, in canon order; either word; leaving one out.
+        let both = find("loved world", Options::default());
+        assert!(places(&both).contains(&"John 3:16".to_string()) && both.found.len() > 3);
+        let order: Vec<_> = both.found.iter().map(|f| (Book::all().position(|b| b == f.range.book), f.range.chapter, f.range.verses)).collect();
+        assert!(order.windows(2).all(|w| w[0] <= w[1]), "canon order");
+        assert!(find("loved OR zzzzqq", Options::default()).found.len() > both.found.len());
+        assert!(!places(&find("loved world -begotten", Options::default())).contains(&"John 3:16".to_string()));
+        // Other forms, and capitals.
+        assert!(find("love world", Options::default()).found.len() < find("love world", Options { stem: true, ..Options::default() }).found.len());
+        assert!(find("god", Options { case: true, ..Options::default() }).found.len() < find("god", Options::default()).found.len());
+        // A Strong's number, alone and with words.
+        let numbered = find("G25", Options::default());
+        assert!(places(&numbered).contains(&"John 3:16".to_string()) && numbered.found.len() > 100);
+        assert!(numbered.found.iter().any(|f| !f.spans.is_empty()), "the words with the number are marked");
+        let mixed = find("G25 world in:John", Options::default());
+        assert!(places(&mixed).contains(&"John 3:16".to_string()) && mixed.found.len() < numbered.found.len());
+        assert!(find("", Options::default()).found.is_empty() && find("zzzzqqqq", Options::default()).found.is_empty());
+    }
+
+    #[test]
+    fn a_search_tab_searches_shows_a_verse_with_its_words_and_is_kept_with_the_workspace() {
+        let home = tempfile::tempdir().unwrap();
+        let Some(mut app) = live_app(home.path()) else { return eprintln!("skipped: no modules") };
+        // From a new tab; the module being read.
+        let blank = app.new_blank();
+        let blank_id = App::id_of(&blank);
+        app.add_tab(0, blank);
+        app.open_choice(blank_id, Choice::Search);
+        let Some(Tab::Search(tab)) = app.tabs.get(&blank_id) else { panic!("a search tab") };
+        assert_eq!(tab.module, app.bible().module);
+        let id = blank_id;
+        let _ = app.update(Message::Search(id, SearchMsg::Draft("only".into())));
+        let _ = app.update(Message::Search(id, SearchMsg::Draft("only begotten".into())));
+        // Typing is searched when it pauses: not for what was typed before the last of it.
+        let _ = app.update(Message::Search(id, SearchMsg::Typed(1)));
+        let Some(Tab::Search(tab)) = app.tabs.get(&id) else { unreachable!() };
+        assert!(tab.busy.is_none() && tab.ran.is_none(), "an earlier pause does not search");
+        let _ = app.update(Message::Search(id, SearchMsg::Typed(2)));
+        // The first time the index is made a moment later, so the screen can say so.
+        let Some(Tab::Search(tab)) = app.tabs.get(&id) else { unreachable!() };
+        assert!(tab.busy.is_some() && tab.ran.is_none(), "indexing is shown first");
+        let _ = app.update(Message::Search(id, SearchMsg::Run));
+        let Some(Tab::Search(tab)) = app.tabs.get(&id) else { unreachable!() };
+        let ran = tab.ran.as_ref().expect("searched");
+        assert!(tab.busy.is_none() && ran.results.found.iter().any(|f| f.range.to_string() == "John 3:16"));
+        assert_eq!(tab.title(&app.sh), "only begotten \u{b7} LSB");
+        // The next search needs no waiting.
+        let _ = app.update(Message::Search(id, SearchMsg::Best(true)));
+        let Some(Tab::Search(tab)) = app.tabs.get(&id) else { unreachable!() };
+        assert!(tab.busy.is_none() && tab.ran.is_some());
+        // Choosing a verse shows it in the reader with the words pointed out.
+        let found = tab.ran.as_ref().unwrap().results.found.iter().find(|f| f.range.to_string() == "John 3:16").unwrap().clone();
+        app.bible_mut().chapter_no = 1;
+        let module = app.bible().module.clone();
+        let _ = app.update(Message::Search(id, SearchMsg::Open(found.range, module, found.spans.clone())));
+        assert_eq!((app.bible().book, app.bible().chapter_no), (Book::JOHN, 3));
+        assert!(app.bible().select_request.is_none());
+        let slice = app.bible().select_words.expect("the words are to be selected").1;
+        let canon = app.bible().chapter.as_ref().unwrap().canonical_verses()[&16].clone();
+        assert!(canon[slice.start..slice.end].to_lowercase().contains("only begotten"), "{}", &canon[slice.start..slice.end]);
+        // Narrowing to a book, and showing more.
+        let _ = app.update(Message::Search(id, SearchMsg::Book(Some(Book::JOHN))));
+        let _ = app.update(Message::Search(id, SearchMsg::More));
+        // From the reader: the selected words are searched in the tab there is.
+        select_verses(&mut app, &[16]);
+        let bid = app.bid();
+        let before = app.tabs.len();
+        let _ = app.update(Message::Bible(bid, BibleMsg::SearchSelection));
+        assert_eq!(app.tabs.len(), before, "the same search tab");
+        let Some(Tab::Search(tab)) = app.tabs.get(&id) else { unreachable!() };
+        assert!(tab.draft.starts_with('"') && tab.draft.contains("God so loved"), "{}", tab.draft);
+        // Kept with the workspace, searched again when it is put back.
+        let saved = app.workspace();
+        assert!(saved.panes.iter().any(|p| p.tabs.iter().any(|t| matches!(t, state::TabSave::Search { best: true, query, .. } if query.contains("God so loved")))));
+        let _ = app.apply_workspace(&saved);
+        assert!(app.tabs.values().any(|t| matches!(t, Tab::Search(s) if s.options.by_relevance && s.draft.contains("God so loved"))));
     }
 
     #[test]
@@ -3175,7 +3909,7 @@ mod tests {
         assert!(h.app.bible().text_selection.is_some(), "pressing a pen must not clear the selection");
         h.release();
         assert_eq!(h.app.sh.marks.len(), before + 1, "pen click adds a mark");
-        // With no margin the new mark's card opens under the selection, for a note, like Comment.
+        // With no margin the new mark's card opens under the selection, for a note, like Add Note.
         assert!(h.app.bible().editing.is_some(), "the mark's card is open to write in");
         assert!(h.app.bible().text_selection.is_some(), "the selection stays, for the card to sit under");
         assert!(h.center_of("Promise").is_none(), "the card takes the toolbar's place");
@@ -4150,28 +4884,41 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_tab_becomes_what_is_chosen_and_keeps_its_place() {
+    fn a_blank_tab_becomes_the_kind_chosen_and_keeps_its_place() {
         let mut app = App::new();
         let pane = app.panes[0].id;
         let _ = app.update(Message::NewTab(pane));
         let blank = *app.panes[0].tabs.last().unwrap();
-        let choices = app.choices();
-        assert!(choices.iter().any(|c| matches!(c, Choice::Bible(..))) && choices.iter().any(|c| matches!(c, Choice::Note(_))));
-        assert!(choices.iter().all(|c| !matches!(c, Choice::Note(p) if p.starts_with("margins/"))), "margin files are not offered");
-        let _ = app.update(Message::Open(blank, Choice::Note("notes/Memory verses.md".into())));
-        assert!(matches!(&app.tabs[&blank], Tab::Note(n) if n.path == "notes/Memory verses.md"));
+        // The page offers kinds of tab, not particular ones.
+        let mut h = Harness::new(app);
+        for label in ["Bible", "Dictionary", "Notes"] {
+            assert!(h.center_of(label).is_some(), "{label} is offered");
+        }
+        assert!(h.center_of("KJV").is_none() && h.center_of("Nicodemus").is_none(), "nothing more specific");
+        let mut app = h.app;
+        let _ = app.update(Message::Open(blank, Choice::Note));
+        assert!(matches!(&app.tabs[&blank], Tab::Note(n) if n.path == app.sh.first_ordinary_note()), "it opens on a note; the tab's selector picks another");
         assert_eq!(app.panes[0].tabs.last(), Some(&blank), "same tab, same place in the bar");
         // Choosing again does nothing: it is no longer blank.
-        let _ = app.update(Message::Open(blank, Choice::Note("notes/Nicodemus.md".into())));
-        assert!(matches!(&app.tabs[&blank], Tab::Note(n) if n.path == "notes/Memory verses.md"));
+        let path = match &app.tabs[&blank] {
+            Tab::Note(n) => n.path.clone(),
+            _ => unreachable!(),
+        };
+        let _ = app.update(Message::Open(blank, Choice::Dict));
+        assert!(matches!(&app.tabs[&blank], Tab::Note(n) if n.path == path));
         // A Bible opens where the other is reading.
         let _ = app.update(Message::NewTab(pane));
         let second = *app.panes[0].tabs.last().unwrap();
         let _ = app.update(Message::Bible(app.bid(), BibleMsg::PickChapter(ChapterChoice(Book::PSALMS, 23))));
-        let module = app.first_module();
-        let _ = app.update(Message::Open(second, Choice::Bible(module, "KJV".into())));
+        let _ = app.update(Message::Open(second, Choice::Bible));
         let b = app.bible_tab(second).unwrap();
         assert_eq!((b.book, b.chapter_no), (Book::PSALMS, 23));
+        assert_eq!(b.module, app.bible().module, "in the module it is reading");
+        // A dictionary opens on the first one there is, with the tab's own picker for the rest.
+        let _ = app.update(Message::NewTab(pane));
+        let third = *app.panes[0].tabs.last().unwrap();
+        let _ = app.update(Message::Open(third, Choice::Dict));
+        assert!(matches!(&app.tabs[&third], Tab::Dict(d) if d.module == app.sh.backend.dictionaries()[0].id));
     }
 
     #[test]
@@ -4423,6 +5170,9 @@ mod tests {
         }
         if std::env::var("SNAP_PICKER").is_ok() {
             app.note_mut().picker = Some(crate::note_tab::Picker::default());
+            if std::env::var("SNAP_TAGS").is_ok() {
+                app.note_mut().picker.as_mut().unwrap().tags.extend(["prayer".to_string(), "john".to_string()]);
+            }
         }
         if std::env::var("SNAP_STACK").is_ok() {
             let _ = app.update(Message::Bible(app.bid(), BibleMsg::ToggleMarks(true)));
@@ -4452,6 +5202,50 @@ mod tests {
                 h.app.sh.marks.last_mut().unwrap().body = format!("Note {} on this word. It says a good deal, over a line or two, to make a tall card.", n + 1);
             }
         }
+        if let Ok(words) = std::env::var("SNAP_SEARCH") {
+            let home = tempfile::tempdir().unwrap();
+            h.app = live_app(home.path()).expect("real modules");
+            let _ = h.app.show_search(Some(words));
+            let id = h.app.tabs.iter().find(|(_, t)| matches!(t, Tab::Search(_))).map(|(i, _)| *i).unwrap();
+            let _ = h.app.update(Message::Search(id, SearchMsg::Run));
+            if std::env::var("SNAP_OPEN").is_ok() {
+                let found = match h.app.tabs.get(&id) {
+                    Some(Tab::Search(t)) => t.ran.as_ref().and_then(|r| r.results.found.iter().find(|f| f.range.to_string() == "John 3:16").cloned()),
+                    _ => None,
+                };
+                if let Some(found) = found {
+                    let module = h.app.bible().module.clone();
+                    let _ = h.app.update(Message::Search(id, SearchMsg::Open(found.range, module, found.spans)));
+                    for _ in 0..3 {
+                        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+                    }
+                }
+            }
+        }
+        if let Ok(which) = std::env::var("SNAP_COMMENTARY") {
+            // Needs the real modules.
+            let home = tempfile::tempdir().unwrap();
+            h.app = live_app(home.path()).expect("real modules");
+            let from = h.app.bid();
+            let _ = h.app.show_commentary(from, Book::JOHN, 3, Some(16));
+            if let Some(Tab::Commentary(t)) = h.app.tabs.values_mut().find(|t| matches!(t, Tab::Commentary(_))) {
+                if which != "1" {
+                    t.module = ModuleId(which);
+                }
+                t.verse = None;
+            }
+        }
+        if let Ok(kind) = std::env::var("SNAP_VAULT") {
+            use crate::vault_setup::{Mode, Setup};
+            let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Documents");
+            match kind.as_str() {
+                "welcome" => h.app.onboarding = Some(live::Onboarding::First),
+                "missing" => h.app.onboarding = Some(live::Onboarding::Missing(dir.join("Study vault"))),
+                "create" => h.app.setup = Some(Setup::new(Mode::Create, dir.clone())),
+                _ => h.app.setup = Some(Setup::new(Mode::Open, dir.clone())),
+            }
+            h.app.home = Some(dir.join("data"));
+        }
         if let Ok(at) = std::env::var("SNAP_HOVER") {
             let (x, y) = at.split_once(',').unwrap();
             h.move_to(x.parse().unwrap(), y.parse().unwrap());
@@ -4459,6 +5253,15 @@ mod tests {
         if std::env::var("SNAP_MARGINMENU").is_ok() {
             let id = h.app.bid();
             let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarginMenu));
+        }
+        if std::env::var("SNAP_BACKLINKS").is_ok() {
+            let id = h.app.bid();
+            let from = h.app.sh.marks.len();
+            let _ = from;
+            if let Some(Tab::Bible(t)) = h.app.tabs.get_mut(&id) {
+                t.text_selection = Some(vec![CanonSlice { verse: 3, start: 0, end: 4 }]);
+            }
+            let _ = h.app.update(Message::Bible(id, BibleMsg::OpenBacklinks));
         }
         if std::env::var("SNAP_NEWKIND").is_ok() {
             let id = h.app.nid();
@@ -4493,7 +5296,15 @@ mod tests {
                 }
             } else {
                 let _ = h.app.update(Message::OpenSettings);
-                h.size = Size::new(360.0, 400.0);
+                h.size = Size::new(520.0, 600.0);
+                if let Ok(tab) = std::env::var("SNAP_TAB") {
+                    h.app.settings_tab = match tab.as_str() {
+                        "pens" => SettingsTab::Pens,
+                        "vault" => SettingsTab::Vault,
+                        "modules" => SettingsTab::Modules,
+                        _ => SettingsTab::Appearance,
+                    };
+                }
             }
         }
         if std::env::var("SNAP_SELECT").is_ok() {
@@ -4710,7 +5521,8 @@ mod tests {
         assert!(!app.note().choosing);
         assert_eq!(app.note().path, "notes/Untitled.md");
         let front = study_core::frontmatter::parse(&app.sh.notes["notes/Untitled.md"]).front;
-        assert_eq!(front.title.as_deref(), Some("Untitled"));
+        assert_eq!(front.title, None, "no title property: the file name and the heading are the title");
+        assert!(text_has_heading(&app.sh.notes["notes/Untitled.md"], "Untitled"));
         assert!(front.created.is_some());
         let _ = app.update(Message::Note(id, NoteMsg::CreateNote(template_path("Blank"))));
         assert_eq!(app.note().path, "notes/Untitled 2.md");
@@ -4777,20 +5589,17 @@ mod tests {
     }
 
     #[test]
-    fn title_and_type_are_set_with_their_own_controls_and_undo() {
+    fn type_is_set_with_its_own_control_and_undo() {
         let (mut app, id) = props_app();
-        let _ = app.update(Message::Note(id, NoteMsg::SetTitle("A new title".into())));
         let _ = app.update(Message::Note(id, NoteMsg::SetKind(KindChoice(Some("sermon".into())))));
         let front = front_of(&app);
-        assert_eq!((front.title.as_deref(), front.kind.as_deref()), (Some("A new title"), Some("sermon")));
+        assert_eq!(front.kind.as_deref(), Some("sermon"));
         assert_eq!(front.props.len(), 6, "the other properties are untouched");
         assert!(app.note().doc.source().ends_with("Body text\n"));
         let _ = app.update(Message::Note(id, NoteMsg::SetKind(KindChoice(None))));
         assert!(front_of(&app).kind.is_none(), "None takes it away");
-        let _ = app.update(Message::Note(id, NoteMsg::SetTitle(String::new())));
-        assert!(front_of(&app).title.is_none());
         app.note_mut().doc.perform(EditAction::Undo);
-        assert_eq!(front_of(&app).title.as_deref(), Some("A new title"));
+        assert_eq!(front_of(&app).kind.as_deref(), Some("sermon"));
     }
 
     #[test]
@@ -4865,7 +5674,7 @@ mod tests {
         assert!(h.center_of("New property").is_none(), "closed to begin with");
         let _ = h.app.update(Message::Note(id, NoteMsg::ToggleProps));
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
-        assert!(h.center_of("Title").is_some() && h.center_of("Type").is_some());
+        assert!(h.center_of("Type").is_some() && h.center_of("Title").is_none(), "no Title: the name and the heading are it");
         assert!(h.center_of("chapters \u{00B7} number").is_some());
         assert!(h.center_of("with \u{00B7} list").is_some());
         assert!(h.center_of("due \u{00B7} date").is_some());
@@ -4875,15 +5684,52 @@ mod tests {
     }
 
     #[test]
-    fn a_margin_note_shows_its_marks_details_instead() {
+    fn a_margin_note_shows_its_marks_details_and_edits_them_in_place_of_properties() {
         let mut app = App::new();
         app.open_note(app.sh.marks[0].path());
         let mut h = Harness::new(app);
-        assert!(h.center_of("Add tag").is_none(), "no tag box: the file's lines are the app's");
-        assert!(h.center_of("Properties").is_none());
+        assert!(h.center_of("Add tag").is_some(), "its tags are edited here, through the mark");
+        assert!(h.center_of("Highlight").is_some() && h.center_of("Underline").is_some());
+        assert!(h.center_of("Note only").is_none(), "that style is not offered");
+        assert!(h.center_of("Properties").is_none(), "not the free-form property editor: the file's lines are the app's");
+        assert!(h.center_of("#promise").is_some(), "its tag, to remove");
         let mark = &h.app.sh.marks[0];
-        let summary = format!("{}  \u{00B7}  highlight  \u{00B7}  KJV  \u{00B7}  #promise", mark.anchor);
-        assert!(h.bounds_of_text(&summary).is_some(), "{summary}");
+        let anchor = mark.anchor.to_string();
+        // The verse is a link: it shows that verse in the reader, as a link in a note does.
+        let (x, y) = h.center_of(&anchor).expect("the verse is shown");
+        h.app.bible_mut().chapter_no = 1;
+        h.click(x, y);
+        assert_eq!((h.app.bible().book, h.app.bible().chapter_no), (Book::JOHN, 3), "the reader went to {anchor}");
+        assert_eq!(h.app.bible().select_request.map(|(_, a, z)| (a, z)), h.app.sh.marks[0].anchor.verses);
+    }
+
+    #[test]
+    fn the_verse_in_a_margin_notes_details_has_the_right_click_and_pull_of_a_link() {
+        let mut app = App::new();
+        app.open_note(app.sh.marks[0].path());
+        let mut h = Harness::new(app);
+        let anchor = h.app.sh.marks[0].anchor.to_string();
+        let (x, y) = h.center_of(&anchor).unwrap();
+        // Right click: where to open it.
+        h.move_to(x, y);
+        h.feed(Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)));
+        h.feed(Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)));
+        let menu = h.app.link_menu.as_ref().expect("the menu of where to open it");
+        assert!(matches!(&menu.spec, Spec::Verse { range, .. } if *range == h.app.sh.marks[0].anchor));
+        h.app.link_menu = None;
+        // Pulled away: it is carried (and coming up over it is not a click that opens it).
+        h.app.bible_mut().chapter_no = 1;
+        h.move_to(x, y);
+        h.press();
+        h.move_to(x + 20.0, y + 30.0);
+        assert!(matches!(h.app.drag.as_ref().map(|d| &d.payload), Some(Payload::Link(_))), "picked up");
+        h.move_to(x, y);
+        h.release();
+        assert_eq!(h.app.bible().chapter_no, 1, "not opened by the release");
+        h.app.drag = None;
+        // A plain click still opens it.
+        h.click(x, y);
+        assert_eq!(h.app.bible().chapter_no, 3);
     }
 
     // ---- the reader's menu and references ------------------------------------------------
@@ -5439,8 +6285,12 @@ mod tests {
         // Cycling the color and the style, and removing a pen.
         let last = before - 1;
         let color = app.sh.settings.pens[last].color.clone();
-        let _ = app.update(Message::CyclePenColor(last));
+        let _ = app.update(Message::EditPenColor(last));
+        assert_eq!(app.pen_editing, Some(last), "its colors open");
+        let _ = app.update(Message::SetPenColor(last, 21));
+        assert_eq!(app.sh.settings.pens[last].color, state::PEN_COLORS[21]);
         assert_ne!(app.sh.settings.pens[last].color, color);
+        assert_eq!(app.pen_editing, None, "and close on a choice");
         let _ = app.update(Message::CyclePenStyle(last));
         assert_eq!(app.sh.settings.pens[last].style, state::PenStyle::Underline);
         let _ = app.update(Message::RemovePen(last));
@@ -5528,7 +6378,7 @@ mod tests {
         assert_eq!(h.app.note().path, "notes/Grace and Truth.md");
         let text = h.app.sh.notes["notes/Grace and Truth.md"].clone();
         let parsed = study_core::frontmatter::parse(&text);
-        assert_eq!(parsed.front.title.as_deref(), Some("Grace and Truth"));
+        assert_eq!(parsed.front.title, None);
         assert!(text.contains("\n# Grace and Truth\n") && text.contains("## Passages"), "{text}");
         assert!(h.app.note().new_title.is_empty(), "the box starts empty next time");
         // Blank with a title is a note that starts with its heading; the same title again is numbered.
@@ -5586,7 +6436,7 @@ mod tests {
     fn templates_are_notes_to_open_but_not_in_the_tag_counts_or_the_blank_tab_choices() {
         let app = App::new();
         assert!(!app.sh.tag_counts().iter().any(|(t, _)| t == "daily" || t == "topic"), "their tags are for the notes made from them");
-        assert!(app.choices().iter().all(|c| !matches!(c, Choice::Note(p) if p.starts_with("templates/"))));
+        assert!(!app.sh.first_ordinary_note().starts_with("templates/"));
         assert!(!app.sh.first_ordinary_note().starts_with("templates/"));
     }
 
@@ -5628,6 +6478,98 @@ mod tests {
         let _ = app.update(Message::Note(id, NoteMsg::EditTemplate(template_path("Daily"))));
         assert!(!app.note().choosing);
         assert_eq!(app.note().path, "templates/Daily.md", "the template opens as a note");
+    }
+
+    #[test]
+    fn backlinks_list_the_notes_that_link_to_a_passage_and_the_toolbar_offers_them_for_green_verses() {
+        let mut app = App::new();
+        let john = |a, z| scripture::RefRange { book: Book::JOHN, chapter: 3, verses: Some((a, z)) };
+        let found = |app: &App, range: &scripture::RefRange| -> Vec<String> { app.sh.backlinks(range).into_iter().map(|b| b.path).collect() };
+        // Nicodemus links to John 3:2 and 3:3-5; Memory verses to 3:16.
+        assert!(found(&app, &john(2, 2)).contains(&"notes/Nicodemus.md".to_string()));
+        assert!(found(&app, &john(4, 4)).contains(&"notes/Nicodemus.md".to_string()), "3:4 is inside 3:3-5");
+        assert!(found(&app, &john(16, 16)).contains(&"notes/Memory verses.md".to_string()));
+        assert!(!found(&app, &john(16, 16)).contains(&"notes/Nicodemus.md".to_string()));
+        let lines = &app.sh.backlinks(&john(2, 2)).iter().find(|b| b.path == "notes/Nicodemus.md").unwrap().lines.clone();
+        assert!(lines.iter().any(|l| l.contains("[[John 3:2]]")), "with the line that links");
+        assert!(found(&app, &scripture::RefRange { book: Book::JOHN, chapter: 9, verses: Some((1, 1)) }).is_empty());
+        assert!(app.sh.backlinks(&john(2, 2)).iter().all(|b| !b.path.starts_with("templates/")));
+
+        // A green verse selected: the button is offered; not for one nothing links to.
+        select_verses(&mut app, &[2]);
+        assert!(app.bible().selection_has_backlinks(&app.sh));
+        select_verses(&mut app, &[1]);
+        assert!(!app.bible().selection_has_backlinks(&app.sh), "verse 1 is not green");
+        select_verses(&mut app, &[2, 3]);
+        assert_eq!(app.bible().selection_span(), Some(john(2, 3)));
+
+        // Using it opens a tab, in another pane, listing them; one tab is reused.
+        let id = app.bid();
+        let panes = app.panes.len();
+        let _ = app.update(Message::Bible(id, BibleMsg::OpenBacklinks));
+        let tabs: Vec<TabId> = app.tabs.iter().filter(|(_, t)| matches!(t, Tab::Backlinks(_))).map(|(i, _)| *i).collect();
+        assert_eq!(tabs.len(), 1);
+        assert!(app.panes.len() >= panes && app.pane_of(tabs[0]) != app.pane_of(id), "beside the reader, not over it");
+        let Some(Tab::Backlinks(tab)) = app.tabs.get(&tabs[0]) else { unreachable!() };
+        assert_eq!(tab.target, crate::backlinks_tab::Target::Passage(john(2, 3)));
+        assert_eq!(tab.title(&app.sh), "Backlinks \u{b7} John 3:2-3");
+        select_verses(&mut app, &[16]);
+        let _ = app.update(Message::Bible(id, BibleMsg::OpenBacklinks));
+        assert_eq!(app.tabs.values().filter(|t| matches!(t, Tab::Backlinks(_))).count(), 1, "the same tab, now for John 3:16");
+
+        // The tab shows them, and a click on a note shows that note.
+        let mut h = Harness::new(app);
+        assert!(h.center_of("Memory verses").is_some(), "the note that links to 3:16 is listed");
+        assert!(h.center_of("Backlinks to John 3:16").is_some());
+        let (x, y) = h.center_of("Memory verses").unwrap();
+        h.click(x, y);
+        assert_eq!(h.app.note().path, "notes/Memory verses.md");
+
+        // It comes back with the workspace.
+        let saved = h.app.workspace();
+        assert!(saved.panes.iter().any(|p| p.tabs.iter().any(|t| matches!(t, state::TabSave::Backlinks { passage } if passage == "John.3.16"))));
+        let mut other = App::new();
+        let _ = other.apply_workspace(&saved).unwrap();
+        assert!(other.tabs.values().any(|t| matches!(t, Tab::Backlinks(b) if b.target == crate::backlinks_tab::Target::Passage(john(16, 16)))));
+    }
+
+    #[test]
+    fn the_note_menu_has_backlinks_listing_the_notes_that_link_to_the_note() {
+        let mut app = App::new();
+        // Nicodemus is linked to by name from Memory verses (twice) and by the prayer list's text? Check the sample.
+        let nicodemus = "notes/Nicodemus.md".to_string();
+        let found = app.sh.note_backlinks(&nicodemus);
+        let paths: Vec<&str> = found.iter().map(|b| b.path.as_str()).collect();
+        assert!(paths.contains(&"notes/Memory verses.md"), "{paths:?}");
+        assert!(!paths.contains(&"notes/Nicodemus.md"), "not itself");
+        assert!(found.iter().all(|b| !b.path.starts_with("templates/")));
+        assert!(found.iter().find(|b| b.path == "notes/Memory verses.md").unwrap().lines.iter().any(|l| l.contains("[[Nicodemus]]")));
+        // The menu offers it; using it opens the tab for this note, beside it.
+        app.open_note(nicodemus.clone());
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::ToggleMenu));
+        let mut h = Harness::new(app);
+        assert!(h.center_of("Backlinks").is_some(), "the menu has it");
+        let (x, y) = h.center_of("Backlinks").unwrap();
+        h.click(x, y);
+        assert!(!h.app.note().menu_open);
+        let tab = h.app.tabs.values().find_map(|t| match t { Tab::Backlinks(b) => Some(b), _ => None }).expect("a backlinks tab");
+        assert_eq!(tab.target, crate::backlinks_tab::Target::Note(nicodemus.clone()));
+        assert_eq!(tab.title(&h.app.sh), "Backlinks \u{b7} Nicodemus");
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.center_of("Backlinks to Nicodemus").is_some() && h.center_of("Memory verses").is_some());
+        // It comes back with the workspace.
+        let saved = h.app.workspace();
+        let mut other = App::new();
+        let _ = other.apply_workspace(&saved).unwrap();
+        assert!(other.tabs.values().any(|t| matches!(t, Tab::Backlinks(b) if b.target == crate::backlinks_tab::Target::Note(nicodemus.clone()))));
+        // A margin note is linked to by no one, so its menu does not offer it.
+        let mut app = App::new();
+        app.open_note(app.sh.marks[0].path());
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::ToggleMenu));
+        let mut h = Harness::new(app);
+        assert!(h.center_of("Backlinks").is_none());
     }
 
     // ---- where links open ------------------------------------------------------------------
@@ -5821,7 +6763,26 @@ mod tests {
         assert!(matches!(&menu.spec, Spec::Verse { range, .. } if range.to_string() == "John 3:2"), "{:?}", menu.spec);
         let (x, y) = h.center_of("Open in other pane").unwrap();
         h.click(x, y);
-        assert!(!h.app.panes[1].tabs.is_empty() && bible_tabs(&h.app).len() == 2, "a second Bible tab, in the note's pane");
+        // The other pane than the note's is the Bible's: its own Bible tab shows the verse.
+        assert_eq!(bible_tabs(&h.app).len(), 1, "no new tab: the other pane's Bible tab is used");
+        assert_eq!(h.app.panes[1].tabs.len(), 1, "and nothing went to the note's pane");
+        assert_eq!((h.app.bible().book, h.app.bible().chapter_no), (Book::JOHN, 3));
+        assert_eq!(h.app.bible().select_request.map(|(_, a, z)| (a, z)), Some((2, 2)));
+    }
+
+    #[test]
+    fn open_in_other_pane_from_a_note_goes_to_the_pane_that_is_not_the_notes() {
+        let mut app = App::new();
+        let (bible, note) = (app.bid(), app.nid());
+        assert_ne!(app.pane_of(bible), app.pane_of(note));
+        let _ = app.open_spec(note, Spec::Verse { range: RefRange::parse("Ps 23:1").unwrap(), module: None }, Dest::OtherPane);
+        assert_eq!(app.panes.len(), 2, "no pane was made");
+        assert_eq!(app.focus, app.panes[app.pane_of(bible).unwrap()].id, "the Bible's pane, not the note's");
+        assert_eq!(app.bible().book, Book::PSALMS);
+        assert_eq!(app.panes[app.pane_of(note).unwrap()].tabs.len(), 1, "the note's pane is as it was");
+        // And a note link from the Bible tab goes the other way, to the note's pane.
+        let _ = app.open_spec(bible, Spec::Note("Memory verses".into()), Dest::OtherPane);
+        assert_eq!(app.focus, app.panes[app.pane_of(note).unwrap()].id);
     }
 
     // ---- dictionary tabs -------------------------------------------------------------------
@@ -5896,8 +6857,7 @@ mod tests {
         let mut app = App::new();
         let blank = app.new_blank();
         let id = app.add_tab(1, blank);
-        let module = app.sh.backend.dictionaries()[0].id.clone();
-        let _ = app.update(Message::Open(id, Choice::Dict(module, "Strong's (mock)".into())));
+        let _ = app.update(Message::Open(id, Choice::Dict));
         assert!(dict_of(&app, id).entry.is_none(), "empty to begin with");
         let _ = app.update(Message::Dict(id, DictMsg::Draft("G25".into())));
         assert!(dict_of(&app, id).entry.is_none(), "typing does not look up");
@@ -5918,7 +6878,7 @@ mod tests {
         let module = app.sh.backend.dictionaries()[0].id.clone();
         let blank = app.new_blank();
         let id = app.add_tab(1, blank);
-        let _ = app.update(Message::Open(id, Choice::Dict(module.clone(), String::new())));
+        let _ = app.update(Message::Open(id, Choice::Dict));
         if let Some(Tab::Dict(t)) = app.tabs.get_mut(&id) {
             t.open(&app.sh, module, "G2316");
         }

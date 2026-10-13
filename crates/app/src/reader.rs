@@ -56,6 +56,8 @@ impl ViewOptions {
 pub struct ViewOptions {
     /// Select these verses' text: (token, first, last). See `ReaderText::select_verses`.
     pub select: Option<(u64, u16, u16)>,
+    /// Select from the first to the last of these words of a verse: (token, a slice of its text).
+    pub select_words: Option<(u64, crate::reader_text::CanonSlice)>,
     /// Verses that some note links to; their numbers are tinted.
     pub annotated: BTreeSet<u16>,
     /// Scroll-into-view request: (token, verse). See `ReaderText::reveal`.
@@ -229,6 +231,7 @@ pub fn chapter_view<'a, M: 'a>(
         .margin_colors(pal.margin_bg, pal.margin_rule)
         .reveal(opts.reveal)
         .select_verses(opts.select)
+        .select_words(opts.select_words)
         .marks(opts.marks.clone())
         .clear_selection(opts.clear_token)
         .toolbar(toolbar)
@@ -312,6 +315,7 @@ mod tests {
     fn opts(show_strongs: bool) -> ViewOptions {
         ViewOptions {
             select: None,
+            select_words: None,
             annotated: BTreeSet::new(),
             reveal: None,
             marks: Vec::new(),

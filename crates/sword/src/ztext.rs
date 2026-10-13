@@ -23,6 +23,8 @@ pub struct ZText {
     dir: PathBuf,
     /// zText4 uses 4-byte verse lengths where zText uses 2.
     long_lengths: bool,
+    /// The letter in the files' extensions: `b` for a Bible (`ot.bzv`), `c` for a commentary.
+    kind: char,
     index: [Mutex<Option<Arc<Vec<u8>>>>; 2],
     blocks: Mutex<HashMap<(usize, u32), Block>>,
 }
@@ -66,11 +68,20 @@ fn slot(book_idx: usize, chapter: u16, verse: u16) -> usize {
 
 impl ZText {
     pub fn open(dir: PathBuf, long_lengths: bool) -> ZText {
-        ZText { dir, long_lengths, index: Default::default(), blocks: Default::default() }
+        ZText::open_as(dir, long_lengths, 'b')
+    }
+
+    pub fn open_as(dir: PathBuf, long_lengths: bool, kind: char) -> ZText {
+        ZText { dir, long_lengths, kind, index: Default::default(), blocks: Default::default() }
+    }
+
+    /// The file named `stem` with this module's extension `z` + `ext`: `ot.czv`.
+    fn file(&self, stem: &str, ext: char) -> PathBuf {
+        self.dir.join(format!("{stem}.{}z{ext}", self.kind))
     }
 
     pub fn has_testament(&self, nt: bool) -> bool {
-        self.dir.join(if nt { "nt.bzv" } else { "ot.bzv" }).is_file()
+        self.file(if nt { "nt" } else { "ot" }, 'v').is_file()
     }
 
     pub fn has_book(&self, book: Book) -> bool {
@@ -110,8 +121,7 @@ impl ZText {
         if let Some(i) = &*slot {
             return Ok(i.clone());
         }
-        let name = if t == 0 { "ot.bzv" } else { "nt.bzv" };
-        let bytes = Arc::new(fs::read(self.dir.join(name))?);
+        let bytes = Arc::new(fs::read(self.file(if t == 0 { "ot" } else { "nt" }, 'v'))?);
         *slot = Some(bytes.clone());
         Ok(bytes)
     }
@@ -121,14 +131,14 @@ impl ZText {
             return Ok(b.clone());
         }
         let stem = if t == 0 { "ot" } else { "nt" };
-        let table = fs::read(self.dir.join(format!("{stem}.bzs")))?;
+        let table = fs::read(self.file(stem, 's'))?;
         let entry = n as usize * 12;
         let offset = u32_at(&table, entry)? as u64;
         let size = u32_at(&table, entry + 4)? as usize;
         let mut compressed = vec![0u8; size];
         {
             use std::io::{Seek, SeekFrom};
-            let mut f = fs::File::open(self.dir.join(format!("{stem}.bzz")))?;
+            let mut f = fs::File::open(self.file(stem, 'z'))?;
             f.seek(SeekFrom::Start(offset))?;
             f.read_exact(&mut compressed)?;
         }

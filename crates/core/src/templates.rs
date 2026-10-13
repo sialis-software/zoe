@@ -223,7 +223,6 @@ pub fn plan(template: &Template, now: &DateTime<Local>, title: Option<&str>, tak
         .unwrap_or_else(|| path.trim_end_matches(".md").rsplit('/').next().unwrap_or_default().to_string());
     let words = |text: &str| expand(text, &title, now);
     let front = Frontmatter {
-        title: Some(title.clone()),
         created: Some(frontmatter::now()),
         tags: template.tags.iter().map(|t| words(t)).collect(),
         kind: template.kind.as_deref().map(words),
@@ -239,6 +238,7 @@ pub fn plan(template: &Template, now: &DateTime<Local>, title: Option<&str>, tak
                 },
             })
             .collect(),
+        ..Frontmatter::default()
     };
     let body = words(&template.body);
     let text = if body.is_empty() { format!("{}\n", front.render()) } else { format!("{}\n{body}", front.render()) };
@@ -280,7 +280,7 @@ mod tests {
         let text = made.text.unwrap();
         let parsed = frontmatter::parse(&text);
         assert_eq!(parsed.front.tags, ["prayer"]);
-        assert_eq!(parsed.front.title.as_deref(), Some("Family"));
+        assert_eq!(parsed.front.title, None, "the file name and the heading are the title: no property says it again");
         assert!(parsed.front.created.is_some());
         assert!(parsed.front.props.is_empty(), "nothing of `template_…` is copied");
         assert!(text.contains("\n# Family\n\n## Praise"), "{text}");

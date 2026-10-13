@@ -97,6 +97,8 @@ pub enum NoteMsg {
     PickKind(String),
     /// Open this template to change what a note of its kind starts with.
     EditTemplate(String),
+    /// The notes that link to this one.
+    OpenBacklinks,
     /// The title typed in that dialog, and back to the choice of kind.
     NewTitle(String),
     BackToKinds,
@@ -104,6 +106,10 @@ pub enum NoteMsg {
     /// Start a note from this template.
     CreateNote(String),
     // The properties strip
+    /// A margin note's mark: how it marks the text, whether its colors are showing, and its color.
+    MarkStyle(MarkStyle),
+    MarkColors,
+    MarkColor(usize),
     TagDraft(String),
     /// Add this existing tag (from the suggestions).
     PickTag(String),
@@ -113,7 +119,6 @@ pub enum NoteMsg {
     AddProperties,
     // The properties editor
     ToggleProps,
-    SetTitle(String),
     SetKind(KindChoice),
     /// Text typed into the value of the property at this place.
     PropEdit(usize, String),
@@ -122,6 +127,21 @@ pub enum NoteMsg {
     NewKey(String),
     NewType(PropType),
     AddProp,
+}
+
+/// The inside of a tag chip: the tag, and how many notes have it (not shown for none). The count
+/// takes the chip's own text color (it used to be a fixed grey, which vanished on a grey chip).
+fn chip_label<'a>(tag: &str, count: usize, chosen: bool) -> Element<'a, NoteMsg> {
+    let mut label = row![].spacing(5).align_y(iced::Center);
+    if chosen {
+        // Chosen tags are told from the rest by more than a color.
+        label = label.push(text("\u{2713}").size(12));
+    }
+    label = label.push(text(format!("#{tag}")).size(12));
+    if count > 0 {
+        label = label.push(text(count.to_string()).size(11));
+    }
+    label.into()
 }
 
 /// The box for a new tag: rounded, and only a little lighter under the pointer.
@@ -150,23 +170,42 @@ fn tag_box_style(theme: &Theme, status: text_input::Status) -> text_input::Style
 
 /// A tag as a button: filled when it is chosen, and in its color if a pen is for it.
 fn tag_chip_style(theme: &Theme, status: button::Status, on: bool, color: Option<iced::Color>) -> button::Style {
-    let pointed = matches!(status, button::Status::Hovered) && !on;
-    // Pointed at, a chip only lifts a little: the standard hover of a `secondary` button is a lot.
-    let calm = if pointed { button::Status::Active } else { status };
-    let base = if on { button::primary(theme, calm) } else { button::secondary(theme, calm) };
-    let mut style = button::Style { border: iced::Border { radius: 12.0.into(), ..base.border }, ..base };
-    if let Some(color) = color {
-        style.text_color = if on { theme.extended_palette().background.base.text } else { color };
-        style.border = iced::Border { color, width: 1.0, radius: 12.0.into() };
-        style.background = Some(iced::Color { a: if on { 0.55 } else if pointed { 0.22 } else { 0.12 }, ..color }.into());
-    } else if pointed
-        && let Some(iced::Background::Color(c)) = style.background
-    {
-        let t = theme.extended_palette().background.base.text;
-        let lift = |a: f32, b: f32| a + (b - a) * 0.12;
-        style.background = Some(iced::Color { r: lift(c.r, t.r), g: lift(c.g, t.g), b: lift(c.b, t.b), a: c.a }.into());
+    let palette = theme.extended_palette();
+    let pointed = matches!(status, button::Status::Hovered);
+    let text = palette.background.base.text;
+    let edge = |c: iced::Color, width: f32| iced::Border { color: c, width, radius: 12.0.into() };
+    match (on, color) {
+        // Chosen: solid, in the tag's color if it has one, with a tick (see `chip_label`): the
+        // chips that are narrowing the list stand out from the ones that are only there.
+        (true, Some(color)) => {
+            let luma = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+            button::Style {
+                background: Some(iced::Color { a: if pointed { 0.9 } else { 1.0 }, ..color }.into()),
+                text_color: if luma > 0.55 { iced::Color::BLACK } else { iced::Color::WHITE },
+                border: edge(color, 1.0),
+                ..button::Style::default()
+            }
+        }
+        (true, None) => button::Style {
+            background: Some(palette.primary.base.color.into()),
+            text_color: palette.primary.base.text,
+            border: edge(palette.primary.strong.color, 1.0),
+            ..button::Style::default()
+        },
+        // Not chosen: an outline, nothing filled (a little tint of its color, if it has one).
+        (false, Some(color)) => button::Style {
+            background: Some(iced::Color { a: if pointed { 0.2 } else { 0.07 }, ..color }.into()),
+            text_color: color,
+            border: edge(iced::Color { a: 0.7, ..color }, 1.0),
+            ..button::Style::default()
+        },
+        (false, None) => button::Style {
+            background: Some(iced::Color { a: if pointed { 0.1 } else { 0.0 }, ..text }.into()),
+            text_color: text,
+            border: edge(iced::Color { a: 0.35, ..text }, 1.0),
+            ..button::Style::default()
+        },
     }
-    style
 }
 
 /// The color of tag `tag`, if it has one.
@@ -271,6 +310,8 @@ pub enum Request {
     Menu(Spec, iced::Point),
     /// A link has been picked up: carry it, from this point of the window.
     Drag(Spec, iced::Point),
+    /// Show the notes that link to the note at this path in a tab.
+    Backlinks(String),
 }
 
 /// What the confirmation dialog is about to delete.
@@ -313,6 +354,8 @@ pub struct NoteTab {
     pub menu_open: bool,
     /// The full properties editor is open.
     pub props_open: bool,
+    /// Whether a margin note's colors to choose from are showing.
+    pub mark_colors: bool,
     /// What a value box shows while what is typed is not (yet) a value of its type: a number
     /// half typed, a list with its comma still to be followed. By place in the properties.
     pub drafts: BTreeMap<usize, String>,
@@ -442,6 +485,7 @@ impl NoteTab {
             renaming: None,
             menu_open: false,
             props_open: false,
+            mark_colors: false,
             drafts: BTreeMap::new(),
             new_key: String::new(),
             new_type: PropType::Text,
@@ -490,6 +534,7 @@ impl NoteTab {
         self.renaming = None;
         self.confirm_delete = false;
         self.tag_draft.clear();
+        self.mark_colors = false;
         self.drafts.clear();
         sh.status.clear();
     }
@@ -527,6 +572,21 @@ impl NoteTab {
             sh.notes.insert(made.path.clone(), text);
         }
         self.open(sh, made.path);
+    }
+
+    /// Add a tag to the note, or to the mark when this is a margin note's file (whose lines are
+    /// the app's, so they are changed through the mark).
+    fn add_tag(&mut self, sh: &mut Shared, tag: &str) {
+        match self.open_mark_index(sh) {
+            Some(i) => {
+                let mut tags = sh.marks[i].tags.clone();
+                tags.push(tag.to_string());
+                sh.set_mark_tags(i, tags);
+            }
+            None => self.change_properties(sh, |f| {
+                f.add_tag(tag);
+            }),
+        }
     }
 
     /// Index of the mark whose file is open here.
@@ -631,6 +691,10 @@ impl NoteTab {
                 self.new_title.clear();
                 task = iced::widget::operation::focus(new_title_id());
             }
+            NoteMsg::OpenBacklinks => {
+                self.menu_open = false;
+                return (task, Some(Request::Backlinks(self.path.clone())));
+            }
             NoteMsg::EditTemplate(path) => {
                 self.choosing = false;
                 self.pending = None;
@@ -649,27 +713,40 @@ impl NoteTab {
                 let title = std::mem::take(&mut self.new_title);
                 self.new_note(sh, &template, Some(&title));
             }
+            NoteMsg::MarkStyle(style) => {
+                if let Some(i) = self.open_mark_index(sh) {
+                    let color = sh.marks[i].color.clone();
+                    sh.set_mark_look(i, style, &color);
+                }
+            }
+            NoteMsg::MarkColors => self.mark_colors = !self.mark_colors,
+            NoteMsg::MarkColor(n) => {
+                self.mark_colors = false;
+                if let (Some(i), Some(color)) = (self.open_mark_index(sh), crate::state::PEN_COLORS.get(n)) {
+                    let style = sh.marks[i].style;
+                    sh.set_mark_look(i, style, color);
+                }
+            }
             NoteMsg::TagDraft(draft) => self.tag_draft = draft,
             NoteMsg::PickTag(tag) => {
                 self.tag_draft.clear();
-                self.change_properties(sh, |f| {
-                    f.add_tag(&tag);
-                });
+                self.add_tag(sh, &tag);
             }
             NoteMsg::AddTag => {
                 let tag = std::mem::take(&mut self.tag_draft);
-                self.change_properties(sh, |f| {
-                    f.add_tag(&tag);
-                });
+                self.add_tag(sh, &tag);
             }
-            NoteMsg::RemoveTag(tag) => self.change_properties(sh, |f| f.tags.retain(|t| *t != tag)),
+            NoteMsg::RemoveTag(tag) => match self.open_mark_index(sh) {
+                Some(i) => {
+                    let tags = sh.marks[i].tags.iter().filter(|t| **t != tag).cloned().collect();
+                    sh.set_mark_tags(i, tags);
+                }
+                None => self.change_properties(sh, |f| f.tags.retain(|t| *t != tag)),
+            },
             NoteMsg::AddProperties => self.change_properties(sh, |f| {
                 f.created.get_or_insert_with(frontmatter::now);
             }),
             NoteMsg::ToggleProps => self.props_open = !self.props_open,
-            NoteMsg::SetTitle(title) => {
-                self.change_properties(sh, |f| f.title = (!title.is_empty()).then_some(title));
-            }
             NoteMsg::SetKind(KindChoice(kind)) => self.change_properties(sh, |f| f.kind = kind),
             NoteMsg::PropEdit(i, typed) => {
                 let kind = frontmatter::parse(self.doc.source()).front.props.get(i).and_then(|p| p.value.prop_type());
@@ -802,28 +879,44 @@ impl NoteTab {
         // The menu at the right edge, as in the Bible tab.
         header = header.push(square(crate::icons::Icon::Menu.view(18.0), NoteMsg::ToggleMenu));
 
-        let mut pane = column![container(header).padding([8, 16]), rule::horizontal(1)].spacing(0);
+        // With no note at all there is nothing to select or edit: just a way to make one.
+        let no_notes = sh.first_ordinary_note().is_empty() && !sh.notes.contains_key(&self.path);
+        let pane: Element<'a, NoteMsg> = if no_notes {
+            container(
+                column![
+                    text("No notes yet").size(14).style(text::secondary),
+                    button(text("Create note").size(15)).padding([8, 18]).on_press(NoteMsg::NewNote),
+                ]
+                .spacing(12)
+                .align_x(iced::Center),
+            )
+            .center(Length::Fill)
+            .into()
+        } else {
+            let mut pane = column![container(header).padding([8, 16]), rule::horizontal(1)].spacing(0);
 
-        // The note's properties, shown and edited here rather than as raw lines in the text.
-        pane = pane.push(self.properties(sh));
+            // The note's properties, shown and edited here rather than as raw lines in the text.
+            pane = pane.push(self.properties(sh));
 
-        let module = reference.map(|b| b.module.clone()).or_else(|| sh.backend.modules().first().map(|m| m.id.clone()));
-        let module = module.unwrap_or(ModuleId(String::new()));
-        let embed_module = module.clone();
-        let editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
-            .id(self.editor_id())
-            .on_action(NoteMsg::Action)
-            .follow_links(true)
-            .on_link(NoteMsg::OpenLink)
-            .on_link_menu(NoteMsg::LinkMenu)
-            .on_link_drag(NoteMsg::LinkDrag)
-            .embed(move |target| sh.embed_for(&embed_module, target))
-            .placeholder("Write here…")
-            .size(sh.settings.notes_size)
-            .font(sh.settings.text_font())
-            .padding(16)
-            .height(Length::Fill);
-        pane = pane.push(editor);
+            let module = reference.map(|b| b.module.clone()).or_else(|| sh.backend.modules().first().map(|m| m.id.clone()));
+            let module = module.unwrap_or(ModuleId(String::new()));
+            let embed_module = module.clone();
+            let editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
+                .id(self.editor_id())
+                .on_action(NoteMsg::Action)
+                .follow_links(true)
+                .on_link(NoteMsg::OpenLink)
+                .on_link_menu(NoteMsg::LinkMenu)
+                .on_link_drag(NoteMsg::LinkDrag)
+                .embed(move |target| sh.embed_for(&embed_module, target))
+                .placeholder("Write here…")
+                .size(sh.settings.notes_size)
+                .font(sh.settings.text_font())
+                .padding(16)
+                .height(Length::Fill);
+            pane = pane.push(editor);
+            pane.into()
+        };
 
         // A pop-up, or the delete dialog, goes over the note. The two layers it takes are always
         // in the tree, empty when there is none, so that opening one does not rebuild the editor
@@ -850,7 +943,7 @@ impl NoteTab {
         } else if let Some(picker) = &self.picker {
             // The panel sits over the note under the selector; a click anywhere else closes it.
             let panel = container(opaque(self.panel(sh, picker)))
-                .padding(iced::Padding { top: PANEL_TOP, right: 0.0, bottom: 0.0, left: 16.0 })
+                .padding(iced::Padding { top: PANEL_TOP, right: 16.0, bottom: 0.0, left: 16.0 })
                 .width(Length::Fill)
                 .height(Length::Fill);
             (dismiss(NoteMsg::ClosePicker), panel.into())
@@ -872,6 +965,7 @@ impl NoteTab {
         };
         let mut items = column![item(crate::icons::Icon::Plus, "New note\u{2026}", NoteMsg::NewNote)].spacing(2);
         if self.open_mark_index(sh).is_none() {
+            items = items.push(item(crate::icons::Icon::Backlinks, "Backlinks", NoteMsg::OpenBacklinks));
             items = items.push(item(crate::icons::Icon::Pencil, "Rename", NoteMsg::StartRename));
         }
         items = items.push(item(crate::icons::Icon::Trash, "Delete", NoteMsg::AskDelete));
@@ -920,11 +1014,11 @@ impl NoteTab {
     }
 
     /// The properties, above the text: a strip with when the note was made and its tags (and a
-    /// button to open the full editor below it). A margin note's are the mark's, shown not edited.
+    /// button to open the full editor below it). A margin note's are the mark's, edited through it.
     fn properties<'a>(&'a self, sh: &'a Shared) -> Element<'a, NoteMsg> {
         let front = frontmatter::parse(self.doc.source()).front;
         if let Some(mark) = self.open_mark_index(sh).and_then(|i| sh.marks.get(i)) {
-            return self.mark_summary(mark);
+            return self.mark_summary(sh, mark);
         }
         let mut strip = row![].spacing(8).align_y(iced::Center);
         match &front.created {
@@ -980,8 +1074,8 @@ impl NoteTab {
             for (tag, count) in suggestions {
                 let color = tag_color(sh, &tag);
                 chips = chips.push(
-                    button(row![text(format!("#{tag}")).size(12), text(count.to_string()).size(11).style(text::secondary)].spacing(4))
-                        .padding([1, 6])
+                    button(chip_label(&tag, count, false))
+                        .padding([1, 8])
                         .style(move |theme: &Theme, status| tag_chip_style(theme, status, false, color))
                         .on_press(NoteMsg::PickTag(tag)),
                 );
@@ -994,17 +1088,114 @@ impl NoteTab {
         out.into()
     }
 
-    /// What is known of a margin note's mark, for reading: the file's lines are the app's.
-    fn mark_summary<'a>(&self, mark: &'a study_core::margin::Mark) -> Element<'a, NoteMsg> {
-        let mut bits = vec![format!("{}", mark.anchor), format!("{:?}", mark.style).to_lowercase()];
+    /// A margin note's mark: the verse it is on (a link), and what can be changed about it: how
+    /// it marks the text, its color and its tags. Where it is (the passage and the words) is not
+    /// changed here.
+    fn mark_summary<'a>(&'a self, sh: &'a Shared, mark: &'a study_core::margin::Mark) -> Element<'a, NoteMsg> {
+        let mut bits = Vec::new();
         if !mark.module.is_empty() {
             bits.push(mark.module.clone());
         }
         if !mark.created.is_empty() {
             bits.push(format!("created {}", frontmatter::display(&mark.created)));
         }
-        bits.extend(mark.tags.iter().map(|t| format!("#{t}")));
-        container(text(bits.join("  \u{00B7}  ")).size(12).style(text::secondary)).padding([6, 16]).into()
+        // The verse the note is on is a link to it, as any `[[John 3:16]]` is.
+        let target = LinkTarget::Verse { range: mark.anchor, module: (!mark.module.is_empty()).then(|| mark.module.clone()) };
+        let verse = button(text(mark.anchor.to_string()).size(12))
+            .padding(0)
+            .style(|theme: &Theme, status| {
+                let link = crate::palette::Palette::for_theme(theme).link;
+                let shown = if matches!(status, button::Status::Hovered) { iced::Color { a: 0.8, ..link } } else { link };
+                button::Style { text_color: shown, ..button::Style::default() }
+            })
+            .on_press(NoteMsg::OpenLink(target.clone()));
+        // With what a link in the text has: a right click for where to open it, and pulling it away.
+        let (for_menu, for_pull) = (target.clone(), target);
+        let verse = crate::link_area::link_area(
+            verse,
+            move |at| NoteMsg::LinkMenu(for_menu.clone(), at),
+            move |at| NoteMsg::LinkDrag(for_pull.clone(), at),
+        );
+        let about = row![verse, text(if bits.is_empty() { String::new() } else { format!("  \u{00B7}  {}", bits.join("  \u{00B7}  ")) }).size(12).style(text::secondary)]
+            .align_y(iced::Center);
+
+        // How it marks the text, and its color.
+        let style_button = |label: &'static str, style: MarkStyle| {
+            let chosen = mark.style == style;
+            button(text(label).size(12))
+                .padding([2, 10])
+                .style(if chosen { button::primary } else { button::secondary })
+                .on_press(NoteMsg::MarkStyle(style))
+        };
+        let color = crate::bible_tab::hex_color(&mark.color, 1.0).unwrap_or(iced::Color::WHITE);
+        let dot = button(space::horizontal())
+            .width(22)
+            .height(22)
+            .padding(0)
+            .style(move |theme: &Theme, _| button::Style {
+                background: Some(color.into()),
+                border: iced::Border {
+                    radius: 11.0.into(),
+                    color: if self.mark_colors { theme.extended_palette().background.base.text } else { iced::Color { a: 0.5, ..iced::Color::WHITE } },
+                    width: if self.mark_colors { 2.5 } else { 1.0 },
+                },
+                ..button::Style::default()
+            })
+            .on_press(NoteMsg::MarkColors);
+        let look = row![
+            style_button("Highlight", MarkStyle::Highlight),
+            style_button("Underline", MarkStyle::Underline),
+            space::horizontal().width(8),
+            text("Color").size(12).style(text::secondary),
+            dot,
+        ]
+        .spacing(6)
+        .align_y(iced::Center);
+
+        let mut tags = row![].spacing(6).align_y(iced::Center);
+        for tag in &mark.tags {
+            let color = tag_color(sh, tag);
+            tags = tags.push(
+                button(row![text(format!("#{tag}")).size(13), text("\u{00D7}").size(15)].spacing(4).align_y(iced::Center))
+                    .padding([3, 10])
+                    .style(move |theme: &Theme, status| tag_chip_style(theme, status, false, color))
+                    .on_press(NoteMsg::RemoveTag(tag.clone())),
+            );
+        }
+        tags = tags.push(
+            text_input("Add tag", &self.tag_draft)
+                .on_input(NoteMsg::TagDraft)
+                .on_submit(NoteMsg::AddTag)
+                .size(13)
+                .padding([4, 10])
+                .style(tag_box_style)
+                .width(130),
+        );
+        let quiet = || scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0));
+        let mut out = column![about, scrollable(look).direction(quiet())].spacing(6);
+        if self.mark_colors {
+            out = out.push(crate::color_grid(
+                crate::state::PEN_COLORS.iter().position(|c| c.eq_ignore_ascii_case(&mark.color)).unwrap_or(usize::MAX),
+                NoteMsg::MarkColor,
+            ));
+        }
+        out = out.push(scrollable(tags).direction(quiet()));
+        // Tags in use that fit what is being typed, to pick instead of typing the rest.
+        let suggestions = sh.tag_suggestions(&self.tag_draft, &mark.tags, 8);
+        if !suggestions.is_empty() {
+            let mut chips = row![text("Use").size(12).style(text::secondary)].spacing(6).align_y(iced::Center);
+            for (tag, count) in suggestions {
+                let color = tag_color(sh, &tag);
+                chips = chips.push(
+                    button(chip_label(&tag, count, false))
+                        .padding([1, 8])
+                        .style(move |theme: &Theme, status| tag_chip_style(theme, status, false, color))
+                        .on_press(NoteMsg::PickTag(tag)),
+                );
+            }
+            out = out.push(scrollable(chips).direction(quiet()));
+        }
+        container(out).padding([6, 16]).into()
     }
 
     /// Everything about the note that is not its text. The app's own (title, type, tags,
@@ -1018,9 +1209,6 @@ impl NoteTab {
             kinds.push(KindChoice(Some(own.clone())));
         }
         let mut rows = column![
-            row![label("Title"), text_input("Untitled", front.title.as_deref().unwrap_or("")).on_input(NoteMsg::SetTitle).size(13).padding([3, 6])]
-                .spacing(8)
-                .align_y(iced::Center),
             row![label("Type"), pick_list(kinds, Some(KindChoice(front.kind.clone())), NoteMsg::SetKind).text_size(13).padding([3, 8])]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -1102,8 +1290,8 @@ impl NoteTab {
         for (tag, count) in shown {
             let on = picker.tags.contains(&tag);
             let color = tag_color(sh, &tag);
-            let chip = button(row![text(format!("#{tag}")).size(12), text(count.to_string()).size(11).style(text::secondary)].spacing(4))
-                .padding([1, 6])
+            let chip = button(chip_label(&tag, count, on))
+                .padding([1, 8])
                 .style(move |theme: &Theme, status| tag_chip_style(theme, status, on, color))
                 .on_press(NoteMsg::PickerTag(tag.clone()));
             chips.push(chip.into());
@@ -1118,19 +1306,30 @@ impl NoteTab {
             let open = picker.is_open(group, &self.path);
             // The ordinary notes are just the list; only the margin notes fold away.
             if group.key != "notes" {
+                // A folder: a band of its own, in bold, with its count, where the notes are plain.
+                let bold = iced::Font { weight: iced::font::Weight::Bold, ..crate::fonts::UI };
                 let header = button(
                     row![
-                        text(if open { "▾" } else { "▸" }).size(12),
-                        text(group.label.clone()).size(13),
+                        text(if open { "\u{25BE}" } else { "\u{25B8}" }).size(13),
+                        text(group.label.clone()).size(13).font(bold),
                         space::horizontal(),
-                        text(group.notes.len().to_string()).size(12).style(text::secondary),
+                        text(group.notes.len().to_string()).size(12),
                     ]
                     .spacing(8)
                     .align_y(iced::Center),
                 )
                 .width(Length::Fill)
-                .padding([4, 8])
-                .style(button::text)
+                .padding([5, 8])
+                .style(|theme: &Theme, status| {
+                    let palette = theme.extended_palette();
+                    let shade = if matches!(status, button::Status::Hovered) { 0.9 } else { 0.7 };
+                    button::Style {
+                        background: Some(iced::Color { a: shade, ..palette.background.strong.color }.into()),
+                        text_color: palette.background.base.text,
+                        border: iced::Border { radius: 4.0.into(), ..iced::Border::default() },
+                        ..button::Style::default()
+                    }
+                })
                 .on_press(NoteMsg::ToggleGroup(group.key.clone()));
                 list = list.push(header);
             }
@@ -1163,7 +1362,7 @@ impl NoteTab {
         }
         container(column![top, scrollable(list).height(Length::Shrink)].spacing(8))
             .padding(10)
-            .width(340)
+            .width(Length::Fill)
             .max_height(460)
             .style(crate::popup_style)
             .into()

@@ -42,6 +42,25 @@ its toolbar away and shows a toast (`Shared::toast`, a line over the bottom of t
 about two seconds; a clock subscription runs only while one is showing). A selector panel or other
 pop-up closes when anything outside it is clicked, in any pane.
 
+A margin note opened in a note tab shows its mark's details in place of the properties strip: the verse it is
+on (a link: it shows that verse in the reader, as a `[[John 3:16]]` does: right click for where to open it, pull it away to carry it to a tab or pane), the style, module, created time
+and tags.
+
+A new tab asks only what *kind* of tab it is to be (Bible, Dictionary or Notes); which module, dictionary or
+note comes after, from the tab's own pickers. It opens on the module the other Bible tab is reading, the first
+dictionary, and the first note.
+
+## Backlinks
+
+A verse number is green when some note links to it (`[[John 3:16]]`; not the templates). Selecting
+such verses adds a **backlinks** button to the selection toolbar: it opens a tab (in the other pane, one
+at a time) listing the notes that link to any of the selected verses, each with the lines that do;
+a click shows the note. The tab follows the notes as they are written, and comes back with the
+workspace.
+
+The note tab's hamburger menu has **Backlinks** too: the same tab, for the notes that link to the note by
+name (`[[Nicodemus]]`, whatever the link shows), not the note itself or the templates.
+
 ## Tags (not folders)
 
 People find notes by tag; folders are the app's business. Every new note is filed in `notes/` (the
@@ -218,3 +237,30 @@ their own), built into the program and drawn by `icons.rs` in the colour of a se
 button's label. To add one: drop in an SVG with `viewBox="0 0 24 24"`, add a variant to
 `Icon`, and use `Icon::X.view(size)`. Anything that is a picture should be one of these,
 not text glyphs or boxes drawn in code.
+
+## Commentary tabs
+
+A commentary (a SWORD `zCom` module such as Gill's Exposition) opens in its own tab, beside the
+reader. It shows the notes on one chapter, verse by verse, under the verse each starts at (a note
+that covers several verses shows once). Pickers choose the commentary, book and chapter, and the
+arrows step to the previous or next chapter across books. Notes are converted from ThML or OSIS to
+paragraphs with bold, italic and links; a passage a note points to is a link that shows the verse in
+the reader (with the same modifier keys as any link). The reader's menu has *Commentary…*, which
+opens (or reuses) the commentary tab at the chapter, and scrolls toward the selected verse. The text is the editor's own widget in a read-only mode, so it selects like any text (drag, double and
+triple click, Shift-arrows, Select All) and copies the words without the markdown marks; it cannot be
+changed. A new tab can also be a commentary, and the tab is saved with the workspace.
+
+## Search tabs
+
+A search tab finds words in one Bible module. The module's verses (their plain words, with no
+footnotes or Strong's markers) are put in an SQLite full-text index in the cache folder
+(`bible-<module>.sqlite`) the first time the module is searched, which takes about half a second,
+and again only if the installed module changes. The query language: words (all must be in the
+verse), `"a phrase"`, `a OR b`, `-left`, `pre*`, a Strong's number (`G26`, `H430`, found through the
+module's tagged words), and `in:John`, `in:NT`, `in:Gen-Deut` for where. The results follow the typing (searched when it pauses for a moment; Enter searches at once). Options: match case, other
+forms of a word (porter stemming), best matches first (else canon order). Results list each verse with
+its matched words marked and a count per book that narrows the list; a click shows the verse in the
+reader with just those words selected (and the usual modifier keys choose where it opens). A new tab
+can be a search; the reader's selection toolbar searches the selected words; Cmd/Ctrl-Shift-F brings
+the search tab forward. The tab is saved with the workspace (words and options) and searched again
+when restored if its index is already made.

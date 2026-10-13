@@ -2,10 +2,12 @@
 //! Phase 1 ships [`mock::MockBackend`]; the real SWORD + vault backend replaces it later.
 
 pub mod ast;
+pub mod commentary;
 pub mod frontmatter;
 pub mod margin;
 pub mod markdown;
 pub mod mock;
+pub mod search;
 pub mod templates;
 
 use ast::Chapter;
@@ -64,6 +66,15 @@ pub trait StudyBackend {
     fn dictionary_entry(&self, module: &ModuleId, key: &str) -> Option<LexiconEntry>;
     /// The dictionary that defines a Strong's number (`G25`), if any does.
     fn strongs_dictionary(&self, key: &str) -> Option<ModuleId>;
+    /// The commentaries installed, in the order to offer them.
+    fn commentaries(&self) -> Vec<ModuleInfo> {
+        Vec::new()
+    }
+    /// A commentary's note at a verse (a note can cover several verses and be the same for each),
+    /// if it has one.
+    fn commentary_note(&self, _module: &ModuleId, _book: Book, _chapter: u16, _verse: u16) -> Option<Vec<commentary::Paragraph>> {
+        None
+    }
     fn cross_references(&self, range: &RefRange) -> Vec<CrossRef>;
     /// Vault-relative paths of all notes.
     fn note_paths(&self) -> Vec<String>;

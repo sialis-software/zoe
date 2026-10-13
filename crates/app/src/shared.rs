@@ -10,7 +10,7 @@ use crate::state::{NamedLayout, Settings, Store};
 use iced::Theme;
 use scripture::Book;
 use std::collections::{BTreeMap, BTreeSet};
-use study_core::margin::Mark;
+use study_core::margin::{Mark, MarkStyle};
 use study_core::frontmatter;
 use study_core::templates::{self, Template};
 use study_core::markdown::{self, LinkTarget, find_links};
@@ -34,6 +34,13 @@ pub enum Event {
     NoteRemoved { old: String, next: String },
 }
 
+/// A note that links to a passage, and the lines of it that do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Backlink {
+    pub path: String,
+    pub lines: Vec<String>,
+}
+
 /// A short message shown over the window for a moment ("Copied …").
 pub struct Toast {
     pub text: String,
@@ -49,6 +56,8 @@ pub struct Shared {
     /// each update, when there is one.
     pub notes: NoteMap,
     pub persist: Option<Persist>,
+    /// The folder of the vault the notes are from.
+    pub vault: Option<std::path::PathBuf>,
     /// Every mark, in memory; each is also a file under `margins/`.
     pub marks: Vec<Mark>,
     pub next_mark: u32,
@@ -62,6 +71,23 @@ pub struct Shared {
     pub events: Vec<Event>,
     /// Every tag with the number of notes that have it, as of the notes' revision it is for.
     tag_cache: std::cell::RefCell<(u64, Vec<(String, usize)>)>,
+    /// Where each Strong's number occurs in a module, read from the whole module the first time it
+    /// is asked for.
+    strongs_index: std::cell::RefCell<Option<(ModuleId, std::rc::Rc<StrongsIndex>)>>,
+    /// Where the Bible search indexes are kept (none: in memory), and those opened.
+    pub cache_dir: Option<std::path::PathBuf>,
+    pub bible_indexes: std::cell::RefCell<std::collections::HashMap<ModuleId, std::rc::Rc<vault::BibleIndex>>>,
+}
+
+/// Strong's numbers (as `G26`) with the verses they are in, in reading order.
+type StrongsIndex = BTreeMap<String, Vec<Occurrence>>;
+
+/// A verse with words that have a Strong's number, and where those words are in the verse's
+/// canonical text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Occurrence {
+    pub range: scripture::RefRange,
+    pub words: Vec<(usize, usize)>,
 }
 
 impl Shared {
@@ -76,6 +102,7 @@ impl Shared {
             backend,
             notes: NoteMap::loaded(notes),
             persist,
+            vault: None,
             next_mark: marks.len() as u32,
             marks,
             settings: Settings::default(),
@@ -85,7 +112,88 @@ impl Shared {
             toast: None,
             events: Vec::new(),
             tag_cache: std::cell::RefCell::new((u64::MAX, Vec::new())),
+            strongs_index: std::cell::RefCell::new(None),
+            cache_dir: None,
+            bible_indexes: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Take the notes of another vault in place of these (the old ones were saved first).
+    pub fn replace_vault(&mut self, dir: std::path::PathBuf, notes: BTreeMap<String, String>, persist: Persist) {
+        let fresh = Shared::new(Box::new(study_core::mock::MockBackend), notes, Some(persist));
+        self.notes = fresh.notes;
+        self.persist = fresh.persist;
+        self.marks = fresh.marks;
+        self.next_mark = fresh.next_mark;
+        self.vault = Some(dir);
+        *self.tag_cache.borrow_mut() = (u64::MAX, Vec::new());
+        self.load_pens(false);
+    }
+
+    /// The file in the vault that keeps its pens, so they go where the vault goes.
+    fn pens_file(&self) -> Option<std::path::PathBuf> {
+        self.vault.as_ref().map(|dir| dir.join(".bible-study").join("pens.json"))
+    }
+
+    /// Take the pens the vault keeps. A vault with none yet gets the ones in use if `carry` (the
+    /// start-up of a vault that has had them in the settings until now, which are written into
+    /// it), else the starting pens.
+    pub fn load_pens(&mut self, carry: bool) {
+        let Some(file) = self.pens_file() else { return };
+        let kept: Option<Vec<crate::state::PenDef>> = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok());
+        match kept {
+            Some(pens) => self.settings.pens = Settings { pens, ..self.settings.clone() }.sanitized().pens,
+            None if carry => self.keep_pens(),
+            None => self.settings.pens = crate::state::default_pens(),
+        }
+    }
+
+    /// Write the pens in use into the vault.
+    fn keep_pens(&mut self) {
+        let Some(file) = self.pens_file() else { return };
+        let written = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| serde_json::to_string_pretty(&self.settings.pens).map_err(std::io::Error::other))
+            .and_then(|text| std::fs::write(&file, text));
+        if let Err(e) = written {
+            self.status = format!("Could not save the pens in the vault: {e}");
+        }
+    }
+
+    /// Forget what was read of the modules (they have changed).
+    pub fn forget_modules(&self) {
+        *self.strongs_index.borrow_mut() = None;
+        self.bible_indexes.borrow_mut().clear();
+    }
+
+    /// The verses of `module` that have a word with Strong's number `key` (`G26`, `H430`), in
+    /// reading order, once per verse. Empty if the module has no such words. The first ask reads
+    /// the whole module; the next are instant.
+    pub fn strongs_occurrences(&self, module: &ModuleId, key: &str) -> Vec<Occurrence> {
+        let index = {
+            let mut cache = self.strongs_index.borrow_mut();
+            if cache.as_ref().is_none_or(|(m, _)| m != module) {
+                let mut index = StrongsIndex::new();
+                for (book, chapter) in self.backend.available_chapters(module) {
+                    let Ok(chapter_text) = self.backend.chapter(module, book, chapter) else { continue };
+                    for word in chapter_text.strongs_words() {
+                        for number in word.strongs.split_whitespace().filter_map(strongs_name) {
+                            let range = scripture::RefRange { book, chapter, verses: Some((word.verse, word.verse)) };
+                            let places = index.entry(number).or_default();
+                            match places.last_mut() {
+                                Some(last) if last.range == range => last.words.push((word.start, word.end)),
+                                _ => places.push(Occurrence { range, words: vec![(word.start, word.end)] }),
+                            }
+                        }
+                    }
+                }
+                *cache = Some((module.clone(), std::rc::Rc::new(index)));
+            }
+            cache.as_ref().map(|(_, index)| index.clone())
+        };
+        let Some(name) = strongs_name(key) else { return Vec::new() };
+        index.and_then(|index| index.get(&name).cloned()).unwrap_or_default()
     }
 
     /// Show `text` for a moment.
@@ -114,7 +222,11 @@ impl Shared {
         if settings == self.settings {
             return;
         }
+        let pens_changed = settings.pens != self.settings.pens;
         self.settings = settings;
+        if pens_changed {
+            self.keep_pens();
+        }
         let saved = self.store.as_ref().map(|s| s.save_settings(&self.settings));
         if let Some(Err(e)) = saved {
             self.status = format!("Could not save settings: {e}");
@@ -243,10 +355,59 @@ impl Shared {
         (!body.is_empty()).then(|| EmbedContent { title: format!("{range} · {abbreviation}"), body })
     }
 
+    /// The notes that link to `passage` (a link to any of its verses, or to the whole chapter
+    /// it is in), with the lines that do, in the order of the notes' paths.
+    pub fn backlinks(&self, passage: &scripture::RefRange) -> Vec<Backlink> {
+        let overlaps = |range: &scripture::RefRange| {
+            range.book == passage.book
+                && range.chapter == passage.chapter
+                && match (range.verses, passage.verses) {
+                    (Some((a, z)), Some((from, to))) => a <= to && from <= z,
+                    _ => true,
+                }
+        };
+        let mut out = Vec::new();
+        for (path, body) in self.notes.iter().filter(|(path, _)| !templates::is_template(path)) {
+            let lines: Vec<String> = body
+                .lines()
+                .filter(|line| {
+                    find_links(line).iter().any(|link| matches!(&link.target, LinkTarget::Verse { range, .. } if overlaps(range)))
+                })
+                .map(|line| line.trim().to_string())
+                .collect();
+            if !lines.is_empty() {
+                out.push(Backlink { path: path.clone(), lines });
+            }
+        }
+        out
+    }
+
+    /// The notes that link to the note at `path` by name (`[[Nicodemus]]`, or with another name
+    /// shown), with the lines that do. Not the note itself, nor the templates.
+    pub fn note_backlinks(&self, path: &str) -> Vec<Backlink> {
+        let paths = self.note_paths();
+        let mut out = Vec::new();
+        for (from, body) in self.notes.iter().filter(|(p, _)| p.as_str() != path && !templates::is_template(p)) {
+            let lines: Vec<String> = body
+                .lines()
+                .filter(|line| {
+                    find_links(line).iter().any(|link| {
+                        matches!(&link.target, LinkTarget::Note(name) if markdown::resolve_note(&paths, name).is_some_and(|p| p == path))
+                    })
+                })
+                .map(|line| line.trim().to_string())
+                .collect();
+            if !lines.is_empty() {
+                out.push(Backlink { path: from.clone(), lines });
+            }
+        }
+        out
+    }
+
     /// Verses of `book chapter` that some note links to by number.
     pub fn annotated_verses(&self, book: Book, chapter: u16) -> BTreeSet<u16> {
         let mut out = BTreeSet::new();
-        for body in self.notes.values() {
+        for body in self.notes.iter().filter(|(path, _)| !templates::is_template(path)).map(|(_, body)| body) {
             for link in body.lines().flat_map(find_links) {
                 if let LinkTarget::Verse { range, .. } = link.target
                     && range.book == book
@@ -394,6 +555,24 @@ impl Shared {
         self.events.push(Event::NoteRewritten { old, new: path });
     }
 
+    /// Give mark `index` another look: how it marks the text, and in what color (`#RRGGBB`). A bare
+    /// highlight is filed under its style, so its file name can change.
+    pub fn set_mark_look(&mut self, index: usize, style: MarkStyle, color: &str) {
+        let Some(mark) = self.marks.get_mut(index) else { return };
+        if mark.style == style && mark.color == color {
+            return;
+        }
+        let old = mark.path();
+        mark.style = style;
+        mark.color = color.to_string();
+        let (path, markdown) = (mark.path(), mark.to_markdown());
+        if path != old {
+            self.notes.remove(&old);
+        }
+        self.notes.insert(path.clone(), markdown);
+        self.events.push(Event::NoteRewritten { old, new: path });
+    }
+
     /// Give mark `index` these tags (in one form, each once) and keep its note file in step.
     pub fn set_mark_tags(&mut self, index: usize, tags: Vec<String>) {
         let Some(mark) = self.marks.get_mut(index) else { return };
@@ -423,6 +602,14 @@ impl Shared {
             }
         }
     }
+}
+
+/// A Strong's number in one spelling: `g0026` and `G26` are `G26`.
+pub fn strongs_name(key: &str) -> Option<String> {
+    let key = key.trim();
+    let letter = key.chars().next()?.to_ascii_uppercase();
+    let number: u32 = key.get(1..)?.parse().ok()?;
+    matches!(letter, 'G' | 'H').then(|| format!("{letter}{number}"))
 }
 
 /// The id at the end of a margin file's name: `margins/John/03/16-note-s1.md` is `s1`.

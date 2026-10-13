@@ -590,6 +590,7 @@ pub struct ReaderText<'a, L, Message> {
     on_scroll: Option<Box<dyn Fn(f32) -> Message + 'a>>,
     reveal: Option<(u64, u16)>,
     select: Option<(u64, u16, u16)>,
+    select_words: Option<(u64, CanonSlice)>,
     marks: Vec<MarkDraw>,
     on_selection: Option<Box<dyn Fn(TextSelection) -> Message + 'a>>,
     clear_token: u64,
@@ -624,6 +625,7 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
             on_scroll: None,
             reveal: None,
             select: None,
+            select_words: None,
             marks: Vec::new(),
             on_selection: None,
             clear_token: 0,
@@ -675,6 +677,13 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
     /// with the number of pixels to scroll (negative = up).
     pub fn on_scroll(mut self, f: impl Fn(f32) -> Message + 'a) -> Self {
         self.on_scroll = Some(Box::new(f));
+        self
+    }
+
+    /// Select from the first to the last of the words in this verse's canonical text (a slice
+    /// of it). Each distinct `token` is served once.
+    pub fn select_words(mut self, request: Option<(u64, CanonSlice)>) -> Self {
+        self.select_words = request;
         self
     }
 
@@ -1124,6 +1133,7 @@ struct State<L> {
     revealed: Option<u64>,
     /// Last `select_verses` token handled.
     selected_token: Option<u64>,
+    selected_words: Option<u64>,
     /// Whether the last click landed in this widget; keyboard shortcuts apply only then,
     /// so Cmd+C in the writer does not copy the reader's selection.
     focused: bool,
@@ -1170,6 +1180,7 @@ impl<L> State<L> {
             anchor: None,
             revealed: None,
             selected_token: None,
+            selected_words: None,
             focused: false,
             cleared: 0,
             toolbar_node: None,
@@ -2303,6 +2314,18 @@ where
                         let (a, z) = (ordered(a), ordered(z));
                         state.selection = Some((a.0.min(z.0), a.1.max(z.1)));
                         state.anchor = state.selection.map(|(a, _)| a);
+                        shell.request_redraw();
+                    }
+                }
+                if let Some((token, slice)) = self.select_words
+                    && state.selected_words != Some(token)
+                {
+                    state.selected_words = Some(token);
+                    let ranges = block_ranges(&state.pieces, slice);
+                    if let (Some(&(fb, fs, _)), Some(&(lb, _, le))) = (ranges.first(), ranges.last()) {
+                        let (a, z) = (Pos { block: fb, offset: fs }, Pos { block: lb, offset: le });
+                        state.selection = Some((a, z));
+                        state.anchor = Some(a);
                         shell.request_redraw();
                     }
                 }

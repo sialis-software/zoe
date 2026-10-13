@@ -160,8 +160,10 @@ oracles. Start read-only; no module writing in v1.
 Implemented in `crates/sword`, all read-only and checked against `mod2imp` on every verse
 or entry of the installed modules (ASV, LSB, StrongsGreek, StrongsHebrew, LSBG, LSBH):
 
-- `.conf` parsing; library search over `BIBLE_STUDY_SWORD_PATH`, `SWORD_PATH`, `~/.sword`,
-  `~/Documents/Sword Bibles` and `/usr/share/sword`.
+- `.conf` parsing; library search over `BIBLE_STUDY_SWORD_PATH` (replaces the rest), folders
+  added in Settings → Bible modules (kept in `config.json`), `SWORD_PATH` and the app's own
+  `~/.config/sword` (made on start if missing). Other frontends' folders are not searched; add
+  one in Settings if wanted.
 - zText Bibles (ZIP-compressed, KJV versification, OSIS markup) into the shared AST:
   paragraphs, poetry, headings, footnotes, Strong's words, words of Jesus.
 - RawLD and zLD dictionaries, with TEI, ThML and plain entries parsed to lemma,

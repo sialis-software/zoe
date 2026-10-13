@@ -214,14 +214,25 @@ Module index: `verse_text(ord, text)` + FTS5, `word_lemma(ord, strongs, morph)`.
 
 The app now runs on a real vault and real modules (crates `vault`, `sword`).
 
-- **Vault**: markdown files under `$BIBLE_STUDY_HOME/vault` (default
-  `~/Library/Application Support/bible-study/vault` on macOS). Every edit is written through
-  to its file (atomic write-then-rename) after each update; deleting or renaming a mark
+- **Vault**: any folder of markdown files, chosen by the user. The choice is kept in
+  `<home>/config.json` (`<home>` is `$BIBLE_STUDY_HOME`, else `~/Library/Application Support/bible-study`
+  on macOS); with none saved, an earlier version's `<home>/vault` is used. Every edit is written
+  through to its file (atomic write-then-rename) after each update; deleting or renaming a mark
   removes the old file. Marks load from `margins/` on start.
+- **Choosing a vault** (`vault_setup.rs`). On a first run, or when the saved folder is not there
+  (an unplugged drive), a welcome page covers the window: *Create a new vault* (pick a folder,
+  name the new folder inside it), *Open an existing vault* (pick a folder; an Obsidian vault is
+  fine and its `.obsidian` is left alone), or use the default location. The same two actions are
+  in Settings → Vault, with *Show in folder*. A card confirms the folder after it is looked at
+  (note count, Obsidian or ours) and offers to add sample notes (only to a folder with no notes)
+  and the starting templates (only where there are none). Switching saves what is open, loads
+  the new notes, remembers the choice and opens the default layout; the old vault is untouched.
+- **Index per vault**: `<home>/cache/index-<hash of the vault path>.sqlite` (the default vault
+  keeps `index.sqlite`), so nothing but notes is ever written into a vault.
 - **Seed data**: an empty vault is seeded with four linked notes and nine marks anchored in
   ASV's real text (a quote a module words differently is skipped). `bible-study --reseed`
   restores the samples without touching other files.
-- **Index**: SQLite at `<home>/cache/index.sqlite` (outside the vault, per §6): `files`,
+- **Index**: SQLite in `<home>/cache/` (outside the vault, per §6): `files`,
   `links` (verse/embed/note/sword links plus each mark's anchor, as book/chapter/verse
   ranges), and an FTS5 table. It syncs incrementally by content hash on start and per save,
   and a test deletes and rebuilds it. The UI does not read it yet: `annotated_verses` and

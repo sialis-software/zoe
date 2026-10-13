@@ -28,6 +28,8 @@ pub enum DictMsg {
     Go,
     Back,
     Forward,
+    /// Show a verse that has the word (the app decides where, as for any link).
+    OpenVerse(scripture::RefRange, ModuleId, Vec<(usize, usize)>),
 }
 
 pub struct DictTab {
@@ -96,6 +98,8 @@ impl DictTab {
                     self.look_up(sh, &key);
                 }
             }
+            // Opening a verse is for the workspace to do.
+            DictMsg::OpenVerse(..) => {}
             DictMsg::Go => {
                 let key = self.draft.clone();
                 self.show(sh, &key);
@@ -103,7 +107,44 @@ impl DictTab {
         }
     }
 
-    pub fn view<'a>(&'a self, sh: &'a Shared) -> Element<'a, DictMsg> {
+    /// `searched`: the Bible whose verses a Strong's entry lists, if there is one with Strong's numbers.
+    /// Every verse of `module` that has a word with this Strong's number, as links, by book.
+    fn occurrences<'a>(&self, sh: &Shared, module: &ModuleId, key: &str) -> Element<'a, DictMsg> {
+        let verses = sh.strongs_occurrences(module, key);
+        if verses.is_empty() {
+            return space::vertical().height(0).into();
+        }
+        let name = sh.module_abbreviation(module);
+        let mut out = column![
+            rule::horizontal(1),
+            text(format!("{} verse{} in {name}", verses.len(), if verses.len() == 1 { "" } else { "s" })).size(14).style(text::secondary),
+        ]
+        .spacing(10);
+        let mut at = 0;
+        while at < verses.len() {
+            let book = verses[at].range.book;
+            let end = at + verses[at..].iter().take_while(|v| v.range.book == book).count();
+            let mut links = row![].spacing(10);
+            for found in &verses[at..end] {
+                let (chapter, verse) = (found.range.chapter, found.range.verses.map_or(0, |v| v.0));
+                links = links.push(
+                    button(text(format!("{chapter}:{verse}")).size(14))
+                        .padding(0)
+                        .style(|theme: &iced::Theme, status| {
+                            let link = crate::palette::Palette::for_theme(theme).link;
+                            let shown = if matches!(status, button::Status::Hovered) { iced::Color { a: 0.8, ..link } } else { link };
+                            button::Style { text_color: shown, ..button::Style::default() }
+                        })
+                        .on_press(DictMsg::OpenVerse(found.range, module.clone(), found.words.clone())),
+                );
+            }
+            out = out.push(column![text(book.name()).size(13).style(text::secondary), links.wrap().vertical_spacing(4)].spacing(3));
+            at = end;
+        }
+        out.into()
+    }
+
+    pub fn view<'a>(&'a self, sh: &'a Shared, searched: Option<&ModuleId>) -> Element<'a, DictMsg> {
         let choices: Vec<DictChoice> =
             sh.backend.dictionaries().into_iter().map(|d| DictChoice(d.id, d.abbreviation)).collect();
         let current = choices.iter().find(|c| c.0 == self.module).cloned();
@@ -137,13 +178,16 @@ impl DictTab {
                     let italic = Font { style: font::Style::Italic, ..fonts::UI };
                     head = head.push(text(e.transliteration.clone()).size(18).font(italic).style(text::secondary));
                 }
-                column![
+                let mut entry = column![
                     text(e.key.clone()).size(12).style(text::secondary),
                     head,
                     text(e.definition.clone()).size(17),
                 ]
-                .spacing(10)
-                .into()
+                .spacing(10);
+                if let Some(module) = searched {
+                    entry = entry.push(self.occurrences(sh, module, &e.key));
+                }
+                entry.into()
             }
             (None, true) => text("Type an entry to look up.").size(14).style(text::secondary).into(),
             (None, false) => text(format!("{} has no entry for \u{201C}{}\u{201D}.", self.module_name(sh), self.key))

@@ -371,6 +371,20 @@ fn inline(out: &mut Out, text: &str, base: usize, reveal: &Reveal, style: &Style
             literal = i;
             continue;
         }
+        // A backslash before a mark makes the mark an ordinary character (and goes unseen,
+        // unless the line is being edited: then it shows).
+        if text[i..].starts_with('\\')
+            && let Some(next) = text[i + 1..].chars().next().filter(|c| ESCAPABLE.contains(*c))
+        {
+            flush(out, literal, i);
+            let shown = reveal.shows(base + i, base + i + 1);
+            out.marker("\\", base + i..base + i + 1, shown, style);
+            let end = i + 1 + next.len_utf8();
+            out.same(&text[i + 1..end], base + i + 1..base + end, style);
+            i = end;
+            literal = i;
+            continue;
+        }
         let before = text[..i].chars().next_back();
         match detect(&text[i..], before) {
             Some(found) => {
@@ -384,6 +398,9 @@ fn inline(out: &mut Out, text: &str, base: usize, reveal: &Reveal, style: &Style
     }
     flush(out, literal, text.len());
 }
+
+/// The characters a backslash can make literal.
+const ESCAPABLE: &str = "\\*_`~[]#<>|.-+()";
 
 fn detect(rest: &str, before: Option<char>) -> Option<Found> {
     let first = rest.chars().next()?;
@@ -541,6 +558,18 @@ mod tests {
 
     fn texts(r: &Rendered) -> Vec<(&str, bool, bool)> {
         r.runs.iter().map(|run| (run.text.as_str(), run.style.bold, run.style.italic)).collect()
+    }
+
+    #[test]
+    fn a_backslash_makes_a_mark_an_ordinary_character_and_is_not_shown() {
+        let r = rendered("1\\. a \\*star\\* and \\[x\\] and **bold**", false);
+        assert_eq!(r.text, "1. a *star* and [x] and bold");
+        assert!(texts(&r).contains(&("bold", true, false)));
+        assert!(texts(&r).iter().all(|(t, bold, _)| !*bold || *t == "bold"), "the escaped stars do not start bold or italic");
+        // Where the line is being edited the backslashes show.
+        assert_eq!(rendered("\\*a\\*", true).text, "\\*a\\*");
+        // Only marks can be escaped: a path keeps its backslashes.
+        assert_eq!(rendered("C:\\dir", false).text, "C:\\dir");
     }
 
     #[test]

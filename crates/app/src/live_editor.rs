@@ -95,6 +95,11 @@ pub struct LiveEditor<'a, Message> {
     /// A link pressed and then dragged: the link, and where the pointer is (in the window).
     on_link_drag: Option<Box<dyn Fn(LinkTarget, Point) -> Message + 'a>>,
     embed: Option<Box<EmbedFn<'a>>>,
+    /// A text that is read, selected and copied but not changed: nothing is revealed as raw
+    /// source and there is no caret to see.
+    reading: bool,
+    /// What copying makes of the selected source text (the clipboard gets the result).
+    copy_as: Option<fn(&str) -> String>,
 }
 
 pub fn live_editor<'a, Message>(doc: &'a Document, pal: Palette) -> LiveEditor<'a, Message> {
@@ -126,12 +131,27 @@ fn editor<'a, Message>(doc: Cow<'a, Document>, pal: Palette, read_only: bool) ->
         on_link_menu: None,
         on_link_drag: None,
         embed: None,
+        reading: false,
+        copy_as: None,
     }
 }
 
 impl<'a, Message> LiveEditor<'a, Message> {
     /// Make a plain click follow links that are showing as their label. Option/Alt-click, the
     /// arrow keys, or a click on a link already showing its raw `[[...]]` edit it instead.
+    /// Show the text as it is read: selectable and copyable, with no raw source revealed and no
+    /// caret. The owner drops the actions that would change the text.
+    pub fn reading(mut self, reading: bool) -> Self {
+        self.reading = reading;
+        self
+    }
+
+    /// What Copy puts on the clipboard for the selected source text.
+    pub fn copy_as(mut self, f: fn(&str) -> String) -> Self {
+        self.copy_as = Some(f);
+        self
+    }
+
     pub fn follow_links(mut self, follow: bool) -> Self {
         self.follow_links = follow;
         self
@@ -551,7 +571,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         // The widest block, for `fit_width`.
         let mut widest = 0.0_f32;
         for (i, block) in blocks.iter().enumerate() {
-            let reveal = if self.read_only { Reveal::none() } else { self.doc.reveal(i) };
+            let reveal = if self.read_only || self.reading { Reveal::none() } else { self.doc.reveal(i) };
             let rendered = render(source, block, &reveal);
             if hidden == 0 || i > hidden {
                 y += rendered.gap_before * line_px;
@@ -640,7 +660,10 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
             state.touch();
             if let Some(rect) = self.caret_rect(state, head) {
                 let (top, bottom) = (rect.y + self.padding.top, rect.y + rect.height + self.padding.top);
-                if top < state.scroll {
+                if self.reading {
+                    // A text that is read goes to the place asked for with it at the top.
+                    state.scroll = (top - self.padding.top).max(0.0);
+                } else if top < state.scroll {
                     state.scroll = top;
                 } else if bottom > state.scroll + view_h {
                     state.scroll = bottom - view_h;
@@ -814,6 +837,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
 
             // The caret, in the one line that is showing its raw source.
             if !self.read_only
+                && !self.reading
                 && state.caret_visible()
                 && revealed.is_some()
                 && sel.is_empty()
@@ -1281,7 +1305,7 @@ impl<Message> LiveEditor<'_, Message> {
                 ("e", _) => Some(Action::Wrap(Wrap::Code)),
                 ("c", _) => {
                     if let Some(selected) = self.doc.selected_text() {
-                        clipboard.write(clipboard::Kind::Standard, selected);
+                        clipboard.write(clipboard::Kind::Standard, self.copy_as.map_or(selected.clone(), |f| f(&selected)));
                     }
                     None
                 }

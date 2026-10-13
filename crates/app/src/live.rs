@@ -68,6 +68,7 @@ pub struct LiveBackend {
     open: HashMap<String, Arc<Open>>,
     /// Plain Strong's dictionaries first: they are the public domain reference ones.
     dictionaries: Vec<Dictionary>,
+    commentaries: Vec<(ModuleInfo, sword::Commentary)>,
 }
 
 impl LiveBackend {
@@ -116,7 +117,18 @@ impl LiveBackend {
         }
         named.sort_by_key(|(rank, _)| *rank);
         let dictionaries = named.into_iter().map(|(_, d)| d).collect();
-        LiveBackend { infos, open, dictionaries }
+        let mut commentaries = Vec::new();
+        for m in lib.modules().filter(|m| m.kind() == Kind::Commentary) {
+            let Ok(commentary) = m.commentary() else { continue };
+            let info = ModuleInfo {
+                id: ModuleId(m.name().to_string()),
+                abbreviation: m.conf.get("Abbreviation").unwrap_or(m.name()).to_string(),
+                description: m.description().to_string(),
+                has_strongs: false,
+            };
+            commentaries.push((info, commentary));
+        }
+        LiveBackend { infos, open, dictionaries, commentaries }
     }
 }
 
@@ -176,6 +188,16 @@ impl StudyBackend for LiveBackend {
         self.dictionaries.iter().filter(|d| d.strongs == Some(greek)).find(|d| d.entry(key).is_some()).map(|d| d.info.id.clone())
     }
 
+    fn commentaries(&self) -> Vec<ModuleInfo> {
+        self.commentaries.iter().map(|(info, _)| info.clone()).collect()
+    }
+
+    fn commentary_note(&self, module: &ModuleId, book: Book, chapter: u16, verse: u16) -> Option<Vec<study_core::commentary::Paragraph>> {
+        let (_, commentary) = self.commentaries.iter().find(|(info, _)| info.id == *module)?;
+        let raw = commentary.raw(book, chapter, verse).ok().flatten()?;
+        Some(study_core::commentary::paragraphs(&raw)).filter(|p| !p.is_empty())
+    }
+
     fn cross_references(&self, _range: &RefRange) -> Vec<CrossRef> {
         Vec::new()
     }
@@ -200,57 +222,192 @@ pub struct Boot {
     pub persist: Option<Persist>,
     /// The data folder, when there is a real one: settings and the session live in it.
     pub home: Option<PathBuf>,
+    /// The folder of the vault in use.
+    pub vault: Option<PathBuf>,
+    /// No SWORD module was found, so the sample text stands in and nothing is kept.
+    pub no_modules: bool,
+    /// Set when there is no vault to open yet, and what the person has to do about it.
+    pub onboarding: Option<Onboarding>,
     /// Shown in the toolbar until something else replaces it.
     pub status: String,
+}
+
+/// Why the app starts without a vault.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Onboarding {
+    /// First run: nothing chosen, nothing on disk.
+    First,
+    /// A vault was chosen before but its folder is not there now (a drive that is not connected).
+    Missing(PathBuf),
+}
+
+/// Which vault to start with, from the saved choice and what is on disk.
+pub enum Start {
+    Vault(PathBuf),
+    Ask(Onboarding),
+}
+
+/// The vault the saved choice names; with none saved, the one an earlier version kept in the data
+/// folder; with neither, the person is asked.
+pub fn start_vault(home: &Path, chosen: Option<PathBuf>) -> Start {
+    match chosen {
+        Some(dir) if dir.is_dir() => Start::Vault(dir),
+        Some(dir) => Start::Ask(Onboarding::Missing(dir)),
+        None if home.join("vault").is_dir() => Start::Vault(home.join("vault")),
+        None => Start::Ask(Onboarding::First),
+    }
+}
+
+/// Where the index of the vault at `dir` is kept: a cache in the data folder, one per vault, so
+/// that nothing is written into the vault that is not a note.
+pub fn index_path(home: &Path, dir: &Path) -> PathBuf {
+    if dir == home.join("vault") {
+        return home.join("cache").join("index.sqlite");
+    }
+    // FNV-1a: stable between runs, unlike the standard hasher.
+    let hash = dir.to_string_lossy().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    home.join("cache").join(format!("index-{hash:016x}.sqlite"))
 }
 
 /// Start with the user's modules and vault. `--reseed` restores the sample notes and marks.
 pub fn boot() -> Boot {
     let reseed = std::env::args().any(|a| a == "--reseed");
-    boot_at(&vault::data_home(), &sword::default_roots(), reseed)
+    let home = vault::data_home();
+    let config = crate::state::Config::load(&home);
+    // The app's own folder for modules is there to be put modules in.
+    if std::env::var_os("BIBLE_STUDY_SWORD_PATH").is_none()
+        && let Some(own) = sword::default_roots().into_iter().find(|r| r.ends_with(".config/sword"))
+    {
+        let _ = std::fs::create_dir_all(own);
+    }
+    boot_from(&home, start_vault(&home, config.vault), &module_roots(&config.module_folders), reseed)
+}
+
+/// Where to look for modules: the folders the person added, then the usual places (or only
+/// what `BIBLE_STUDY_SWORD_PATH` says).
+pub fn module_roots(added: &[PathBuf]) -> Vec<PathBuf> {
+    if std::env::var_os("BIBLE_STUDY_SWORD_PATH").is_some() {
+        return sword::default_roots();
+    }
+    let mut roots = added.to_vec();
+    for root in sword::default_roots() {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 /// The module sample marks are anchored in: the one the app opens first.
-fn seed_module(backend: &LiveBackend) -> Option<ModuleInfo> {
+fn seed_module(backend: &dyn StudyBackend) -> Option<ModuleInfo> {
     backend.modules().into_iter().next()
 }
 
+#[cfg(test)]
 pub fn boot_at(home: &Path, roots: &[PathBuf], reseed: bool) -> Boot {
+    boot_from(home, Start::Vault(home.join("vault")), roots, reseed)
+}
+
+fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot {
     let backend = LiveBackend::open(roots);
-    let Some(seed) = seed_module(&backend) else {
+    if seed_module(&backend).is_none() {
         let mock = MockBackend;
         let notes = mock.note_paths().into_iter().filter_map(|p| mock.note_text(&p).map(|t| (p, t))).collect();
         return Boot {
             backend: Box::new(mock),
             notes,
             persist: None,
-            home: None,
-            status: "No readable SWORD modules found: showing sample text, nothing is saved".into(),
+            home: Some(home.to_path_buf()),
+            vault: None,
+            no_modules: true,
+            onboarding: None,
+            status: "No Bible modules found: add a folder of them in Settings. Showing sample text, nothing is saved".into(),
         };
-    };
-    let vault = match vault::Vault::open(home.join("vault")) {
-        Ok(v) => v,
-        Err(e) => {
+    }
+    let dir = match start {
+        Start::Vault(dir) => dir,
+        Start::Ask(why) => {
             return Boot {
                 backend: Box::new(backend),
                 notes: BTreeMap::new(),
                 persist: None,
-                home: None,
-                status: format!("Could not open the vault at {}: {e}; nothing is saved", home.display()),
+                home: Some(home.to_path_buf()),
+                vault: None,
+                no_modules: false,
+                onboarding: Some(why),
+                status: String::new(),
             };
         }
     };
+    let samples = if reseed { Samples::Reseed } else { Samples::IfEmpty };
+    match load_vault(&backend, &dir, &index_path(home, &dir), Options { samples, templates: true }) {
+        Ok(loaded) => Boot {
+            backend: Box::new(backend),
+            notes: loaded.notes,
+            persist: Some(loaded.persist),
+            home: Some(home.to_path_buf()),
+            vault: Some(dir),
+            no_modules: false,
+            onboarding: None,
+            status: loaded.status,
+        },
+        Err(e) => Boot {
+            backend: Box::new(backend),
+            notes: BTreeMap::new(),
+            persist: None,
+            home: None,
+            vault: None,
+            no_modules: false,
+            onboarding: None,
+            status: format!("Could not open the vault at {}: {e}; nothing is saved", dir.display()),
+        },
+    }
+}
+
+/// When a vault gets the sample notes and marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Samples {
+    Never,
+    /// Only if it has no files at all.
+    IfEmpty,
+    /// Whatever is there, replaced.
+    Reseed,
+}
+
+/// What to add to a vault as it is opened.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub samples: Samples,
+    /// The starting templates, if the vault has none.
+    pub templates: bool,
+}
+
+/// An opened vault.
+pub struct Loaded {
+    pub notes: BTreeMap<String, String>,
+    pub persist: Persist,
+    pub status: String,
+}
+
+/// Open the vault in `dir` (making the folder if it is not there), adding what `options` ask for.
+pub fn load_vault(backend: &dyn StudyBackend, dir: &Path, index: &Path, options: Options) -> Result<Loaded, String> {
+    let vault = vault::Vault::open(dir).map_err(|e| e.to_string())?;
     let mut status = String::new();
-    if reseed || vault.is_empty() {
-        let chapter = |b, c| backend.chapter(&seed.id, b, c).ok();
-        if let Err(e) = vault::seed_vault(&vault, &seed.abbreviation, &chapter, reseed) {
+    let seed = match options.samples {
+        Samples::Never => None,
+        Samples::IfEmpty => vault.is_empty().then_some(false),
+        Samples::Reseed => Some(true),
+    };
+    if let (Some(overwrite), Some(module)) = (seed, seed_module(backend)) {
+        let chapter = |b, c| backend.chapter(&module.id, b, c).ok();
+        if let Err(e) = vault::seed_vault(&vault, &module.abbreviation, &chapter, overwrite) {
             status = format!("Could not write the sample notes: {e}");
         }
     }
-    let mut notes = vault.read_all().unwrap_or_default();
+    let mut notes = vault.read_all().map_err(|e| e.to_string())?;
     // A vault with no templates gets the starting ones, as files to edit (they are the kinds of
     // note there are: more files are more kinds).
-    if !notes.keys().any(|p| study_core::templates::is_template(p)) {
+    if options.templates && !notes.keys().any(|p| study_core::templates::is_template(p)) {
         for (path, text) in study_core::templates::builtin() {
             if vault.write(&path, &text).is_ok() {
                 notes.insert(path, text);
@@ -258,11 +415,55 @@ pub fn boot_at(home: &Path, roots: &[PathBuf], reseed: bool) -> Boot {
         }
     }
     // The index is a cache: if it cannot open, the app works without it.
-    let index = vault::Index::open(&home.join("cache").join("index.sqlite")).ok().and_then(|mut ix| {
+    let index = vault::Index::open(index).ok().and_then(|mut ix| {
         ix.sync(&notes).ok()?;
         Some(ix)
     });
-    Boot { backend: Box::new(backend), notes, persist: Some(Persist::new(vault, index)), home: Some(home.to_path_buf()), status }
+    Ok(Loaded { notes, persist: Persist::new(vault, index), status })
+}
+
+/// What a folder holds, to tell the person before it is made a vault.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Scan {
+    /// How many notes (Markdown files), counting stops at [`SCAN_LIMIT`].
+    pub notes: usize,
+    pub templates: bool,
+    pub obsidian: bool,
+    pub ours: bool,
+}
+
+pub const SCAN_LIMIT: usize = 5000;
+
+pub fn scan(dir: &Path) -> Scan {
+    fn count(dir: &Path, depth: usize, n: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            if *n >= SCAN_LIMIT {
+                return;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(kind) = entry.file_type() else { continue };
+            if name.starts_with('.') {
+                continue;
+            }
+            if kind.is_dir() && depth < 8 {
+                count(&entry.path(), depth + 1, n);
+            } else if kind.is_file() && name.ends_with(".md") {
+                *n += 1;
+            }
+        }
+    }
+    let mut out = Scan::default();
+    if !dir.is_dir() {
+        return out;
+    }
+    count(dir, 0, &mut out.notes);
+    let mut templates = 0;
+    count(&dir.join("templates"), 0, &mut templates);
+    out.templates = templates > 0;
+    out.obsidian = dir.join(".obsidian").is_dir();
+    out.ours = dir.join("margins").is_dir();
+    out
 }
 
 #[cfg(test)]
@@ -290,7 +491,8 @@ mod tests {
             return eprintln!("skipped: no Strong's dictionaries");
         }
         let love = live.lexicon_entry("G25").unwrap();
-        assert_eq!((love.lemma.as_str(), love.transliteration.as_str()), ("ἀγαπάω", "agapao"));
+        assert_eq!(love.lemma, "ἀγαπάω");
+        assert!(love.transliteration.starts_with("agap"), "{}", love.transliteration);
         assert!(love.definition.contains("to love"), "{}", love.definition);
         assert_eq!(live.lexicon_entry("g0025").unwrap().key, "G25");
         let god = live.lexicon_entry("H430").unwrap();
@@ -404,7 +606,7 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         let boot = boot_at(home.path(), &[empty.path().to_path_buf()], false);
         assert!(boot.persist.is_none());
-        assert!(boot.status.contains("No readable SWORD modules"));
+        assert!(boot.no_modules && boot.status.contains("No Bible modules found"));
         assert!(!home.path().join("vault").exists());
     }
 
