@@ -146,6 +146,8 @@ enum Frame {
     Emphasis,
     Divine,
     Note { keep: bool },
+    /// A note listing cross references: its passages are collected, its text is not shown.
+    CrossNote(Vec<RefRange>),
     Title { keep: bool },
     Reference(Option<RefRange>),
 }
@@ -226,7 +228,10 @@ impl ChapterBuilder {
         }
         let inline = Inline::Text(collapse(t));
         let red = self.red && !self.stack.iter().any(|o| matches!(o.frame, Frame::Red));
-        let skip = self.stack.iter().any(|o| matches!(o.frame, Frame::Note { keep: false } | Frame::Title { keep: false }));
+        let skip = self
+            .stack
+            .iter()
+            .any(|o| matches!(o.frame, Frame::Note { keep: false } | Frame::Title { keep: false } | Frame::CrossNote(_)));
         if skip {
             return;
         }
@@ -271,7 +276,7 @@ impl ChapterBuilder {
     }
 
     fn open(&mut self, tag: Tag) {
-        let in_note = self.stack.iter().any(|o| matches!(o.frame, Frame::Note { .. }));
+        let in_note = self.stack.iter().any(|o| matches!(o.frame, Frame::Note { .. } | Frame::CrossNote(_)));
         let frame = match tag.name.as_str() {
             "w" => Frame::Word(strongs_of(&tag)),
             "q" if tag.attr("who") == Some("Jesus") => Frame::Red,
@@ -279,13 +284,29 @@ impl ChapterBuilder {
             "divineName" => Frame::Divine,
             "note" => {
                 let ty = tag.attr("type").unwrap_or("");
-                Frame::Note { keep: !matches!(ty, "crossReference" | "x-strongsMarkup") && !in_note }
+                if ty == "crossReference" && !in_note {
+                    Frame::CrossNote(Vec::new())
+                } else {
+                    Frame::Note { keep: !matches!(ty, "crossReference" | "x-strongsMarkup") && !in_note }
+                }
             }
             "title" => {
                 let ty = tag.attr("type").unwrap_or("");
                 Frame::Title { keep: !ty.contains("hapter") && !ty.starts_with("x-") && !in_note }
             }
-            "reference" if in_note => Frame::Plain,
+            "reference" if in_note => {
+                // The passages of a cross reference note belong to the note.
+                let refs: Vec<RefRange> = tag
+                    .attr("osisRef")
+                    .map(|r| r.split_whitespace().filter_map(osis_target).collect())
+                    .unwrap_or_default();
+                if let Some(Open { frame: Frame::CrossNote(list), .. }) =
+                    self.stack.iter_mut().rev().find(|o| matches!(o.frame, Frame::CrossNote(_)))
+                {
+                    list.extend(refs);
+                }
+                Frame::Plain
+            }
             "reference" => Frame::Reference(tag.attr("osisRef").and_then(osis_target)),
             _ => Frame::Plain,
         };
@@ -347,6 +368,12 @@ impl ChapterBuilder {
                 }
             }
             Frame::Note { keep: false } | Frame::Title { keep: false } => {}
+            Frame::CrossNote(mut refs) => {
+                refs.dedup();
+                if !refs.is_empty() {
+                    self.out().push(Inline::CrossRef { refs });
+                }
+            }
             Frame::Title { keep: true } => {
                 let text = collapse(plain(&inlines).trim());
                 if !text.is_empty() {
@@ -441,7 +468,7 @@ fn plain(inlines: &[Inline]) -> String {
             Inline::Word { text, .. } => out.push_str(text),
             Inline::Ref { label, .. } => out.push_str(label),
             Inline::RedLetter(inner) | Inline::Emphasis(inner) => out.push_str(&plain(inner)),
-            Inline::Footnote { .. } => {}
+            Inline::Footnote { .. } | Inline::CrossRef { .. } => {}
         }
     }
     out
@@ -557,8 +584,25 @@ mod tests {
     }
 
     #[test]
-    fn cross_reference_notes_are_dropped() {
-        let c = one(2, r#"text<note type="crossReference"><reference osisRef="Num.21.9">Num 21:9</reference></note>"#);
+    fn cross_reference_notes_become_a_marker_with_their_passages() {
+        let c = one(
+            2,
+            r#"text<note type="crossReference"><reference osisRef="Num.21.9">Num 21:9</reference>; <reference osisRef="Ps.2.7 Ps.2.8">Ps 2:7</reference><reference osisRef="Gen.1.1-Gen.2.3">x</reference></note> more"#,
+        );
+        let refs: Vec<String> = match &runs(&c)[0].inlines[1] {
+            Inline::CrossRef { refs } => refs.iter().map(RefRange::osis).collect(),
+            other => panic!("{other:?}"),
+        };
+        // The cross-chapter range is not representable yet, and so is left out.
+        assert_eq!(refs, ["Num.21.9", "Ps.2.7", "Ps.2.8"]);
+        assert_eq!(runs(&c)[0].inlines[0], Inline::Text("text".into()));
+        assert_eq!(runs(&c)[0].inlines[2], Inline::Text(" more".into()), "the note's own text is not shown");
+        assert_eq!(c.canonical_verses()[&2], "text more", "and it is not part of the verse");
+    }
+
+    #[test]
+    fn a_cross_reference_note_with_no_usable_passage_leaves_nothing() {
+        let c = one(2, r#"text<note type="crossReference"><reference osisRef="Gen.1.1-Gen.2.3">x</reference></note>"#);
         assert_eq!(runs(&c)[0].inlines, vec![Inline::Text("text".into())]);
     }
 

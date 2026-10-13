@@ -1,7 +1,6 @@
 //! Turns the core AST into blocks for the custom reader widget. Each interactive
 //! piece (verse number, reference, Strong's word, footnote marker) is a link span.
 
-use crate::fonts;
 use crate::palette::Palette;
 use crate::reader_text::{Block, CanonSlice, CardSpec, Citation, FloatKind, MarkDraw, ReaderText, SpanMeta};
 use iced::widget::span;
@@ -17,11 +16,10 @@ pub enum Link {
     Ref(RefRange),
     Strongs(String),
     Footnote(String),
+    /// The passages a cross reference marker points to.
+    CrossRefs(Vec<RefRange>),
 }
 
-const BODY: f32 = 19.0;
-/// Size of a footnote's dagger. The same in every module: the marker is ours, not the module's.
-const FOOTNOTE_MARK: f32 = BODY * 0.85;
 
 /// What the reader reports back to the app.
 #[derive(Debug, Clone)]
@@ -38,6 +36,21 @@ pub enum Event {
     Margin(bool),
     /// A left press in the text.
     Pressed,
+    /// A right click on a link, at this point of the window.
+    LinkMenu(Link, iced::Point),
+    /// A link was pulled away from where it is, at this point of the window.
+    LinkDrag(Link, iced::Point),
+}
+
+impl ViewOptions {
+    /// Whether this kind of marker is wanted.
+    fn markers_shown(&self, inline: &Inline) -> bool {
+        match inline {
+            Inline::Footnote { .. } => self.show_footnotes,
+            Inline::CrossRef { .. } => self.show_refs,
+            _ => true,
+        }
+    }
 }
 
 pub struct ViewOptions {
@@ -54,7 +67,13 @@ pub struct ViewOptions {
     /// Keep the text this wide and leave the remaining width for margin cards (margins mode).
     pub text_width: Option<f32>,
     pub show_strongs: bool,
+    /// The kinds of marker in the text, each shown or not (the reader's menu).
+    pub show_footnotes: bool,
+    pub show_refs: bool,
     pub pal: Palette,
+    /// Size of the text, and the family it is set in.
+    pub body: f32,
+    pub font: Font,
     /// Module abbreviation for citations, e.g. "KJV".
     pub module: String,
 }
@@ -75,17 +94,19 @@ struct Builder<'o> {
 
 impl Builder<'_> {
     fn push(&mut self, span: Span<'static, Link>, copy: bool, verse: Option<u16>) {
+        let mut span = span;
+        span.font = span.font.or(Some(self.opts.font));
         self.spans.push(span);
         self.meta.push(SpanMeta { copy, verse, number: false });
     }
 
     fn base(&self, text: String, style: Style) -> Span<'static, Link> {
-        let mut sp = span(text).size(BODY);
+        let mut sp = span(text).size(self.opts.body);
         if let Some(c) = style.color {
             sp = sp.color(c);
         }
         if style.italic {
-            sp = sp.font(Font { style: font::Style::Italic, ..fonts::UI });
+            sp = sp.font(Font { style: font::Style::Italic, ..self.opts.font });
         }
         sp
     }
@@ -109,7 +130,7 @@ impl Builder<'_> {
                     // match the canonical text that marks anchor to.
                     let upper = name.to_uppercase();
                     let shown = if upper.len() == name.len() { upper } else { name.clone() };
-                    let s = self.base(shown, style).size(BODY * 0.85);
+                    let s = self.base(shown, style).size(self.opts.body * 0.85);
                     self.push(s, true, verse);
                 }
                 Inline::Word { text, strongs } => {
@@ -121,12 +142,21 @@ impl Builder<'_> {
                     };
                     self.push(sp, true, verse);
                 }
+                Inline::Footnote { .. } | Inline::CrossRef { .. } if !self.opts.markers_shown(item) => {}
                 Inline::Footnote { text, .. } => {
                     // Big enough to hit without shouting over the text.
                     let s = span("†".to_string())
-                        .size(FOOTNOTE_MARK)
+                        .size(self.opts.body * 0.85)
                         .color(pal.link)
                         .link(Link::Footnote(text.clone()));
+                    self.push(s, false, verse);
+                }
+                Inline::CrossRef { refs } => {
+                    // A smaller arrow than the dagger: there can be several to a verse.
+                    let s = span("\u{2197}".to_string())
+                        .size(self.opts.body * 0.85)
+                        .color(pal.link)
+                        .link(Link::CrossRefs(refs.clone()));
                     self.push(s, false, verse);
                 }
                 Inline::Ref { label, target } => {
@@ -166,7 +196,7 @@ pub fn chapter_view<'a, M: 'a>(
     (chapter.book.osis(), chapter.chapter).hash(&mut hasher);
 
     ReaderText::new(hasher.finish(), blocks)
-        .size(BODY)
+        .size(opts.body)
         .selection_color(pal.text_selection)
         .hover_color(pal.link)
         .citation(Citation {
@@ -179,6 +209,8 @@ pub fn chapter_view<'a, M: 'a>(
         .on_marks(move |ids| to_message(Event::Marks(ids)))
         .on_layout(move |margin| to_message(Event::Margin(margin)))
         .on_press(move || to_message(Event::Pressed))
+        .on_link_menu(move |link, at| to_message(Event::LinkMenu(link, at)))
+        .on_link_drag(move |link, at| to_message(Event::LinkDrag(link, at)))
         .margin_colors(pal.margin_bg, pal.margin_rule)
         .reveal(opts.reveal)
         .select_verses(opts.select)
@@ -198,7 +230,7 @@ fn build_blocks(chapter: &Chapter, opts: &ViewOptions) -> Vec<Block<Link>> {
     for block in &chapter.blocks {
         match block {
             ast::Block::Heading(h) => {
-                let bold = Font { weight: font::Weight::Bold, ..fonts::UI };
+                let bold = Font { weight: font::Weight::Bold, ..opts.font };
                 blocks.push(Block {
                     spans: vec![span(h.clone()).size(15.0).font(bold).color(pal.muted)],
                     meta: vec![SpanMeta { copy: false, verse: None, number: false }],
@@ -212,7 +244,7 @@ fn build_blocks(chapter: &Chapter, opts: &ViewOptions) -> Vec<Block<Link>> {
                 let mut b = Builder { opts, spans: Vec::new(), meta: Vec::new(), verse: None };
                 for (i, run) in p.runs.iter().enumerate() {
                     if i > 0 {
-                        b.push(span(" ".to_string()).size(BODY), true, None);
+                        b.push(span(" ".to_string()).size(opts.body), true, None);
                     }
                     b.verse = Some(run.verse);
                     if run.show_number {
@@ -220,7 +252,7 @@ fn build_blocks(chapter: &Chapter, opts: &ViewOptions) -> Vec<Block<Link>> {
                         let number_color =
                             if opts.annotated.contains(&run.verse) { pal.note_link } else { pal.muted };
                         let n = span(format!("{}\u{a0}", run.verse))
-                            .size(BODY * 0.65)
+                            .size(opts.body * 0.65)
                             .color(number_color);
                         b.push(n, false, Some(run.verse));
                         if let Some(m) = b.meta.last_mut() {
@@ -271,7 +303,11 @@ mod tests {
             clear_token: 0,
             text_width: None,
             show_strongs,
+            show_footnotes: true,
+            show_refs: true,
             pal: Palette::for_theme(&iced::Theme::Dark),
+            body: 19.0,
+            font: crate::fonts::UI,
             module: "KJV".into(),
         }
     }

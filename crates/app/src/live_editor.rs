@@ -81,6 +81,7 @@ pub struct LiveEditor<'a, Message> {
     on_press: Option<Box<dyn Fn() -> Message + 'a>>,
     pal: Palette,
     size: Pixels,
+    font: Font,
     padding: Padding,
     width: Length,
     height: Length,
@@ -89,6 +90,10 @@ pub struct LiveEditor<'a, Message> {
     placeholder: Option<String>,
     on_action: Option<Box<dyn Fn(Action) -> Message + 'a>>,
     on_link: Option<Box<dyn Fn(LinkTarget) -> Message + 'a>>,
+    /// A right click on a link: the link, and where the pointer is (in the window).
+    on_link_menu: Option<Box<dyn Fn(LinkTarget, Point) -> Message + 'a>>,
+    /// A link pressed and then dragged: the link, and where the pointer is (in the window).
+    on_link_drag: Option<Box<dyn Fn(LinkTarget, Point) -> Message + 'a>>,
     embed: Option<Box<EmbedFn<'a>>>,
 }
 
@@ -109,6 +114,7 @@ fn editor<'a, Message>(doc: Cow<'a, Document>, pal: Palette, read_only: bool) ->
         on_press: None,
         pal,
         size: Pixels(17.0),
+        font: fonts::UI,
         padding: Padding::new(12.0),
         width: Length::Fill,
         height: Length::Fill,
@@ -117,6 +123,8 @@ fn editor<'a, Message>(doc: Cow<'a, Document>, pal: Palette, read_only: bool) ->
         placeholder: None,
         on_action: None,
         on_link: None,
+        on_link_menu: None,
+        on_link_drag: None,
         embed: None,
     }
 }
@@ -137,6 +145,12 @@ impl<'a, Message> LiveEditor<'a, Message> {
 
     pub fn size(mut self, size: impl Into<Pixels>) -> Self {
         self.size = size.into();
+        self
+    }
+
+    /// The family the text is set in.
+    pub fn font(mut self, font: Font) -> Self {
+        self.font = font;
         self
     }
 
@@ -180,6 +194,16 @@ impl<'a, Message> LiveEditor<'a, Message> {
     }
 
     /// Called when a link is followed (Cmd/Ctrl-click).
+    pub fn on_link_drag(mut self, f: impl Fn(LinkTarget, Point) -> Message + 'a) -> Self {
+        self.on_link_drag = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_link_menu(mut self, f: impl Fn(LinkTarget, Point) -> Message + 'a) -> Self {
+        self.on_link_menu = Some(Box::new(f));
+        self
+    }
+
     pub fn on_link(mut self, f: impl Fn(LinkTarget) -> Message + 'a) -> Self {
         self.on_link = Some(Box::new(f));
         self
@@ -330,13 +354,13 @@ fn role_color(role: Role, pal: &Palette) -> Option<Color> {
     }
 }
 
-fn spans_for(rendered: &Rendered, base: f32, pal: &Palette) -> Vec<Span<'static, ()>> {
+fn spans_for(rendered: &Rendered, base: f32, pal: &Palette, text_font: Font) -> Vec<Span<'static, ()>> {
     rendered
         .runs
         .iter()
         .map(|run| {
             let s = &run.style;
-            let family = if s.mono { Font::MONOSPACE } else { fonts::UI };
+            let family = if s.mono { Font::MONOSPACE } else { text_font };
             let font = Font {
                 weight: if s.bold { font::Weight::Bold } else { font::Weight::Normal },
                 style: if s.italic { font::Style::Italic } else { font::Style::Normal },
@@ -522,7 +546,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
                     _ => 0.0,
                 };
             let w = (inner_w - indent).max(1.0);
-            let spans = spans_for(&rendered, self.size.0, &self.pal);
+            let spans = spans_for(&rendered, self.size.0, &self.pal, self.font);
             let shape = Text {
                 content: (),
                 bounds: Size::new(w, f32::INFINITY),
@@ -621,10 +645,12 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         style: &renderer::Style,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<State>();
         let bounds = layout.bounds();
+        // Only what is inside the visible area is drawn (this may sit in a scrolled, clipped card).
+        let Some(clip) = bounds.intersection(viewport) else { return };
         let pal = &self.pal;
         let line_px = self.line_px();
         let origin = Point::new(bounds.x + self.padding.left, bounds.y + self.padding.top - state.scroll);
@@ -639,7 +665,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         };
         let text_color = style.text_color;
 
-        renderer.with_layer(bounds, |renderer| {
+        renderer.with_layer(clip, |renderer| {
             if self.doc.source().is_empty()
                 && let Some(placeholder) = &self.placeholder
             {
@@ -649,7 +675,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
                         bounds: Size::new(inner_w, line_px),
                         size: self.size,
                         line_height: LineHeight::Relative(LINE),
-                        font: fonts::UI,
+                        font: self.font,
                         align_x: Alignment::Default,
                         align_y: alignment::Vertical::Top,
                         shaping: Shaping::Basic,
@@ -696,7 +722,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
                             bounds: Size::new(GUTTER, line_px),
                             size: self.size,
                             line_height: LineHeight::Relative(LINE),
-                            font: fonts::UI,
+                            font: self.font,
                             align_x: Alignment::Default,
                             align_y: alignment::Vertical::Top,
                             shaping: Shaping::Basic,
@@ -848,17 +874,37 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         }
 
         match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                // A link, or the title of an embedded passage, offers where to open it.
+                let (Some(f), Some(p), Some(at)) =
+                    (&self.on_link_menu, self.content_point(state, bounds, cursor), cursor.position())
+                else {
+                    return;
+                };
+                let target = self
+                    .embed_header_at(state, p)
+                    .or_else(|| self.link_at(state, p).filter(|(_, raw)| !raw).map(|(t, _)| t));
+                if let Some(target) = target {
+                    shell.publish(f(target, at));
+                    shell.capture_event();
+                }
+            }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if self.read_only => {
                 let Some(p) = self.content_point(state, bounds, cursor) else { return };
                 shell.capture_event();
-                if let Some(target) = self.embed_header_at(state, p) {
-                    if let Some(f) = &self.on_link {
-                        shell.publish(f(target));
-                    }
-                    return;
-                }
-                if let Some((target, _)) = self.link_at(state, p) {
-                    if let Some(f) = &self.on_link {
+                let pressed = self.embed_header_at(state, p).or_else(|| self.link_at(state, p).map(|(t, _)| t));
+                if let Some(target) = pressed {
+                    if self.on_link_drag.is_some() {
+                        // It follows when the button comes up, unless the pointer was dragged away
+                        // with the link first.
+                        state.drag = Some(Drag {
+                            kind: DragKind::Char,
+                            last: 0,
+                            origin: cursor.position(),
+                            moved: false,
+                            pending_link: Some((target, 0)),
+                        });
+                    } else if let Some(f) = &self.on_link {
                         shell.publish(f(target));
                     }
                     return;
@@ -987,10 +1033,21 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
                         return;
                     }
                     drag.moved = true;
-                    if let Some((_, at)) = drag.pending_link.take() {
-                        // It was a drag after all: the selection starts where the press was.
+                    if let Some((target, at)) = drag.pending_link.take() {
+                        // A link dragged away is a link being carried somewhere; with nowhere to
+                        // carry it, it was a drag that starts a selection where the press was.
+                        if let (Some(f), Some(pos)) = (&self.on_link_drag, cursor.position()) {
+                            state.drag = None;
+                            shell.publish(f(target, pos));
+                            shell.capture_event();
+                            shell.request_redraw();
+                            return;
+                        }
                         self.emit(shell, Action::SetCaret { offset: at, extend: false });
                     }
+                }
+                if self.read_only {
+                    return;
                 }
                 let Some(rel) = cursor.position().map(|p| p - bounds.position()) else { return };
                 let p = Point::new(rel.x - self.padding.left, rel.y - self.padding.top + state.scroll);
@@ -1116,7 +1173,7 @@ impl<Message> LiveEditor<'_, Message> {
         let w = (line_w - 14.0 - 10.0).max(1.0);
         let spans = vec![
             // The title is a link to the passage's source, so it looks like one.
-            iced::widget::span(content.title).size(self.size.0 * 0.82).font(Font { weight: font::Weight::Bold, ..fonts::UI }).color(self.pal.link),
+            iced::widget::span(content.title).size(self.size.0 * 0.82).font(Font { weight: font::Weight::Bold, ..self.font }).color(self.pal.link),
             iced::widget::span(format!("\n{}", content.body)).size(self.size.0 * 0.95),
         ];
         let shape = Text {
@@ -1244,7 +1301,7 @@ mod tests {
         let line = "aaaaaaaaaaaa [[John 3:16@KJV]] bbbb [[Notes on Nicodemus]] tail";
         let blocks = md_editor::blocks::parse(line);
         let rendered = render(line, &blocks[0], &Reveal::none());
-        let spans = spans_for(&rendered, 17.0, &Palette::for_theme(&Theme::Dark));
+        let spans = spans_for(&rendered, 17.0, &Palette::for_theme(&Theme::Dark), fonts::UI);
         let links = ["John\u{a0}3:16", "Notes\u{a0}on\u{a0}Nicodemus"];
         for width in (140..420).step_by(9) {
             let para = Para::with_spans(Text {

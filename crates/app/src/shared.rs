@@ -6,12 +6,13 @@
 
 use crate::live_editor::EmbedContent;
 use crate::persist::{NoteMap, Persist};
+use crate::state::{NamedLayout, Settings, Store};
 use iced::Theme;
 use scripture::Book;
 use std::collections::{BTreeMap, BTreeSet};
 use study_core::margin::Mark;
 use study_core::frontmatter;
-use study_core::markdown::{self, LinkTarget, find_links, resolve_note};
+use study_core::markdown::{self, LinkTarget, find_links};
 use study_core::{ModuleId, StudyBackend};
 
 /// Identifies a tab for as long as the app runs.
@@ -50,7 +51,11 @@ pub struct Shared {
     /// Every mark, in memory; each is also a file under `margins/`.
     pub marks: Vec<Mark>,
     pub next_mark: u32,
-    pub dark: bool,
+    pub settings: Settings,
+    /// Where settings, the session and saved layouts are kept; none for the in-memory app.
+    pub store: Option<Store>,
+    /// The workspace layouts the user saved.
+    pub layouts: Vec<NamedLayout>,
     pub status: String,
     pub toast: Option<Toast>,
     pub events: Vec<Event>,
@@ -70,7 +75,9 @@ impl Shared {
             persist,
             next_mark: marks.len() as u32,
             marks,
-            dark: true,
+            settings: Settings::default(),
+            store: None,
+            layouts: Vec::new(),
             status: String::new(),
             toast: None,
             events: Vec::new(),
@@ -82,8 +89,53 @@ impl Shared {
         self.toast = Some(Toast { text: text.into(), until: std::time::Instant::now() + TOAST_FOR });
     }
 
+    pub fn is_dark(&self) -> bool {
+        self.theme().extended_palette().is_dark
+    }
+
     pub fn theme(&self) -> Theme {
-        if self.dark { Theme::Dark } else { Theme::Light }
+        self.settings.theme()
+    }
+
+    /// Keep settings and layouts in `store`, and take what it has.
+    pub fn attach(&mut self, store: Store) {
+        self.settings = store.settings();
+        self.layouts = store.layouts();
+        self.store = Some(store);
+    }
+
+    /// Change a setting and keep the change.
+    pub fn set_settings(&mut self, settings: Settings) {
+        let settings = settings.sanitized();
+        if settings == self.settings {
+            return;
+        }
+        self.settings = settings;
+        let saved = self.store.as_ref().map(|s| s.save_settings(&self.settings));
+        if let Some(Err(e)) = saved {
+            self.status = format!("Could not save settings: {e}");
+        }
+    }
+
+    /// Put `layout` among the saved ones (replacing one of the same name) and keep them.
+    pub fn save_layout(&mut self, layout: NamedLayout) {
+        match self.layouts.iter_mut().find(|l| l.name == layout.name) {
+            Some(existing) => *existing = layout,
+            None => self.layouts.push(layout),
+        }
+        self.keep_layouts();
+    }
+
+    pub fn delete_layout(&mut self, name: &str) {
+        self.layouts.retain(|l| l.name != name);
+        self.keep_layouts();
+    }
+
+    fn keep_layouts(&mut self) {
+        let saved = self.store.as_ref().map(|s| s.save_layouts(&self.layouts));
+        if let Some(Err(e)) = saved {
+            self.status = format!("Could not save layouts: {e}");
+        }
     }
 
     /// Write what changed to the vault. A failure shows in the status and the edit stays in
@@ -131,23 +183,6 @@ impl Shared {
         let chapter = self.backend.chapter(module, range.book, range.chapter).ok()?;
         let body = chapter.plain_text(range);
         (!body.is_empty()).then(|| EmbedContent { title: format!("{range} · {abbreviation}"), body })
-    }
-
-    /// Plain-text preview of what a link points at.
-    pub fn preview(&self, module: &ModuleId, target: &LinkTarget) -> Option<String> {
-        match target {
-            LinkTarget::Verse { range, .. } => self
-                .backend
-                .chapter(module, range.book, range.chapter)
-                .ok()
-                .map(|c| c.plain_text(range))
-                .filter(|t| !t.is_empty()),
-            LinkTarget::Sword { key, .. } => self
-                .backend
-                .lexicon_entry(key)
-                .map(|e| format!("{} ({}): {}", e.lemma, e.transliteration, e.definition)),
-            LinkTarget::Note(name) => resolve_note(&self.note_paths(), name).map(|p| format!("→ {p}")),
-        }
     }
 
     /// Verses of `book chapter` that some note links to by number.

@@ -7,7 +7,8 @@ state, messages, `update` and `view`:
 | Tab type | Module | Holds | Per-tab state |
 |---|---|---|---|
 | Bible | `bible_tab.rs` | one reader: module, book, chapter | selection, margin cards, footnote/dictionary cards, popups, scroll position, Strong's setting, the navigation toolbar |
-| Note | `note_tab.rs` | one markdown document (a note or a margin file) | the document, the selector panel, the peek strip; a header bar like the Bible tab's |
+| Dictionary | `dict_tab.rs` | one entry of a dictionary or lexicon | the dictionary, the key being looked up, the entry shown |
+| Note | `note_tab.rs` | one markdown document (a note or a margin file) | the document, the selector panel; a header bar like the Bible tab's |
 
 Everything a tab type needs to read or change that is not its own (the backend, the notes,
 the marks, the vault, theme and status) is in `Shared` (`shared.rs`); tabs get `&Shared` to
@@ -78,12 +79,93 @@ group that has a match, and lists name matches first.
 Widget ids that must be unique (the reader's scroll area, the card editor, the note editor)
 are derived from the tab id, so two Bible tabs on screen do not answer for each other.
 
+## Where a link opens
+
+Every link, from any kind of tab, is followed to *a place* (`opening.rs`). A plain click opens it
+**here**; keys held while clicking, or the right-click menu, send it elsewhere:
+
+| Click | Opens |
+|---|---|
+| plain | here: in this tab (a note's verse links go to the Bible tab it works with; a dictionary link to the dictionary tab already open, else the other pane) |
+| ⌘/Ctrl | in a new tab beside this one |
+| Alt | in the other pane (its tab, if it has one of the right kind; else a new tab there; the next pane in order, splitting if there is only one) |
+| Shift | in a new pane, split off this one |
+
+Right-clicking a link in the reader, a note or a card offers the same four, and "Copy link"
+(the link as it is written in a note). The app follows the keys held through a
+`ModifiersChanged` subscription, so any link control gets this without handling keys itself.
+A link in a note's text that is being edited keeps its own rule (Alt-click edits it); the
+right-click menu is always there.
+
+## Header bars
+
+Every tab's bar is laid out the same way: back and forward arrows, then whatever the tab uses to
+choose what it shows (the Bible pickers, the note selector, the dictionary and its lookup box), then
+a hamburger menu at the right edge. A note's menu holds Rename and Delete.
+
+## History
+
+Each tab keeps its own history, like a browser tab (`history.rs`, up to 100 places). Back and
+forward arrows sit at the left of the tab's bar, greyed when there is nowhere to go; ⌘[ / ⌘]
+(Ctrl elsewhere) and the mouse's back and forward buttons act on the focused pane's tab.
+A Bible tab records module, chapter, selected verses and how far down it was scrolled (restored
+on return); changing module counts as a move, scrolling does not. A note tab records the notes it
+showed (renames are followed, deleted notes dropped); a dictionary tab the entries. Going
+somewhere new forgets what was ahead. Opening in a new tab or pane starts a fresh history.
+Right-clicking the Bible tab's arrows lists its places to jump to.
+
+## Dragging
+
+- **A tab** is pressed (which selects it) and moved a few pixels to pick it up. Over the middle of
+  a pane it goes to that pane; over a band along an edge it splits that pane and takes the new
+  half on that side (a pane cannot be split for its own only tab); over another tab it goes in
+  front of it; over the empty tab bar, to the end. A pane left empty goes away.
+- **A link** pulled away from where it is (in the reader, a card or a note) is carried the same
+  way and dropped on a pane: a new tab there, or a new pane on an edge. A plain click still
+  follows it; pulling it no longer starts a text selection.
+- While carrying, each pane shows its drop places (the middle, and a band along each edge) with
+  the one under the pointer lit; the name of what is carried follows the pointer; Esc cancels.
+  The pointer is followed by a subscription that only runs while something is pressed or carried.
+
+## The reader's menu, references and dictionaries
+
+The hamburger at the right of a Bible tab's bar turns on and off what the text shows: Strong's
+numbers, marks (their highlights and cards), footnotes, and references. **References** are the
+module's own cross references (`<note type="crossReference">`): a ↗ marker where the module has
+them, which opens a pop-over listing each passage as a link with the start of its text.
+Dictionary entries are always pop-overs, never margin cards; the Strong's pop-over has an **Open
+in tab** button that opens the definition in a dictionary tab. `[[sword:Module/key]]` links open
+there too.
+
+## Saved state (`state.rs`, `workspace.rs`)
+
+Three small JSON files in `<data home>/state/`, written through a temporary file, and an unreadable
+one is renamed `*.bad` instead of failing the start:
+
+- `settings.json`: the color scheme (the name of any of iced's themes), the Bible and note text
+  sizes, and the font family for Bible and note text. Changed in the Settings window (its own window, opened from the top
+  bar, so the workspace stays as it is), applied and saved at once. Missing or out-of-range values are repaired on load.
+  The window is fixed-size and cannot be minimized. On macOS (`native.rs`) it is also made a child of the
+  workspace window, so it moves with it and shows over it in full screen; elsewhere it is a plain small window.
+  ⌘, (Ctrl+, elsewhere) opens it from anywhere, and on macOS the application menu has a Settings… item
+  (built with `muda`, which replaces the system's default menu with the app menu: About, Settings…, Services,
+  Hide, Quit).
+- `session.json`: the workspace as it was left, restored at start-up. It is written about a second
+  after any change (so scrolling is not a write per pixel) and at once when the window closes.
+- `layouts.json`: workspaces saved by name from the **Layouts** panel. Loading one replaces what is
+  open; saving under a name already used replaces it.
+
+A saved workspace holds the split tree (axes and sizes), each pane's tabs and which one shows, the
+focused and zoomed pane, and per tab what it shows: Bible module, book, chapter, scroll and which
+markers are on; note path; dictionary and key. Restoring leaves out a tab whose module or note is gone
+(a chapter the module lacks opens at its first), drops panes left empty, and changes nothing if no tab
+at all can be put back.
+
 ## Not yet
 
-- Dragging tabs between panes, reordering them, and saving the layout between sessions.
-- Opening a note in a *new* tab from a link (Ctrl-click); links navigate the current note tab.
-- More tab types: dictionary/lexicon browser, search results, a cross-reference list,
-  a commentary.
+- A tab's back/forward history, and a note's cursor and scroll, are not kept between sessions or in saved layouts.
+- Browsing or searching a dictionary's keys (a dictionary tab looks up one key at a time).
+- More tab types: search results, a commentary.
 
 ## Icons
 

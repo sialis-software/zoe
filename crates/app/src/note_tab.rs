@@ -1,11 +1,12 @@
 //! The note tab: one markdown document (a note, or a mark's margin file) in the live editor.
 //! Like the Bible tab it has a header bar: a selector for which note it holds (a panel of
 //! notes grouped by type, with an optional search), and delete for a margin note.
-//! Below the editor, a peek at the link under the cursor.
 //! Each note tab holds one document.
 
 use crate::bible_tab::{BibleTab, start_of_note};
 use crate::live_editor::live_editor;
+use crate::history::History;
+use crate::opening::Spec;
 use crate::palette::Palette;
 use crate::shared::{Shared, TabId};
 use iced::widget::{
@@ -14,14 +15,13 @@ use iced::widget::{
 };
 use iced::{Element, Length, Task, Theme};
 use md_editor::{Action as EditAction, Document};
-use scripture::RefRange;
 use std::collections::BTreeSet;
 use std::fmt;
 use study_core::ModuleId;
 use std::collections::BTreeMap;
 use study_core::frontmatter::{self, Frontmatter, PropType, Property, Value};
 use study_core::margin::MarkStyle;
-use study_core::markdown::{LinkTarget, WikiLink, find_links, resolve_note};
+use study_core::markdown::LinkTarget;
 
 /// Height of a header bar control: a pick list in the Bible tab's toolbar is this tall, so the
 /// bars of the two tab types match.
@@ -59,7 +59,14 @@ pub enum NoteMsg {
     Action(EditAction),
     /// Open the link under the editor cursor, or one clicked in the text.
     OpenLink(LinkTarget),
+    /// A right click on a link in the text, at this point of the window.
+    LinkMenu(LinkTarget, iced::Point),
+    /// A link in the text pulled away, at this point of the window.
+    LinkDrag(LinkTarget, iced::Point),
     PickNote(NoteChoice),
+    /// Back or forward along the notes this tab has shown.
+    Back,
+    Forward,
     /// Ask whether to delete the open note (the trash button).
     AskDelete,
     CancelDelete,
@@ -73,6 +80,9 @@ pub enum NoteMsg {
     // The note selector
     TogglePicker,
     ClosePicker,
+    /// The hamburger menu (rename, delete).
+    ToggleMenu,
+    CloseMenu,
     PickerQuery(String),
     ToggleGroup(String),
     /// A new note, made with its properties in place.
@@ -113,11 +123,15 @@ impl fmt::Display for KindChoice {
     }
 }
 
-/// Something the tab cannot do alone: it concerns a Bible tab.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Something the tab cannot do alone: where a link opens is for the workspace to decide.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Request {
-    ShowVerse(RefRange),
-    Word { module: String, key: String },
+    /// Follow a link, where the keys held (or the menu) say.
+    Open(Spec),
+    /// Offer where to open a link, at this point of the window.
+    Menu(Spec, iced::Point),
+    /// A link has been picked up: carry it, from this point of the window.
+    Drag(Spec, iced::Point),
 }
 
 /// What the confirmation dialog is about to delete.
@@ -138,6 +152,8 @@ pub struct Picker {
 pub struct NoteTab {
     pub id: TabId,
     pub path: String,
+    /// The notes this tab has shown.
+    pub history: History<String>,
     pub doc: Document,
     pub picker: Option<Picker>,
     /// The confirmation to delete the open margin note is showing.
@@ -146,6 +162,8 @@ pub struct NoteTab {
     pub tag_draft: String,
     /// The name being typed, while the note is being renamed.
     pub renaming: Option<String>,
+    /// The hamburger menu is open.
+    pub menu_open: bool,
     /// The full properties editor is open.
     pub props_open: bool,
     /// What a value box shows while what is typed is not (yet) a value of its type: a number
@@ -250,12 +268,14 @@ impl NoteTab {
         let doc = start_of_note(sh.notes.get(&path).map_or("", String::as_str));
         NoteTab {
             id,
+            history: History::new(path.clone()),
             path,
             doc,
             picker: None,
             confirm_delete: false,
             tag_draft: String::new(),
             renaming: None,
+            menu_open: false,
             props_open: false,
             drafts: BTreeMap::new(),
             new_key: String::new(),
@@ -279,7 +299,25 @@ impl NoteTab {
         label_of(sh, &self.path)
     }
 
+    /// Go to a note, as a move to a new place (Back returns).
     pub fn open(&mut self, sh: &mut Shared, path: String) {
+        self.show(sh, path.clone());
+        self.history.go(path, |a, b| a == b);
+    }
+
+    /// One step along the history, skipping notes that are gone.
+    fn step(&mut self, sh: &mut Shared, back: bool) {
+        loop {
+            let Some(path) = (if back { self.history.back() } else { self.history.forward() }).cloned() else { return };
+            if sh.notes.contains_key(&path) {
+                self.show(sh, path);
+                return;
+            }
+        }
+    }
+
+    /// Show a note, with the history left as it is.
+    fn show(&mut self, sh: &mut Shared, path: String) {
         let text = sh.notes.get(&path).cloned().unwrap_or_default();
         self.doc = start_of_note(&text);
         self.path = path;
@@ -289,6 +327,15 @@ impl NoteTab {
         self.tag_draft.clear();
         self.drafts.clear();
         sh.status.clear();
+    }
+
+    /// A note this tab has shown has a new name.
+    pub fn rename_in_history(&mut self, old: &str, new: &str) {
+        self.history.for_each_mut(|p| {
+            if p == old {
+                *p = new.to_string();
+            }
+        });
     }
 
     /// Reload the document from the shared text (it changed behind the tab).
@@ -322,13 +369,6 @@ impl NoteTab {
         sh.mark_index_of(&self.path)
     }
 
-    fn link_at_cursor(&self) -> Option<WikiLink> {
-        let head = self.doc.selection().head;
-        let line = self.doc.line_range(head);
-        let column = head - line.start;
-        find_links(&self.doc.source()[line]).into_iter().find(|w| w.span.start <= column && column <= w.span.end)
-    }
-
     pub fn update(&mut self, sh: &mut Shared, message: NoteMsg) -> (Task<NoteMsg>, Option<Request>) {
         let mut task = Task::none();
         match message {
@@ -342,7 +382,13 @@ impl NoteTab {
                     sh.sync_mark(&path);
                 }
             }
+            NoteMsg::ToggleMenu => {
+                self.menu_open = !self.menu_open;
+                self.picker = None;
+            }
+            NoteMsg::CloseMenu => self.menu_open = false,
             NoteMsg::AskDelete => {
+                self.menu_open = false;
                 self.confirm_delete = sh.notes.contains_key(&self.path);
                 self.picker = None;
             }
@@ -354,16 +400,14 @@ impl NoteTab {
                     None => sh.delete_note(&self.path.clone()),
                 }
             }
-            NoteMsg::OpenLink(target) => match target {
-                LinkTarget::Verse { range, .. } => return (task, Some(Request::ShowVerse(range))),
-                LinkTarget::Note(name) => match resolve_note(&sh.note_paths(), &name) {
-                    Some(p) => self.open(sh, p.clone()),
-                    None => sh.status = format!("No note named \"{name}\" yet"),
-                },
-                LinkTarget::Sword { module, key } => return (task, Some(Request::Word { module, key })),
-            },
+            NoteMsg::OpenLink(target) => return (task, Some(Request::Open(Spec::from_target(&target)))),
+            NoteMsg::LinkDrag(target, at) => return (task, Some(Request::Drag(Spec::from_target(&target), at))),
+            NoteMsg::LinkMenu(target, at) => return (task, Some(Request::Menu(Spec::from_target(&target), at))),
             NoteMsg::PickNote(NoteChoice(path)) => self.open(sh, path),
+            NoteMsg::Back => self.step(sh, true),
+            NoteMsg::Forward => self.step(sh, false),
             NoteMsg::TogglePicker => {
+                self.menu_open = false;
                 if self.picker.take().is_none() {
                     self.picker = Some(Picker::default());
                     task = iced::widget::operation::focus(self.search_id());
@@ -376,6 +420,7 @@ impl NoteTab {
                 }
             }
             NoteMsg::StartRename => {
+                self.menu_open = false;
                 // A margin note is named by what it marks.
                 if self.open_mark_index(sh).is_none() && sh.notes.contains_key(&self.path) {
                     self.renaming = Some(file_stem(&self.path));
@@ -397,6 +442,7 @@ impl NoteTab {
                                 sh.toast(format!("Renamed to \u{201C}{}\u{201D}", name.trim()));
                             }
                             sh.status.clear();
+                            self.rename_in_history(&self.path.clone(), &new);
                             self.path = new;
                             self.renaming = None;
                         }
@@ -520,14 +566,26 @@ impl NoteTab {
             .on_press(NoteMsg::TogglePicker)
             .into(),
         };
-        let mut header = row![container(who).max_width(360).width(Length::Fill), space::horizontal().width(Length::Shrink)]
-            .spacing(16)
-            .align_y(iced::Center);
-        // A margin note is named by the passage it marks, so only ordinary notes are renamed.
-        if self.renaming.is_none() && self.open_mark_index(sh).is_none() {
-            header = header.push(square(crate::icons::Icon::Pencil.view(18.0), NoteMsg::StartRename));
-        }
-        header = header.push(square(crate::icons::Icon::Trash.view(18.0), NoteMsg::AskDelete));
+        let arrow = |icon: crate::icons::Icon, on: bool, msg: NoteMsg| {
+            let b = button(container(icon.view(18.0)).center(Length::Fill))
+                .width(CONTROL_HEIGHT)
+                .height(CONTROL_HEIGHT)
+                .padding(0)
+                .style(button::secondary);
+            if on { b.on_press(msg) } else { b }
+        };
+        let mut header = row![
+            row![
+                arrow(crate::icons::Icon::Back, self.history.can_back(), NoteMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward(), NoteMsg::Forward),
+            ]
+            .spacing(4),
+            container(who).width(Length::Fill),
+        ]
+        .spacing(16)
+        .align_y(iced::Center);
+        // The menu at the right edge, as in the Bible tab.
+        header = header.push(square(crate::icons::Icon::Menu.view(18.0), NoteMsg::ToggleMenu));
 
         let mut pane = column![container(header).padding([8, 16]), rule::horizontal(1)].spacing(0);
 
@@ -542,12 +600,15 @@ impl NoteTab {
             .on_action(NoteMsg::Action)
             .follow_links(true)
             .on_link(NoteMsg::OpenLink)
+            .on_link_menu(NoteMsg::LinkMenu)
+            .on_link_drag(NoteMsg::LinkDrag)
             .embed(move |target| sh.embed_for(&embed_module, target))
             .placeholder("Write here…")
-            .size(17)
+            .size(sh.settings.note_size)
+            .font(sh.settings.text_font())
             .padding(16)
             .height(Length::Fill);
-        pane = pane.push(editor).push(rule::horizontal(1)).push(self.peek(sh, &module));
+        pane = pane.push(editor);
 
         if self.confirm_delete {
             let what = match self.open_mark_index(sh).and_then(|i| sh.marks.get(i)) {
@@ -555,6 +616,16 @@ impl NoteTab {
                 None => Deleting::Note(label_of(sh, &self.path)),
             };
             return self.confirmation(pane.into(), what);
+        }
+        if self.menu_open {
+            let dismiss = mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill))
+                .on_press(NoteMsg::CloseMenu);
+            let panel = container(opaque(self.menu_panel(sh)))
+                .padding(iced::Padding { top: PANEL_TOP, right: 16.0, bottom: 0.0, left: 0.0 })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right);
+            return stack![pane, dismiss, panel].into();
         }
         match &self.picker {
             None => pane.into(),
@@ -569,6 +640,24 @@ impl NoteTab {
                 stack![pane, dismiss, panel].into()
             }
         }
+    }
+
+    /// What can be done to the note: rename it (not a margin note, which is named by its passage),
+    /// delete it.
+    fn menu_panel<'a>(&self, sh: &Shared) -> Element<'a, NoteMsg> {
+        let item = |icon: crate::icons::Icon, label: &'static str, msg: NoteMsg| {
+            button(row![icon.view(16.0), text(label).size(14)].spacing(10).align_y(iced::Center))
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(button::text)
+                .on_press(msg)
+        };
+        let mut items = column![].spacing(2);
+        if self.open_mark_index(sh).is_none() {
+            items = items.push(item(crate::icons::Icon::Pencil, "Rename", NoteMsg::StartRename));
+        }
+        items = items.push(item(crate::icons::Icon::Trash, "Delete", NoteMsg::AskDelete));
+        container(items).padding(6).width(160).style(container::rounded_box).into()
     }
 
     /// The note with a dialog over it that dims what is behind: nothing else can be clicked, and
@@ -810,28 +899,5 @@ impl NoteTab {
             .max_height(420)
             .style(container::rounded_box)
             .into()
-    }
-
-    /// Preview of the link under the editor cursor, with a way to follow it.
-    fn peek<'a>(&'a self, sh: &'a Shared, module: &ModuleId) -> Element<'a, NoteMsg> {
-        let body: Element<'_, NoteMsg> = match self.link_at_cursor() {
-            None => text("Place the cursor in a [[link]] to peek at it.").size(13).style(text::secondary).into(),
-            Some(link) => {
-                let preview = sh.preview(module, &link.target).unwrap_or_else(|| "No preview available.".into());
-                let label = match link.target {
-                    LinkTarget::Verse { .. } => "Show in reader",
-                    LinkTarget::Note(_) => "Open note",
-                    LinkTarget::Sword { .. } => "Look up",
-                };
-                row![
-                    column![text(link.label()).size(15), text(preview).size(13)].spacing(4).width(Length::Fill),
-                    button(text(label).size(13)).style(button::secondary).on_press(NoteMsg::OpenLink(link.target)),
-                ]
-                .spacing(12)
-                .align_y(iced::Alignment::Start)
-                .into()
-            }
-        };
-        container(scrollable(body)).padding(12).width(Length::Fill).height(110).into()
     }
 }

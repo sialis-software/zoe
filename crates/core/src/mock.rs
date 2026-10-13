@@ -9,6 +9,7 @@ use scripture::{Book, RefRange};
 pub struct MockBackend;
 
 const KJV: &str = "KJV-mock";
+const MOCK_DICTIONARY: &str = "StrongsMock";
 
 fn t(s: &str) -> Inline {
     Inline::Text(s.to_string())
@@ -60,6 +61,7 @@ fn john_3() -> Chapter {
             run(4, vec![t("Nicodemus saith unto him, How can a man be born when he is old? can he enter the second time into his mother's womb, and be born?")]),
             run(5, vec![
                 red(vec![t("Verily, verily, I say unto thee, Except a man be born of water and of the Spirit, he cannot enter into the kingdom of God.")]),
+                Inline::CrossRef { refs: vec![RefRange::parse("Num 21:9").unwrap(), RefRange::parse("Ps 23:1").unwrap()] },
             ]),
             run(6, vec![
                 red(vec![t("That which is born of the flesh is flesh; and that which is born of the Spirit is spirit.")]),
@@ -220,6 +222,23 @@ impl StudyBackend for MockBackend {
             transliteration: translit.into(),
             definition: def.into(),
         })
+    }
+
+    fn dictionaries(&self) -> Vec<ModuleInfo> {
+        vec![ModuleInfo {
+            id: ModuleId(MOCK_DICTIONARY.into()),
+            abbreviation: "Strong's (mock)".into(),
+            description: "A few invented entries".into(),
+            has_strongs: true,
+        }]
+    }
+
+    fn dictionary_entry(&self, module: &ModuleId, key: &str) -> Option<LexiconEntry> {
+        (module.0 == MOCK_DICTIONARY).then(|| self.lexicon_entry(key)).flatten()
+    }
+
+    fn strongs_dictionary(&self, key: &str) -> Option<ModuleId> {
+        self.lexicon_entry(key).map(|_| ModuleId(MOCK_DICTIONARY.into()))
     }
 
     fn mark_files(&self) -> Vec<(String, String)> {

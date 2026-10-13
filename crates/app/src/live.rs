@@ -22,8 +22,45 @@ struct Open {
 
 /// A Strong's dictionary and which testament's numbers it covers.
 struct Dictionary {
-    greek: bool,
+    info: ModuleInfo,
+    /// For a Strong's dictionary, which testament's numbers: `Some(true)` for Greek.
+    strongs: Option<bool>,
     lexicon: Lexicon,
+}
+
+/// A Strong's number as people write it (`G25`, `h0430`): its testament and number.
+fn strongs_key(key: &str) -> Option<(bool, u32)> {
+    let key = key.trim();
+    let (kind, digits) = key.split_at(key.find(|c: char| c.is_ascii_digit())?);
+    let greek = match kind.to_ascii_uppercase().as_str() {
+        "G" => true,
+        "H" => false,
+        _ => return None,
+    };
+    Some((greek, digits.parse().ok()?))
+}
+
+impl Dictionary {
+    /// The entry for `key`, however this dictionary spells it: Strong's dictionaries key their
+    /// numbers differently (`00025`, `G0025`, `G25`).
+    fn entry(&self, key: &str) -> Option<sword::Entry> {
+        let spellings: Vec<String> = match (self.strongs, strongs_key(key)) {
+            (Some(greek), Some((g, number))) if g == greek => {
+                let letter = if greek { 'G' } else { 'H' };
+                vec![
+                    format!("{number:05}"),
+                    format!("{letter}{number:04}"),
+                    format!("{letter}{number:05}"),
+                    format!("{letter}{number}"),
+                    number.to_string(),
+                ]
+            }
+            (Some(_), Some(_)) => return None,
+            _ => vec![key.trim().to_string()],
+        };
+        let markup = spellings.iter().find_map(|k| self.lexicon.entry(k).ok().flatten())?;
+        Some(sword::parse_entry(&markup))
+    }
 }
 
 pub struct LiveBackend {
@@ -53,17 +90,31 @@ impl LiveBackend {
         // The first module is the one the app opens: LSB for now, or `BIBLE_STUDY_MODULE`.
         let preferred = std::env::var("BIBLE_STUDY_MODULE").unwrap_or_else(|_| DEFAULT_MODULE.into());
         infos.sort_by_key(|m: &ModuleInfo| !m.abbreviation.eq_ignore_ascii_case(&preferred));
-        let mut named: Vec<(bool, Dictionary)> = Vec::new();
+        let mut named: Vec<(u8, Dictionary)> = Vec::new();
         for m in lib.modules().filter(|m| m.kind() == Kind::Lexicon) {
-            let greek = m.conf.all("Feature").any(|f| f == "GreekDef");
-            if !greek && !m.conf.all("Feature").any(|f| f == "HebrewDef") {
-                continue;
-            }
-            if let Ok(lexicon) = m.lexicon() {
-                named.push((!m.name().to_lowercase().starts_with("strongs"), Dictionary { greek, lexicon }));
-            }
+            let strongs = if m.conf.all("Feature").any(|f| f == "GreekDef") {
+                Some(true)
+            } else if m.conf.all("Feature").any(|f| f == "HebrewDef") {
+                Some(false)
+            } else {
+                None
+            };
+            let Ok(lexicon) = m.lexicon() else { continue };
+            let info = ModuleInfo {
+                id: ModuleId(m.name().to_string()),
+                abbreviation: m.conf.get("Abbreviation").unwrap_or(m.name()).to_string(),
+                description: m.description().to_string(),
+                has_strongs: strongs.is_some(),
+            };
+            // The public domain Strong's dictionaries first, then other Strong's ones, then the rest.
+            let rank = match (strongs, m.name().to_lowercase().starts_with("strongs")) {
+                (Some(_), true) => 0,
+                (Some(_), false) => 1,
+                _ => 2,
+            };
+            named.push((rank, Dictionary { info, strongs, lexicon }));
         }
-        named.sort_by_key(|(secondary, _)| *secondary);
+        named.sort_by_key(|(rank, _)| *rank);
         let dictionaries = named.into_iter().map(|(_, d)| d).collect();
         LiveBackend { infos, open, dictionaries }
     }
@@ -84,21 +135,11 @@ impl StudyBackend for LiveBackend {
     }
 
     fn lexicon_entry(&self, key: &str) -> Option<LexiconEntry> {
-        let key = key.trim();
-        let (kind, digits) = key.split_at(key.find(|c: char| c.is_ascii_digit())?);
-        let number: u32 = digits.parse().ok()?;
-        let greek = match kind.to_ascii_uppercase().as_str() {
-            "G" => true,
-            "H" => false,
-            _ => return None,
-        };
+        let (greek, number) = strongs_key(key)?;
         let letter = if greek { 'G' } else { 'H' };
-        // Dictionaries key Strong's numbers differently: 00025, G0025, G25.
-        let spellings = [format!("{number:05}"), format!("{letter}{number:04}"), format!("{letter}{number:05}"), format!("{letter}{number}"), number.to_string()];
         let mut best: Option<sword::Entry> = None;
-        for dict in self.dictionaries.iter().filter(|d| d.greek == greek) {
-            let Some(markup) = spellings.iter().find_map(|k| dict.lexicon.entry(k).ok().flatten()) else { continue };
-            let parsed = sword::parse_entry(&markup);
+        for dict in self.dictionaries.iter().filter(|d| d.strongs == Some(greek)) {
+            let Some(parsed) = dict.entry(key) else { continue };
             let has_lemma = !parsed.lemma.is_empty();
             if best.is_none() || has_lemma && best.as_ref().is_some_and(|b| b.lemma.is_empty()) {
                 best = Some(parsed);
@@ -114,6 +155,25 @@ impl StudyBackend for LiveBackend {
             transliteration: e.transliteration,
             definition: e.definition,
         })
+    }
+
+    fn dictionaries(&self) -> Vec<ModuleInfo> {
+        self.dictionaries.iter().map(|d| d.info.clone()).collect()
+    }
+
+    fn dictionary_entry(&self, module: &ModuleId, key: &str) -> Option<LexiconEntry> {
+        let dict = self.dictionaries.iter().find(|d| d.info.id == *module)?;
+        let e = dict.entry(key)?;
+        let key = match (dict.strongs, strongs_key(key)) {
+            (Some(g), Some((_, n))) => format!("{}{n}", if g { 'G' } else { 'H' }),
+            _ => key.trim().to_string(),
+        };
+        Some(LexiconEntry { key, lemma: e.lemma, transliteration: e.transliteration, definition: e.definition })
+    }
+
+    fn strongs_dictionary(&self, key: &str) -> Option<ModuleId> {
+        let (greek, _) = strongs_key(key)?;
+        self.dictionaries.iter().filter(|d| d.strongs == Some(greek)).find(|d| d.entry(key).is_some()).map(|d| d.info.id.clone())
     }
 
     fn cross_references(&self, _range: &RefRange) -> Vec<CrossRef> {
@@ -138,6 +198,8 @@ pub struct Boot {
     pub backend: Box<dyn StudyBackend>,
     pub notes: BTreeMap<String, String>,
     pub persist: Option<Persist>,
+    /// The data folder, when there is a real one: settings and the session live in it.
+    pub home: Option<PathBuf>,
     /// Shown in the toolbar until something else replaces it.
     pub status: String,
 }
@@ -162,6 +224,7 @@ pub fn boot_at(home: &Path, roots: &[PathBuf], reseed: bool) -> Boot {
             backend: Box::new(mock),
             notes,
             persist: None,
+            home: None,
             status: "No readable SWORD modules found: showing sample text, nothing is saved".into(),
         };
     };
@@ -172,6 +235,7 @@ pub fn boot_at(home: &Path, roots: &[PathBuf], reseed: bool) -> Boot {
                 backend: Box::new(backend),
                 notes: BTreeMap::new(),
                 persist: None,
+                home: None,
                 status: format!("Could not open the vault at {}: {e}; nothing is saved", home.display()),
             };
         }
@@ -189,7 +253,7 @@ pub fn boot_at(home: &Path, roots: &[PathBuf], reseed: bool) -> Boot {
         ix.sync(&notes).ok()?;
         Some(ix)
     });
-    Boot { backend: Box::new(backend), notes, persist: Some(Persist::new(vault, index)), status }
+    Boot { backend: Box::new(backend), notes, persist: Some(Persist::new(vault, index)), home: Some(home.to_path_buf()), status }
 }
 
 #[cfg(test)]
@@ -225,6 +289,26 @@ mod tests {
         assert!(!god.lemma.is_empty(), "a Hebrew entry with its own script is preferred");
         assert!(live.lexicon_entry("G99999").is_none());
         assert!(live.lexicon_entry("X25").is_none() && live.lexicon_entry("").is_none());
+    }
+
+    #[test]
+    fn dictionaries_are_listed_and_looked_up_by_name() {
+        let live = LiveBackend::open(&sword::default_roots());
+        let Some(greek) = live.dictionaries().into_iter().find(|d| d.id.0 == "StrongsGreek") else {
+            return eprintln!("skipped: StrongsGreek is not installed");
+        };
+        assert!(greek.has_strongs);
+        let e = live.dictionary_entry(&greek.id, "g25").expect("a Strong's number, however it is written");
+        assert_eq!((e.key.as_str(), e.lemma.as_str()), ("G25", "ἀγαπάω"));
+        assert!(live.dictionary_entry(&greek.id, "H430").is_none(), "a Hebrew number is not in a Greek dictionary");
+        assert!(live.dictionary_entry(&ModuleId("Nope".into()), "G25").is_none());
+        assert_eq!(live.strongs_dictionary("G25"), Some(greek.id.clone()), "the public domain one first");
+        assert!(live.strongs_dictionary("H430").is_some());
+        assert!(live.strongs_dictionary("G99999").is_none());
+        // Dictionaries that are not Strong's are listed after, and take keys as they are.
+        let names: Vec<_> = live.dictionaries().into_iter().map(|d| (d.id.0, d.has_strongs)).collect();
+        let first_plain = names.iter().position(|(_, s)| !s).unwrap_or(names.len());
+        assert!(names[..first_plain].iter().all(|(_, s)| *s) && names[first_plain..].iter().all(|(_, s)| !*s), "{names:?}");
     }
 
     fn roots() -> Vec<PathBuf> {

@@ -530,6 +530,10 @@ pub struct ReaderText<'a, L, Message> {
     cards: Vec<CardSpec<'a, Message>>,
     text_width: Option<f32>,
     on_layout: Option<Box<dyn Fn(bool) -> Message + 'a>>,
+    /// A link pressed and then dragged away: the link, and where the pointer is (in the window).
+    on_link_drag: Option<Box<dyn Fn(L, Point) -> Message + 'a>>,
+    /// A right click on a link: the link, and where the pointer is (in the window).
+    on_link_menu: Option<Box<dyn Fn(L, Point) -> Message + 'a>>,
     /// A left press in the text (not on a card): lets the app put away its pop-ups elsewhere.
     on_press: Option<Box<dyn Fn() -> Message + 'a>>,
     margin_colors: (Color, Color),
@@ -559,6 +563,8 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
             text_width: None,
             on_layout: None,
             on_press: None,
+            on_link_menu: None,
+            on_link_drag: None,
             margin_colors: (Color::TRANSPARENT, Color::TRANSPARENT),
             on_marks: None,
         }
@@ -653,6 +659,16 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
     }
 
     /// Called with whether the margin is showing, whenever that changes (and once at first).
+    pub fn on_link_drag(mut self, f: impl Fn(L, Point) -> Message + 'a) -> Self {
+        self.on_link_drag = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_link_menu(mut self, f: impl Fn(L, Point) -> Message + 'a) -> Self {
+        self.on_link_menu = Some(Box::new(f));
+        self
+    }
+
     pub fn on_press(mut self, f: impl Fn() -> Message + 'a) -> Self {
         self.on_press = Some(Box::new(f));
         self
@@ -1508,11 +1524,11 @@ where
         }
         for (spec, laid) in self.cards.iter().zip(&state.cards) {
             let abs = laid.absolute(bounds);
-            if !abs.intersects(viewport) {
-                continue;
-            }
+            // Only the part of a card inside what is visible is drawn: the layer's clip is its
+            // own, so without this a card past the edge of the pane would spill into the next.
+            let Some(visible) = abs.intersection(viewport) else { continue };
             if let Some(card_tree) = state.card_trees.get(&spec.key) {
-                renderer.with_layer(abs, |renderer| {
+                renderer.with_layer(visible, |renderer| {
                     spec.element.as_widget().draw(
                         card_tree,
                         renderer,
@@ -1520,7 +1536,7 @@ where
                         style,
                         Layout::with_offset(laid.offset(bounds), &laid.node),
                         cursor,
-                        viewport,
+                        &visible,
                     );
                 });
             }
@@ -1697,6 +1713,15 @@ where
         let tintable = |h: Option<(usize, usize)>| h.is_some_and(|(b, j)| self.blocks[b].meta[j].number);
 
         match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                if let (Some(f), Some(p), true, Some(at)) = (&self.on_link_menu, local, inside, cursor.position())
+                    && let Some((b, j)) = state.link_at(self, p)
+                    && let Some(link) = self.blocks[b].spans[j].link.clone()
+                {
+                    shell.publish(f(link, at));
+                    shell.capture_event();
+                }
+            }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if inside && let Some(f) = &self.on_press {
                     shell.publish(f());
@@ -1765,6 +1790,18 @@ where
                     let Some(p) = local else { return };
                     if !drag.moved && distance(drag.origin, p) > DRAG_THRESHOLD {
                         drag.moved = true;
+                        // Pulled away from a link (not a verse number): the link is being carried.
+                        let carried = drag
+                            .pressed_link
+                            .filter(|&(b, j)| !self.blocks[b].meta[j].number)
+                            .and_then(|(b, j)| self.blocks[b].spans[j].link.clone());
+                        if let (Some(link), Some(f), Some(at)) = (carried, &self.on_link_drag, cursor.position()) {
+                            state.drag = None;
+                            shell.publish(f(link, at));
+                            shell.capture_event();
+                            shell.request_redraw();
+                            return;
+                        }
                     }
                     if drag.moved {
                         let (count, anchor, anchor_sel) = (drag.count, drag.anchor, drag.anchor_sel);

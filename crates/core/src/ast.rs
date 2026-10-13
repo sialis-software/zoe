@@ -18,7 +18,7 @@ fn flatten(items: &[Inline], out: &mut String) {
             Inline::Word { text, .. } => out.push_str(text),
             Inline::Ref { label, .. } => out.push_str(label),
             Inline::RedLetter(inner) | Inline::Emphasis(inner) => flatten(inner, out),
-            Inline::Footnote { .. } => {}
+            Inline::Footnote { .. } | Inline::CrossRef { .. } => {}
         }
     }
 }
@@ -160,6 +160,9 @@ pub enum Inline {
     /// A word carrying a Strong's number, e.g. `G25`.
     Word { text: String, strongs: String },
     Footnote { id: String, text: String },
+    /// A marker for the passages the module points to from here (its cross references). Like a
+    /// footnote it is not part of the verse's text.
+    CrossRef { refs: Vec<RefRange> },
     /// A scripture reference with display text.
     Ref { label: String, target: RefRange },
 }

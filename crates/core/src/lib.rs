@@ -56,6 +56,13 @@ pub trait StudyBackend {
     fn available_chapters(&self, module: &ModuleId) -> Vec<(Book, u16)>;
     fn chapter(&self, module: &ModuleId, book: Book, chapter: u16) -> Result<Chapter, Error>;
     fn lexicon_entry(&self, key: &str) -> Option<LexiconEntry>;
+    /// The dictionaries and lexicons installed, in the order to offer them.
+    fn dictionaries(&self) -> Vec<ModuleInfo>;
+    /// An entry of a named dictionary. A Strong's dictionary takes numbers as people write them
+    /// (`G25`).
+    fn dictionary_entry(&self, module: &ModuleId, key: &str) -> Option<LexiconEntry>;
+    /// The dictionary that defines a Strong's number (`G25`), if any does.
+    fn strongs_dictionary(&self, key: &str) -> Option<ModuleId>;
     fn cross_references(&self, range: &RefRange) -> Vec<CrossRef>;
     /// Vault-relative paths of all notes.
     fn note_paths(&self) -> Vec<String>;

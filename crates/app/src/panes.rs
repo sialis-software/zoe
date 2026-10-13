@@ -23,7 +23,6 @@ pub enum Node {
 
 impl Node {
     /// The panes, first to last (left to right, top to bottom).
-    #[cfg(test)]
     pub fn leaves(&self) -> Vec<PaneId> {
         match self {
             Node::Leaf(p) => vec![*p],
@@ -42,19 +41,25 @@ impl Node {
     /// Divide `target` in two along `axis`, keeping it first and putting `new` after it (to the
     /// right, or below). False if there is no `target`.
     pub fn split(&mut self, target: PaneId, new: PaneId, id: SplitId, axis: Axis) -> bool {
+        self.split_side(target, new, id, axis, false)
+    }
+
+    /// Like [`Node::split`], with `new` before `target` (to the left, or above) if `before`.
+    pub fn split_side(&mut self, target: PaneId, new: PaneId, id: SplitId, axis: Axis, before: bool) -> bool {
         match self {
             Node::Leaf(p) if *p == target => {
+                let (first, second) = if before { (new, target) } else { (target, new) };
                 *self = Node::Split {
                     id,
                     axis,
                     fraction: 0.5,
-                    a: Box::new(Node::Leaf(target)),
-                    b: Box::new(Node::Leaf(new)),
+                    a: Box::new(Node::Leaf(first)),
+                    b: Box::new(Node::Leaf(second)),
                 };
                 true
             }
             Node::Leaf(_) => false,
-            Node::Split { a, b, .. } => a.split(target, new, id, axis) || b.split(target, new, id, axis),
+            Node::Split { a, b, .. } => a.split_side(target, new, id, axis, before) || b.split_side(target, new, id, axis, before),
         }
     }
 
@@ -117,6 +122,17 @@ mod tests {
         m.split(2, 3, 11, Axis::Row);
         let Node::Split { b, .. } = &m else { unreachable!() };
         assert_eq!(axis_of(b), Some(Axis::Row));
+    }
+
+    #[test]
+    fn a_new_pane_can_go_before_the_one_it_is_split_from() {
+        let mut n = Node::Leaf(1);
+        n.split(1, 2, 10, Axis::Row);
+        assert!(n.split_side(2, 3, 11, Axis::Column, true));
+        assert_eq!(n.leaves(), [1, 3, 2], "3 is above 2");
+        assert!(n.split_side(1, 4, 12, Axis::Row, true));
+        assert_eq!(n.leaves(), [4, 1, 3, 2], "4 is left of 1");
+        assert!(!n.split_side(9, 5, 13, Axis::Row, true));
     }
 
     #[test]

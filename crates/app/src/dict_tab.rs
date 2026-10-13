@@ -1,0 +1,162 @@
+//! The dictionary tab: one entry of a dictionary or lexicon (a Strong's number, a word), with a
+//! picker for which dictionary and a box for which entry. Links to dictionaries open here.
+//! Self-contained like the other tab types: its own state, messages, update and view.
+
+use crate::fonts;
+use crate::history::History;
+use crate::shared::{Shared, TabId};
+use iced::widget::{button, column, container, pick_list, row, rule, scrollable, space, text, text_input};
+use iced::{Element, Font, Length, font};
+use std::fmt;
+use study_core::{LexiconEntry, ModuleId};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictChoice(pub ModuleId, pub String);
+
+impl fmt::Display for DictChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum DictMsg {
+    PickModule(DictChoice),
+    /// What is typed in the entry box.
+    Draft(String),
+    /// Look up what is typed.
+    Go,
+    Back,
+    Forward,
+}
+
+pub struct DictTab {
+    pub id: TabId,
+    pub module: ModuleId,
+    /// The entry being shown (as asked for), and what the box says.
+    pub key: String,
+    pub draft: String,
+    /// What the dictionary says for `key`, if it has an entry.
+    pub entry: Option<LexiconEntry>,
+    /// The entries this tab has shown, as dictionary and key.
+    pub history: History<(ModuleId, String)>,
+}
+
+impl DictTab {
+    pub fn new(id: TabId, sh: &Shared, module: ModuleId, key: &str) -> Self {
+        let mut tab = DictTab { id, history: History::new((module.clone(), String::new())), module, key: String::new(), draft: String::new(), entry: None };
+        tab.show(sh, key);
+        tab.history = History::new((tab.module.clone(), tab.key.clone()));
+        tab
+    }
+
+    /// Show `key` of the current dictionary.
+    pub fn show(&mut self, sh: &Shared, key: &str) {
+        self.look_up(sh, key);
+        self.history.go((self.module.clone(), self.key.clone()), |a, b| a == b);
+    }
+
+    /// Show `key`, with the history left as it is.
+    fn look_up(&mut self, sh: &Shared, key: &str) {
+        self.key = key.trim().to_string();
+        self.draft = self.key.clone();
+        self.entry = (!self.key.is_empty()).then(|| sh.backend.dictionary_entry(&self.module, &self.key)).flatten();
+    }
+
+    /// Show `key` of `module`.
+    pub fn open(&mut self, sh: &Shared, module: ModuleId, key: &str) {
+        self.module = module;
+        self.show(sh, key);
+    }
+
+    fn module_name(&self, sh: &Shared) -> String {
+        sh.backend
+            .dictionaries()
+            .into_iter()
+            .find(|d| d.id == self.module)
+            .map_or_else(|| self.module.0.clone(), |d| d.abbreviation)
+    }
+
+    pub fn title(&self, sh: &Shared) -> String {
+        let module = self.module_name(sh);
+        if self.key.is_empty() { module } else { format!("{} · {module}", self.key) }
+    }
+
+    pub fn update(&mut self, sh: &mut Shared, message: DictMsg) {
+        match message {
+            DictMsg::PickModule(DictChoice(module, _)) => {
+                let key = self.draft.clone();
+                self.open(sh, module, &key);
+            }
+            DictMsg::Draft(draft) => self.draft = draft,
+            DictMsg::Back | DictMsg::Forward => {
+                let place = if matches!(message, DictMsg::Back) { self.history.back() } else { self.history.forward() }.cloned();
+                if let Some((module, key)) = place {
+                    self.module = module;
+                    self.look_up(sh, &key);
+                }
+            }
+            DictMsg::Go => {
+                let key = self.draft.clone();
+                self.show(sh, &key);
+            }
+        }
+    }
+
+    pub fn view<'a>(&'a self, sh: &'a Shared) -> Element<'a, DictMsg> {
+        let choices: Vec<DictChoice> =
+            sh.backend.dictionaries().into_iter().map(|d| DictChoice(d.id, d.abbreviation)).collect();
+        let current = choices.iter().find(|c| c.0 == self.module).cloned();
+        // The same bar as the Bible tab's: a dictionary picker, then the entry wanted.
+        let arrow = |icon: crate::icons::Icon, on: bool, msg: DictMsg| {
+            let b = button(container(icon.view(18.0)).center(Length::Fill)).width(31).height(31).padding(0).style(button::secondary);
+            if on { b.on_press(msg) } else { b }
+        };
+        let bar = row![
+            row![
+                arrow(crate::icons::Icon::Back, self.history.can_back(), DictMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward(), DictMsg::Forward),
+            ]
+            .spacing(4),
+            pick_list(choices, current, DictMsg::PickModule),
+            container(text_input("Look up…", &self.draft).on_input(DictMsg::Draft).on_submit(DictMsg::Go).size(16).padding([4, 10]))
+                .max_width(220)
+                .width(Length::Fill),
+            button(container(text("Go").size(14)).center_y(Length::Fill)).height(31).padding([0, 14]).style(button::secondary).on_press(DictMsg::Go),
+        ]
+        .spacing(16)
+        .align_y(iced::Center);
+
+        let body: Element<'_, DictMsg> = match (&self.entry, self.key.is_empty()) {
+            (Some(e), _) => {
+                let mut head = row![].spacing(12).align_y(iced::Alignment::End);
+                if !e.lemma.is_empty() {
+                    head = head.push(text(e.lemma.clone()).size(34));
+                }
+                if !e.transliteration.is_empty() {
+                    let italic = Font { style: font::Style::Italic, ..fonts::UI };
+                    head = head.push(text(e.transliteration.clone()).size(18).font(italic).style(text::secondary));
+                }
+                column![
+                    text(e.key.clone()).size(12).style(text::secondary),
+                    head,
+                    text(e.definition.clone()).size(17),
+                ]
+                .spacing(10)
+                .into()
+            }
+            (None, true) => text("Type an entry to look up.").size(14).style(text::secondary).into(),
+            (None, false) => text(format!("{} has no entry for \u{201C}{}\u{201D}.", self.module_name(sh), self.key))
+                .size(15)
+                .style(text::secondary)
+                .into(),
+        };
+        column![
+            container(bar).padding([8, 16]),
+            rule::horizontal(1),
+            scrollable(container(body).padding(24).width(Length::Fill)).height(Length::Fill),
+            space::vertical().height(0),
+        ]
+        .into()
+    }
+}

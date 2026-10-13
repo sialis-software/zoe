@@ -4,12 +4,14 @@
 //! reads and changes the shared notes and marks through [`Shared`].
 
 use crate::fonts;
+use crate::history::History;
 use crate::live_editor::{live_editor, live_view};
+use crate::opening::Spec;
 use crate::palette::Palette;
 use crate::reader::{self, Link};
 use crate::reader_text::{CanonSlice, CardSpec, FloatKind, MarkDraw, MarkKind};
 use crate::shared::{Shared, TabId};
-use iced::widget::operation::{AbsoluteOffset, RelativeOffset, scroll_by, snap_to};
+use iced::widget::operation::{AbsoluteOffset, RelativeOffset, scroll_by, scroll_to, snap_to};
 use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, space, text};
 use iced::{Color, Element, Font, Length, Task, Theme, font};
 use md_editor::{Action as EditAction, Document};
@@ -18,7 +20,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use study_core::ast::Chapter;
 use study_core::margin::{self, Anchoring, Mark, MarkStyle, Slice};
-use study_core::markdown::{LinkTarget, find_refs, resolve_note};
+use study_core::markdown::{LinkTarget, find_refs};
 use study_core::{LexiconEntry, ModuleId};
 
 /// The tallest a card's text gets; beyond this it scrolls inside the card (about eight lines).
@@ -43,11 +45,8 @@ pub const PENS: [Pen; 4] = [
     Pen { name: "Pray", style: MarkStyle::Highlight, color: "#FF7AB6", tag: "prayer" },
 ];
 
-/// Shown under the reader after opening a dictionary link from a note, or after
-/// marking text (the file that mark would be saved as).
+/// Shown under the reader after marking text (the file that mark would be saved as).
 pub enum Detail {
-    /// A dictionary entry opened from a link in a note (no place in the text to put a card).
-    Word(LexiconEntry),
     MarkFile { path: String, text: String },
 }
 
@@ -56,6 +55,8 @@ pub enum NoteContent {
     Footnote(String),
     /// A Strong's number and its dictionary entry, when an installed dictionary has one.
     Word { key: String, entry: Option<LexiconEntry> },
+    /// What a cross reference marker points to.
+    References(Vec<RefRange>),
 }
 
 /// A footnote or dictionary card, opened by clicking its marker or word. It pops over the
@@ -124,22 +125,85 @@ pub enum BibleMsg {
     Pressed,
     CloseDetail,
     CloseNoteCard,
-    /// A link in a card's comment.
+    /// A link in a card's comment, or in a list of references.
     OpenLink(LinkTarget),
+    /// Open a Strong's number's definition in a dictionary tab.
+    OpenWord(String),
+    /// A right click on a link in the text, at this point of the window.
+    LinkMenu(Link, iced::Point),
+    /// A right click on a link in a card's comment.
+    CardLinkMenu(LinkTarget, iced::Point),
+    /// A link in the text pulled away, at this point of the window.
+    LinkDrag(Link, iced::Point),
+    /// A link in a card's comment pulled away.
+    CardLinkDrag(LinkTarget, iced::Point),
     // Navigation and settings
     PickModule(ModuleChoice),
     PickBook(BookChoice),
     PickChapter(ChapterChoice),
+    /// The chapter before or after this one, in the module's order.
+    PrevChapter,
+    NextChapter,
+    /// Back or forward along this tab's history, or straight to an entry of it.
+    Back,
+    Forward,
+    GoTo(usize),
+    /// The list of places this tab has been.
+    ToggleHistory,
+    CloseHistory,
+    /// The reader was scrolled to this far down.
+    Scrolled(f32),
     ToggleStrongs(bool),
+    ToggleMarks(bool),
+    ToggleFootnotes(bool),
+    ToggleRefs(bool),
+    /// The reader's menu (the hamburger): open or close it.
+    ToggleMenu,
+    CloseMenu,
 }
 
 /// Something the tab cannot do alone, for the workspace to carry out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Request {
-    /// Show this note in a note tab.
-    OpenNote(String),
+    /// Follow a link, where the keys held (or the menu) say.
+    Open(Spec),
+    /// Offer where to open a link, at this point of the window.
+    Menu(Spec, iced::Point),
+    /// A link has been picked up: carry it, from this point of the window.
+    Drag(Spec, iced::Point),
     /// Show the note behind mark `index` in a note tab.
     OpenMark(usize),
+}
+
+/// A book and chapter number.
+type ChapterId = (Book, u16);
+
+/// Where a Bible tab has been: enough to come back to the same view of the same text.
+#[derive(Clone, Debug)]
+pub struct Place {
+    pub module: ModuleId,
+    pub book: Book,
+    pub chapter: u16,
+    /// The verses a link had picked out, if one brought it here.
+    pub verses: Option<(u16, u16)>,
+    /// How far down the chapter it was scrolled when it was left.
+    pub scroll: f32,
+}
+
+impl Place {
+    /// The same place, whatever the scroll.
+    pub fn is_same(&self, other: &Place) -> bool {
+        self.module == other.module && self.book == other.book && self.chapter == other.chapter && self.verses == other.verses
+    }
+
+    fn label(&self, sh: &Shared) -> String {
+        let verses = match self.verses {
+            Some((a, z)) if a == z => format!(":{a}"),
+            Some((a, z)) => format!(":{a}-{z}"),
+            None => String::new(),
+        };
+        format!("{} {}{verses} \u{b7} {}", self.book, self.chapter, sh.module_abbreviation(&self.module))
+    }
 }
 
 pub struct BibleTab {
@@ -166,7 +230,19 @@ pub struct BibleTab {
     /// Pending "scroll this verse into view" request for the reader: (token, verse).
     pub reveal: Option<(u64, u16)>,
     pub reveal_token: u64,
+    /// Where this tab has been, and how far down the chapter it is now (kept as it is scrolled).
+    pub history: History<Place>,
+    pub scroll_y: f32,
+    /// The list of places this tab has been is open.
+    pub history_open: bool,
     pub show_strongs: bool,
+    /// What the reader shows besides the words: mark highlights and cards, footnote markers and
+    /// cards, cross reference markers.
+    pub show_marks: bool,
+    pub show_footnotes: bool,
+    pub show_refs: bool,
+    /// The reader's menu is open.
+    pub menu_open: bool,
     pub detail: Option<Detail>,
     pub note_card: Option<NoteCard>,
 }
@@ -196,6 +272,8 @@ fn reader_message(event: reader::Event) -> BibleMsg {
         reader::Event::Marks(ids) => BibleMsg::MarksClicked(ids),
         reader::Event::Margin(on) => BibleMsg::MarginChanged(on),
         reader::Event::Pressed => BibleMsg::Pressed,
+        reader::Event::LinkMenu(link, at) => BibleMsg::LinkMenu(link, at),
+        reader::Event::LinkDrag(link, at) => BibleMsg::LinkDrag(link, at),
     }
 }
 
@@ -316,12 +394,25 @@ impl BibleTab {
         let here = near.map(|n| (n.book, n.chapter_no)).filter(|at| sh.backend.available_chapters(&module).contains(at));
         let (book, chapter) = here.unwrap_or_else(|| sh.first_chapter(&module));
         let mut tab = BibleTab::blank(id, module);
-        tab.show_strongs = near.is_some_and(|n| n.show_strongs);
+        if let Some(n) = near {
+            (tab.show_strongs, tab.show_marks, tab.show_footnotes, tab.show_refs) =
+                (n.show_strongs, n.show_marks, n.show_footnotes, n.show_refs);
+        }
+        tab.open_chapter(sh, book, chapter);
+        tab
+    }
+
+    /// A tab put back as it was left: this chapter, this far down (the reader is told to scroll
+    /// there by whoever builds the tab).
+    pub fn restored(id: TabId, sh: &Shared, module: ModuleId, book: Book, chapter: u16, scroll: f32) -> Self {
+        let mut tab = BibleTab::blank(id, module);
+        tab.scroll_y = scroll;
         tab.open_chapter(sh, book, chapter);
         tab
     }
 
     fn blank(id: TabId, module: ModuleId) -> Self {
+        let first = Place { module: module.clone(), book: Book::JOHN, chapter: 3, verses: None, scroll: 0.0 };
         BibleTab {
             id,
             module,
@@ -338,7 +429,14 @@ impl BibleTab {
             clear_token: 0,
             reveal: None,
             reveal_token: 0,
+            history: History::new(first),
+            scroll_y: 0.0,
+            history_open: false,
             show_strongs: false,
+            show_marks: true,
+            show_footnotes: true,
+            show_refs: false,
+            menu_open: false,
             detail: None,
             note_card: None,
         }
@@ -365,9 +463,24 @@ impl BibleTab {
         self.book = book;
         self.chapter_no = chapter;
         self.chapter = sh.backend.chapter(&self.module, book, chapter).map_err(|e| e.to_string());
+        self.history = History::new(self.place(None));
     }
 
+    /// Where this tab is now, as a history entry.
+    fn place(&self, verses: Option<(u16, u16)>) -> Place {
+        Place { module: self.module.clone(), book: self.book, chapter: self.chapter_no, verses, scroll: self.scroll_y }
+    }
+
+    /// Go to a chapter of the module being read, as a move to a new place (Back returns).
     pub fn load(&mut self, sh: &mut Shared, book: Book, chapter: u16) {
+        self.history.current_mut().scroll = self.scroll_y;
+        self.load_raw(sh, book, chapter);
+        self.scroll_y = 0.0;
+        self.history.go(self.place(None), Place::is_same);
+    }
+
+    /// Show a chapter, with nothing else about the tab changed: the way history puts one back.
+    fn load_raw(&mut self, sh: &mut Shared, book: Book, chapter: u16) {
         self.book = book;
         self.chapter_no = chapter;
         self.select_request = None;
@@ -398,13 +511,43 @@ impl BibleTab {
             return;
         }
         sh.status.clear();
+        self.history.current_mut().scroll = self.scroll_y;
         if (target.book, target.chapter) != (self.book, self.chapter_no) {
-            self.load(sh, target.book, target.chapter);
+            self.load_raw(sh, target.book, target.chapter);
+            self.scroll_y = 0.0;
         }
         self.select_token += 1;
         self.select_request = target.verses.map(|(a, z)| (self.select_token, a, z));
         self.reveal_token += 1;
         self.reveal = Some((self.reveal_token, target.verses.map_or(1, |(a, _)| a)));
+        self.history.go(self.place(target.verses), Place::is_same);
+    }
+
+    /// Return to a place in this tab's history: its module, chapter, verses and how far down it was.
+    fn restore(&mut self, sh: &mut Shared, place: Place) -> Task<BibleMsg> {
+        self.module = place.module.clone();
+        self.load_raw(sh, place.book, place.chapter);
+        self.scroll_y = place.scroll;
+        if let Some((a, z)) = place.verses {
+            self.select_token += 1;
+            self.select_request = Some((self.select_token, a, z));
+            // Without a known scroll, bring the verses into view.
+            if place.scroll <= 0.0 {
+                self.reveal_token += 1;
+                self.reveal = Some((self.reveal_token, a));
+            }
+        }
+        scroll_to(self.reader_id(), AbsoluteOffset { x: 0.0, y: place.scroll })
+    }
+
+    /// One step along the history (`back` or forward), if there is one.
+    fn step(&mut self, sh: &mut Shared, back: bool) -> Task<BibleMsg> {
+        self.history.current_mut().scroll = self.scroll_y;
+        let place = if back { self.history.back() } else { self.history.forward() }.cloned();
+        match place {
+            Some(place) => self.restore(sh, place),
+            None => Task::none(),
+        }
     }
 
     /// Put the selected verses on the clipboard as a reference link or a quote.
@@ -496,6 +639,9 @@ impl BibleTab {
     /// reference, so they show everywhere.
     pub fn visible_marks(&self, sh: &Shared) -> Vec<(usize, Vec<Slice>)> {
         let Ok(chapter) = &self.chapter else { return Vec::new() };
+        if !self.show_marks {
+            return Vec::new();
+        }
         let canon = chapter.canonical_verses();
         let module = sh.module_abbreviation(&self.module);
         let mut out = Vec::new();
@@ -518,7 +664,7 @@ impl BibleTab {
         for (index, slices) in self.visible_marks(sh) {
             let mark = &sh.marks[index];
             let (kind, alpha) = match mark.style {
-                MarkStyle::Highlight => (MarkKind::Highlight, if sh.dark { 0.38 } else { 0.5 }),
+                MarkStyle::Highlight => (MarkKind::Highlight, if sh.is_dark() { 0.38 } else { 0.5 }),
                 MarkStyle::Underline => (MarkKind::Underline, 1.0),
                 MarkStyle::None => (MarkKind::Note, 0.7),
             };
@@ -653,6 +799,23 @@ impl BibleTab {
     // ---- update --------------------------------------------------------------------
 
     pub fn update(&mut self, sh: &mut Shared, message: BibleMsg) -> (Task<BibleMsg>, Option<Request>) {
+        // The reader's menu is a pop-up: anything else done in the reader puts it away.
+        if !matches!(
+            message,
+            BibleMsg::ToggleMenu
+                | BibleMsg::ToggleStrongs(_)
+                | BibleMsg::ToggleMarks(_)
+                | BibleMsg::ToggleFootnotes(_)
+                | BibleMsg::ToggleRefs(_)
+                | BibleMsg::MarginChanged(_)
+                | BibleMsg::AutoScroll(_)
+                | BibleMsg::Scrolled(_)
+                | BibleMsg::ToggleHistory
+                | BibleMsg::SelectionChanged(None)
+        ) {
+            self.menu_open = false;
+            self.history_open = false;
+        }
         let before = (self.book, self.chapter_no);
         let mut request = None;
         let task = match message {
@@ -748,8 +911,12 @@ impl BibleTab {
                 // can be picked.
                 self.marks_clicked(sh, marks, false)
             }
+            BibleMsg::Link(Link::CrossRefs(refs), at, marks) => {
+                self.open_note_card(sh, at, NoteContent::References(refs));
+                self.marks_clicked(sh, marks, false)
+            }
             BibleMsg::Link(Link::Ref(target), _, _) => {
-                self.show_in_reader(sh, target);
+                request = Some(Request::Open(Spec::Verse { range: target, module: None }));
                 Task::none()
             }
             BibleMsg::CloseDetail => {
@@ -761,14 +928,37 @@ impl BibleTab {
                 Task::none()
             }
             BibleMsg::OpenLink(target) => {
-                match target {
-                    LinkTarget::Verse { range, .. } => self.show_in_reader(sh, range),
-                    LinkTarget::Note(name) => match resolve_note(&sh.note_paths(), &name) {
-                        Some(p) => request = Some(Request::OpenNote(p.clone())),
-                        None => sh.status = format!("No note named \"{name}\" yet"),
-                    },
-                    LinkTarget::Sword { module, key } => self.show_word(sh, &module, &key),
-                }
+                request = Some(Request::Open(Spec::from_target(&target)));
+                Task::none()
+            }
+            BibleMsg::OpenWord(key) => {
+                // The definition moves to a tab, so the pop-over has done its work.
+                self.note_card = None;
+                request = Some(Request::Open(Spec::Word { key }));
+                Task::none()
+            }
+            BibleMsg::LinkMenu(link, at) => {
+                request = match link {
+                    Link::Ref(range) => Some(Request::Menu(Spec::Verse { range, module: None }, at)),
+                    Link::Strongs(key) => Some(Request::Menu(Spec::Word { key }, at)),
+                    Link::Footnote(_) | Link::CrossRefs(_) => None,
+                };
+                Task::none()
+            }
+            BibleMsg::LinkDrag(link, at) => {
+                request = match link {
+                    Link::Ref(range) => Some(Request::Drag(Spec::Verse { range, module: None }, at)),
+                    Link::Strongs(key) => Some(Request::Drag(Spec::Word { key }, at)),
+                    Link::Footnote(_) | Link::CrossRefs(_) => None,
+                };
+                Task::none()
+            }
+            BibleMsg::CardLinkDrag(target, at) => {
+                request = Some(Request::Drag(Spec::from_target(&target), at));
+                Task::none()
+            }
+            BibleMsg::CardLinkMenu(target, at) => {
+                request = Some(Request::Menu(Spec::from_target(&target), at));
                 Task::none()
             }
             BibleMsg::PickModule(ModuleChoice(id, _)) => {
@@ -792,8 +982,67 @@ impl BibleTab {
                 self.load(sh, book, chapter);
                 Task::none()
             }
+            BibleMsg::PrevChapter | BibleMsg::NextChapter => {
+                let (prev, next) = self.neighbours(sh);
+                if let Some((book, chapter)) = if matches!(message, BibleMsg::PrevChapter) { prev } else { next } {
+                    sh.status.clear();
+                    self.load(sh, book, chapter);
+                }
+                Task::none()
+            }
             BibleMsg::ToggleStrongs(on) => {
                 self.show_strongs = on;
+                Task::none()
+            }
+            BibleMsg::ToggleMarks(on) => {
+                self.show_marks = on;
+                // What was being done with marks goes with them.
+                self.popup = None;
+                self.stop_edit(sh);
+                Task::none()
+            }
+            BibleMsg::ToggleFootnotes(on) => {
+                self.show_footnotes = on;
+                if matches!(self.note_card, Some(NoteCard { content: NoteContent::Footnote(_) })) {
+                    self.note_card = None;
+                }
+                Task::none()
+            }
+            BibleMsg::ToggleRefs(on) => {
+                self.show_refs = on;
+                if matches!(self.note_card, Some(NoteCard { content: NoteContent::References(_) })) {
+                    self.note_card = None;
+                }
+                Task::none()
+            }
+            BibleMsg::ToggleMenu => {
+                self.menu_open = !self.menu_open;
+                self.history_open = false;
+                Task::none()
+            }
+            BibleMsg::Back => return (self.step(sh, true), None),
+            BibleMsg::Forward => return (self.step(sh, false), None),
+            BibleMsg::GoTo(index) => {
+                self.history.current_mut().scroll = self.scroll_y;
+                let place = self.history.jump(index).cloned();
+                self.history_open = false;
+                return (place.map_or_else(Task::none, |p| self.restore(sh, p)), None);
+            }
+            BibleMsg::ToggleHistory => {
+                self.history_open = !self.history_open;
+                self.menu_open = false;
+                Task::none()
+            }
+            BibleMsg::CloseHistory => {
+                self.history_open = false;
+                Task::none()
+            }
+            BibleMsg::Scrolled(y) => {
+                self.scroll_y = y;
+                Task::none()
+            }
+            BibleMsg::CloseMenu => {
+                self.menu_open = false;
                 Task::none()
             }
         };
@@ -806,19 +1055,82 @@ impl BibleTab {
         (task, request)
     }
 
-    /// Show a dictionary entry in the pane under the reader (opened from a note's link, so
-    /// there is no spot in the text to attach a card to).
-    pub fn show_word(&mut self, sh: &mut Shared, module: &str, key: &str) {
-        self.detail = sh.backend.lexicon_entry(key).map(Detail::Word);
-        if self.detail.is_none() {
-            sh.status = format!("{module}/{key} is not available");
-        }
-    }
-
     // ---- view ----------------------------------------------------------------------
 
     pub fn view<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
-        column![self.toolbar(sh), iced::widget::rule::horizontal(1), self.reader_pane(sh)].into()
+        let content = column![self.toolbar(sh), iced::widget::rule::horizontal(1), self.reader_pane(sh)];
+        if self.history_open {
+            let dismiss = iced::widget::mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill))
+                .on_press(BibleMsg::CloseHistory);
+            let panel = container(iced::widget::opaque(self.history_panel(sh)))
+                .padding(iced::Padding { top: 8.0 + 31.0 + 3.0, right: 0.0, bottom: 0.0, left: 16.0 })
+                .width(Length::Fill)
+                .height(Length::Fill);
+            return iced::widget::stack![content, dismiss, panel].into();
+        }
+        if !self.menu_open {
+            return content.into();
+        }
+        // The menu hangs from its button; a click anywhere else puts it away.
+        let dismiss = iced::widget::mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill))
+            .on_press(BibleMsg::CloseMenu);
+        let panel = container(iced::widget::opaque(self.menu_panel()))
+            .padding(iced::Padding { top: 8.0 + 31.0 + 3.0, right: 16.0, bottom: 0.0, left: 0.0 })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right);
+        iced::widget::stack![content, dismiss, panel].into()
+    }
+
+    /// The places this tab has been, newest first; the one it is at is marked.
+    fn history_panel(&self, sh: &Shared) -> Element<'_, BibleMsg> {
+        let (entries, at) = self.history.entries();
+        let mut list = column![].spacing(2);
+        for (i, place) in entries.iter().enumerate().rev() {
+            let label = if i == at { format!("\u{2022} {}", place.label(sh)) } else { format!("  {}", place.label(sh)) };
+            list = list.push(button(text(label).size(14)).width(Length::Fill).style(button::text).on_press(BibleMsg::GoTo(i)));
+        }
+        container(scrollable(list).height(Length::Shrink)).padding(8).max_width(300).max_height(360).style(container::rounded_box).into()
+    }
+
+    /// What the reader shows: each kind of thing in the text, on or off.
+    fn menu_panel(&self) -> Element<'_, BibleMsg> {
+        let item = |label: &'static str, on: bool, msg: fn(bool) -> BibleMsg| {
+            checkbox(on).label(label).on_toggle(msg).size(16).text_size(14)
+        };
+        container(
+            column![
+                item("Strong's numbers", self.show_strongs, BibleMsg::ToggleStrongs),
+                item("Marks", self.show_marks, BibleMsg::ToggleMarks),
+                item("Footnotes", self.show_footnotes, BibleMsg::ToggleFootnotes),
+                item("References", self.show_refs, BibleMsg::ToggleRefs),
+            ]
+            .spacing(10),
+        )
+        .padding(14)
+        .style(container::rounded_box)
+        .into()
+    }
+
+    /// The chapters before and after this one in the module.
+    fn neighbours(&self, sh: &Shared) -> (Option<ChapterId>, Option<ChapterId>) {
+        let all = sh.backend.available_chapters(&self.module);
+        let Some(at) = all.iter().position(|&c| c == (self.book, self.chapter_no)) else { return (None, None) };
+        (at.checked_sub(1).map(|i| all[i]), all.get(at + 1).copied())
+    }
+
+    /// Previous and next chapter, to put at the top and bottom of the text.
+    fn chapter_links<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
+        let (prev, next) = self.neighbours(sh);
+        let link = |label: String, msg: BibleMsg, target: Option<ChapterId>| {
+            let b = button(text(label).size(13)).padding([2, 6]).style(button::text);
+            if target.is_some() { b.on_press(msg) } else { b }
+        };
+        let prev_label = prev.map_or("\u{2190} Previous".to_string(), |(b, c)| format!("\u{2190} {b} {c}"));
+        let next_label = next.map_or("Next \u{2192}".to_string(), |(b, c)| format!("{b} {c} \u{2192}"));
+        row![link(prev_label, BibleMsg::PrevChapter, prev), space::horizontal(), link(next_label, BibleMsg::NextChapter, next)]
+            .align_y(iced::Center)
+            .into()
     }
 
     fn toolbar<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
@@ -838,18 +1150,39 @@ impl BibleTab {
         let modules: Vec<ModuleChoice> =
             sh.backend.modules().into_iter().map(|m| ModuleChoice(m.id, m.abbreviation)).collect();
         let module = modules.iter().find(|m| m.0 == self.module).cloned();
+        let menu = button(container(crate::icons::Icon::Menu.view(18.0)).center(Length::Fill))
+            .width(31)
+            .height(31)
+            .padding(0)
+            .style(button::secondary)
+            .on_press(BibleMsg::ToggleMenu);
+        let arrow = |icon: crate::icons::Icon, on: bool, msg: BibleMsg| {
+            let b = button(container(icon.view(18.0)).center(Length::Fill)).width(31).height(31).padding(0).style(button::secondary);
+            if on { b.on_press(msg) } else { b }
+        };
+        // Right-clicking either lists the places the tab has been.
+        let nav = iced::widget::mouse_area(
+            row![
+                arrow(crate::icons::Icon::Back, self.history.can_back(), BibleMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward(), BibleMsg::Forward),
+            ]
+            .spacing(4),
+        )
+        .on_right_press(BibleMsg::ToggleHistory);
         let bar = row![
+            nav,
             pick_list(modules, module, BibleMsg::PickModule),
             pick_list(books, Some(BookChoice(self.book)), BibleMsg::PickBook),
             pick_list(chapters, Some(current), BibleMsg::PickChapter),
-            checkbox(self.show_strongs).label("Strong's words").on_toggle(BibleMsg::ToggleStrongs),
+            space::horizontal(),
+            menu,
         ]
         .spacing(16)
         .align_y(iced::Center);
         container(bar).padding([8, 16]).into()
     }
 
-    fn view_options(&self, sh: &Shared) -> reader::ViewOptions {
+    pub(crate) fn view_options(&self, sh: &Shared) -> reader::ViewOptions {
         reader::ViewOptions {
             select: self.select_request,
             annotated: sh.annotated_verses(self.book, self.chapter_no),
@@ -858,7 +1191,11 @@ impl BibleTab {
             clear_token: self.clear_token,
             text_width: Some(TEXT_COLUMN),
             show_strongs: self.show_strongs,
+            show_footnotes: self.show_footnotes,
+            show_refs: self.show_refs,
             pal: Palette::for_theme(&sh.theme()),
+            body: sh.settings.reading_size,
+            font: sh.settings.text_font(),
             module: sh.module_abbreviation(&self.module),
         }
     }
@@ -884,6 +1221,7 @@ impl BibleTab {
         }
         // Beside the text every footnote of the chapter is shown, so none can be closed.
         if self.margin_showing
+            && self.show_footnotes
             && let Ok(chapter) = &self.chapter
         {
             let canon = chapter.canonical_verses();
@@ -896,7 +1234,7 @@ impl BibleTab {
                     color,
                     pinned: false,
                     follows_link: true,
-                    element: reference_card(sh, "Footnote", footnote_body(&note.text, color), false, false),
+                    element: reference_card(sh, "Footnote", footnote_body(&note.text, color), false, false, None),
                 });
             }
         }
@@ -909,6 +1247,7 @@ impl BibleTab {
             NoteContent::Footnote(note) => {
                 ("Footnote".into(), footnote_body(note, Palette::for_theme(&sh.theme()).link))
             }
+            NoteContent::References(refs) => ("References".into(), self.reference_list(sh, refs)),
             NoteContent::Word { key, entry: None } => (
                 format!("Strong's {key}"),
                 text("No installed dictionary has an entry for this number.").size(14).style(text::secondary).into(),
@@ -925,7 +1264,43 @@ impl BibleTab {
                 (format!("Strong's {key}"), column![head, text(e.definition.clone()).size(14)].spacing(4).into())
             }
         };
-        reference_card(sh, &label, body, true, fill)
+        // A dictionary entry can be taken to a tab of its own.
+        let open = match &card.content {
+            NoteContent::Word { key, entry: Some(_) } => Some(("Open in tab", BibleMsg::OpenWord(key.clone()))),
+            _ => None,
+        };
+        reference_card(sh, &label, body, true, fill, open)
+    }
+
+    /// The passages a cross reference marker points to, each a link to open it, with the start of
+    /// its text so it can be told from the others.
+    fn reference_list<'a>(&'a self, sh: &'a Shared, refs: &'a [RefRange]) -> Element<'a, BibleMsg> {
+        let link = Palette::for_theme(&sh.theme()).link;
+        let mut list = column![].spacing(6);
+        for range in refs {
+            let preview = sh
+                .backend
+                .chapter(&self.module, range.book, range.chapter)
+                .ok()
+                .map(|c| c.plain_text(range))
+                .map(|t| {
+                    let short: String = t.chars().take(70).collect();
+                    if t.chars().count() > 70 { format!("{short}\u{2026}") } else { short }
+                })
+                .filter(|t| !t.is_empty());
+            let mut entry = column![
+                button(text(range.to_string()).size(14).color(link))
+                    .padding(0)
+                    .style(button::text)
+                    .on_press(BibleMsg::OpenLink(LinkTarget::Verse { range: *range, module: None }))
+            ]
+            .spacing(1);
+            if let Some(preview) = preview {
+                entry = entry.push(text(preview).size(12).style(text::secondary));
+            }
+            list = list.push(entry);
+        }
+        list.into()
     }
 
     /// A mark's card. In the floating popup (`popup`) its actions are always offered, since
@@ -965,8 +1340,11 @@ impl BibleTab {
                 .id(self.card_editor_id())
                 .on_action(BibleMsg::CardAction)
                 .on_link(BibleMsg::OpenLink)
+                .on_link_menu(BibleMsg::CardLinkMenu)
+                .on_link_drag(BibleMsg::CardLinkDrag)
                 .embed(move |target| sh.embed_for(&module, target))
-                .size(14)
+                .size(14.0 * sh.settings.note_size / 17.0)
+                .font(sh.settings.text_font())
                 .padding(4)
                 // The editor scrolls itself once its text outgrows this.
                 .max_height(CARD_BODY_MAX)
@@ -983,10 +1361,13 @@ impl BibleTab {
             // text scrolls inside the card instead of making the card tall.
             live_view(Document::new(&full), pal)
                 .fit_width()
-                .size(14)
+                .size(14.0 * sh.settings.note_size / 17.0)
+                .font(sh.settings.text_font())
                 .padding([2.0, 0.0])
                 .max_height(CARD_BODY_MAX)
                 .on_link(BibleMsg::OpenLink)
+                .on_link_menu(BibleMsg::CardLinkMenu)
+                .on_link_drag(BibleMsg::CardLinkDrag)
                 .embed(move |target| sh.embed_for(&module, target))
                 .on_action(move |action| match action {
                     EditAction::ToggleTask(at) => BibleMsg::ToggleCardTask(index, at),
@@ -1060,22 +1441,17 @@ impl BibleTab {
             }
             Err(e) => text(e.clone()).into(),
         };
-        let bold = Font { weight: font::Weight::Bold, ..fonts::UI };
+        let bold = Font { weight: font::Weight::Bold, ..sh.settings.text_font() };
         let title = text(format!("{} {}", self.book, self.chapter_no)).size(30).font(bold);
 
-        let scroller = scrollable(container(column![title, body].spacing(16)).padding(32).width(Length::Fill))
+        let scroller = scrollable(container(column![self.chapter_links(sh), title, body, self.chapter_links(sh), space::vertical().height(20)].spacing(16)).padding(32).width(Length::Fill))
             .id(self.reader_id())
+            .on_scroll(|v| BibleMsg::Scrolled(v.absolute_offset().y))
             .height(Length::Fill);
 
         let mut pane = column![scroller];
         if let Some(detail) = &self.detail {
             let content: Element<'_, BibleMsg> = match detail {
-                Detail::Word(e) => column![
-                    text(format!("{}  {} ({})", e.key, e.lemma, e.transliteration)).size(15),
-                    text(e.definition.clone()).size(14)
-                ]
-                .spacing(2)
-                .into(),
                 Detail::MarkFile { path, text: body } => column![
                     text(format!("Mark saved as {path}")).size(12),
                     text(body.clone()).size(12).font(Font::MONOSPACE)
@@ -1105,6 +1481,7 @@ pub fn reference_card<'a>(
     body: Element<'a, BibleMsg>,
     closable: bool,
     fill: bool,
+    action: Option<(&'static str, BibleMsg)>,
 ) -> Element<'a, BibleMsg> {
     let color = Palette::for_theme(&sh.theme()).link;
     let mut header = row![text(label.to_string()).size(12).style(text::secondary)]
@@ -1112,6 +1489,9 @@ pub fn reference_card<'a>(
         .align_y(iced::Alignment::Center);
     if fill {
         header = header.push(space::horizontal());
+    }
+    if let Some((label, message)) = action {
+        header = header.push(button(text(label).size(12)).padding([0, 6]).style(button::text).on_press(message));
     }
     if closable {
         header = header

@@ -1,0 +1,207 @@
+//! The workspace as saved data: [`App::workspace`] describes the panes and tabs, and
+//! [`App::apply_workspace`] puts such a description back (for the session restored at start-up
+//! and for the layouts the user saved).
+
+use crate::bible_tab::BibleTab;
+use crate::dict_tab::DictTab;
+use crate::panes::{Axis, Node};
+use crate::state::{AxisSave, Layout, PaneSave, TabSave, Workspace};
+use crate::{App, Message, Pane, Tab};
+use iced::Task;
+use iced::widget::operation::{AbsoluteOffset, scroll_to};
+use scripture::Book;
+use std::collections::BTreeMap;
+use study_core::ModuleId;
+
+impl App {
+    /// The panes and tabs as they are now.
+    pub fn workspace(&self) -> Workspace {
+        let panes = self
+            .panes
+            .iter()
+            .map(|pane| PaneSave {
+                id: pane.id,
+                tabs: pane.tabs.iter().filter_map(|id| self.tabs.get(id)).map(save_tab).collect(),
+                active: pane.active.and_then(|a| pane.tabs.iter().position(|&t| t == a)),
+            })
+            .collect();
+        Workspace { layout: save_node(&self.layout), panes, focus: self.focus, zoomed: self.zoomed }
+    }
+
+    /// Replace what is open with `saved`. A tab whose module or note is gone is left out (and a
+    /// pane left with no tabs with it); if nothing at all can be put back, nothing changes and
+    /// this says so.
+    pub fn apply_workspace(&mut self, saved: &Workspace) -> Result<Task<Message>, String> {
+        let mut built: BTreeMap<u32, (u32, Vec<Tab>, Option<usize>)> = BTreeMap::new();
+        let mut scrolls: Vec<(iced::widget::Id, f32)> = Vec::new();
+        for pane in &saved.panes {
+            let mut tabs = Vec::new();
+            let mut active = None;
+            for (i, tab) in pane.tabs.iter().enumerate() {
+                let Some(tab) = self.build_tab(tab) else { continue };
+                if pane.active == Some(i) {
+                    active = Some(tabs.len());
+                }
+                if let Tab::Bible(b) = &tab
+                    && b.scroll_y > 0.0
+                {
+                    scrolls.push((b.reader_id(), b.scroll_y));
+                }
+                tabs.push(tab);
+            }
+            if !tabs.is_empty() {
+                let id = self.next_pane;
+                self.next_pane += 1;
+                built.insert(pane.id, (id, tabs, active));
+            }
+        }
+        let first_split = self.next_split;
+        let mut next_split = first_split;
+        let Some(layout) = build_node(&saved.layout, &built, &mut next_split) else {
+            return Err("Nothing in that layout could be opened".into());
+        };
+        self.next_split = next_split;
+
+        // Commit: put away the old tabs, then set up the new.
+        let old: Vec<_> = self.tabs.keys().copied().collect();
+        for id in old {
+            if let Some(Tab::Bible(tab)) = self.tabs.get_mut(&id) {
+                tab.stop_edit(&mut self.sh);
+            }
+        }
+        self.tabs.clear();
+        self.panes.clear();
+        self.last_bible = None;
+        self.last_note = None;
+        self.last_dict = None;
+        self.link_menu = None;
+        self.drag = None;
+        self.pressed = None;
+        self.layout = layout;
+        let mut new_focus = None;
+        let new_zoomed = saved.zoomed.and_then(|z| built.get(&z)).map(|(id, ..)| *id);
+        for (old_id, (id, tabs, active)) in built {
+            let mut ids = Vec::new();
+            for tab in tabs {
+                let tab_id = App::id_of(&tab);
+                self.tabs.insert(tab_id, tab);
+                ids.push(tab_id);
+            }
+            let active = active.and_then(|a| ids.get(a).copied()).or_else(|| ids.first().copied());
+            if old_id == saved.focus {
+                new_focus = Some(id);
+            }
+            self.panes.push(Pane { id, tabs: ids, active });
+        }
+        // Panes in the order they are laid out.
+        let order = self.layout.leaves();
+        self.panes.sort_by_key(|p| order.iter().position(|&o| o == p.id));
+        self.focus = new_focus.or_else(|| order.first().copied()).unwrap_or(0);
+        self.zoomed = new_zoomed;
+        // The tab last used of each kind: the focused pane's first, else any.
+        let showing: Vec<_> = self.panes.iter().filter_map(|p| p.active).collect();
+        let focused = self.panes.iter().find(|p| p.id == self.focus).and_then(|p| p.active);
+        for id in focused.into_iter().chain(showing).chain(self.tabs.keys().copied().collect::<Vec<_>>()) {
+            match self.tabs.get(&id) {
+                Some(Tab::Bible(_)) if self.last_bible.is_none() => self.last_bible = Some(id),
+                Some(Tab::Note(_)) if self.last_note.is_none() => self.last_note = Some(id),
+                Some(Tab::Dict(_)) if self.last_dict.is_none() => self.last_dict = Some(id),
+                _ => {}
+            }
+        }
+        let tasks = scrolls.into_iter().map(|(id, y)| scroll_to(id, AbsoluteOffset { x: 0.0, y }));
+        Ok(Task::batch(tasks))
+    }
+
+    /// A tab from its description, if what it shows still exists.
+    fn build_tab(&mut self, saved: &TabSave) -> Option<Tab> {
+        match saved {
+            TabSave::Blank => Some(self.new_blank()),
+            TabSave::Note { path } => {
+                self.sh.notes.contains_key(path).then(|| self.new_note(path.clone()))
+            }
+            TabSave::Dict { module, key } => {
+                let module = ModuleId(module.clone());
+                self.sh.backend.dictionaries().iter().any(|d| d.id == module).then(|| {
+                    let id = self.take_id();
+                    Tab::Dict(Box::new(DictTab::new(id, &self.sh, module, key)))
+                })
+            }
+            TabSave::Bible { module, book, chapter, scroll, strongs, marks, footnotes, refs } => {
+                let module = ModuleId(module.clone());
+                if !self.sh.backend.modules().iter().any(|m| m.id == module) {
+                    return None;
+                }
+                let available = self.sh.backend.available_chapters(&module);
+                let wanted = Book::from_osis(book).map(|b| (b, *chapter)).filter(|at| available.contains(at));
+                let (book, chapter, scroll) = match wanted {
+                    Some((b, c)) => (b, c, *scroll),
+                    None => {
+                        let (b, c) = self.sh.first_chapter(&module);
+                        (b, c, 0.0)
+                    }
+                };
+                let id = self.take_id();
+                let mut tab = BibleTab::restored(id, &self.sh, module, book, chapter, scroll);
+                (tab.show_strongs, tab.show_marks, tab.show_footnotes, tab.show_refs) = (*strongs, *marks, *footnotes, *refs);
+                Some(Tab::Bible(Box::new(tab)))
+            }
+        }
+    }
+}
+
+fn save_tab(tab: &Tab) -> TabSave {
+    match tab {
+        Tab::Blank(_) => TabSave::Blank,
+        Tab::Bible(t) => TabSave::Bible {
+            module: t.module.0.clone(),
+            book: t.book.osis().to_string(),
+            chapter: t.chapter_no,
+            scroll: t.scroll_y,
+            strongs: t.show_strongs,
+            marks: t.show_marks,
+            footnotes: t.show_footnotes,
+            refs: t.show_refs,
+        },
+        Tab::Note(t) => TabSave::Note { path: t.path.clone() },
+        Tab::Dict(t) => TabSave::Dict { module: t.module.0.clone(), key: t.key.clone() },
+    }
+}
+
+fn save_node(node: &Node) -> Layout {
+    match node {
+        Node::Leaf(id) => Layout::Pane { id: *id },
+        Node::Split { axis, fraction, a, b, .. } => Layout::Split {
+            axis: match axis {
+                Axis::Row => AxisSave::Row,
+                Axis::Column => AxisSave::Column,
+            },
+            fraction: *fraction,
+            a: Box::new(save_node(a)),
+            b: Box::new(save_node(b)),
+        },
+    }
+}
+
+/// The layout over the panes that could be built; a split with one side gone is the other side.
+fn build_node(layout: &Layout, built: &BTreeMap<u32, (u32, Vec<Tab>, Option<usize>)>, next_split: &mut u32) -> Option<Node> {
+    match layout {
+        Layout::Pane { id } => built.get(id).map(|(new, ..)| Node::Leaf(*new)),
+        Layout::Split { axis, fraction, a, b } => {
+            let (a, b) = (build_node(a, built, next_split), build_node(b, built, next_split));
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    let id = *next_split;
+                    *next_split += 1;
+                    let axis = match axis {
+                        AxisSave::Row => Axis::Row,
+                        AxisSave::Column => Axis::Column,
+                    };
+                    let fraction = if fraction.is_finite() { fraction.clamp(crate::panes::MIN_FRACTION, crate::panes::MAX_FRACTION) } else { 0.5 };
+                    Some(Node::Split { id, axis, fraction, a: Box::new(a), b: Box::new(b) })
+                }
+                (one, other) => one.or(other),
+            }
+        }
+    }
+}

@@ -11,6 +11,7 @@ fn inline(i: &Inline) -> String {
         Inline::DivineName(t) => format!("[{t}]"),
         Inline::Word { text, strongs } => format!("{text}{{{strongs}}}"),
         Inline::Footnote { id, text } => format!("^{id}[{text}]"),
+        Inline::CrossRef { refs } => format!("↗[{}]", refs.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("; ")),
         Inline::Ref { label, target } => format!("{label}->{}", target.osis()),
     }
 }

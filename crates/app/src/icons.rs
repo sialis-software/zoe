@@ -12,6 +12,10 @@ pub enum Icon {
     Quote,
     Trash,
     Pencil,
+    /// The hamburger of a menu.
+    Menu,
+    Back,
+    Forward,
     /// A pane that is one of several.
     Pane,
     /// A pane filling the window.
@@ -31,6 +35,9 @@ impl Icon {
             Icon::Quote => include_bytes!("../assets/icons/quote.svg"),
             Icon::Trash => include_bytes!("../assets/icons/trash.svg"),
             Icon::Pencil => include_bytes!("../assets/icons/pencil.svg"),
+            Icon::Menu => include_bytes!("../assets/icons/menu.svg"),
+            Icon::Back => include_bytes!("../assets/icons/arrow-left.svg"),
+            Icon::Forward => include_bytes!("../assets/icons/arrow-right.svg"),
             Icon::Pane => include_bytes!("../assets/icons/pane-one.svg"),
             Icon::PaneFull => include_bytes!("../assets/icons/pane-full.svg"),
             Icon::PanesAcross => include_bytes!("../assets/icons/pane-across.svg"),
@@ -64,11 +71,14 @@ impl Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 10] = [
+    const ALL: [Icon; 13] = [
         Icon::Link,
         Icon::Quote,
         Icon::Trash,
         Icon::Pencil,
+        Icon::Menu,
+        Icon::Back,
+        Icon::Forward,
         Icon::Pane,
         Icon::PaneFull,
         Icon::PanesAcross,
