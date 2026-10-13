@@ -1,0 +1,10 @@
+[package]
+name = "sword"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+scripture.workspace = true
+study-core.workspace = true
+flate2 = "1"

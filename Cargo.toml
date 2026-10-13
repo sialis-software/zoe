@@ -1,0 +1,21 @@
+[workspace]
+resolver = "3"
+members = ["crates/scripture", "crates/core", "crates/md-editor", "crates/sword", "crates/vault", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+scripture = { path = "crates/scripture" }
+study-core = { path = "crates/core" }
+md-editor = { path = "crates/md-editor" }
+sword = { path = "crates/sword" }
+vault = { path = "crates/vault" }
+
+# cosmic-text 0.15.0 with one fix: a word whose characters have different font attributes
+# (`**bold**` revealed while editing) was shaped with its first character's attributes.
+# See vendor/cosmic-text/src/shape.rs. Drop this when iced moves to a release that has it.
+[patch.crates-io]
+cosmic-text = { path = "vendor/cosmic-text" }

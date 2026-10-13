@@ -1,0 +1,9 @@
+[package]
+name = "study-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+scripture.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

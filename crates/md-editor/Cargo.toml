@@ -1,0 +1,9 @@
+[package]
+name = "md-editor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+study-core.workspace = true
+unicode-segmentation = "1"
