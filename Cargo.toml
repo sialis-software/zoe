@@ -19,3 +19,12 @@ vault = { path = "crates/vault" }
 # See vendor/cosmic-text/src/shape.rs. Drop this when iced moves to a release that has it.
 [patch.crates-io]
 cosmic-text = { path = "vendor/cosmic-text" }
+
+# The app is run from debug builds while it is being made, and iced and cosmic-text are far too
+# slow unoptimized (laying out a chapter of text and notes took milliseconds per scroll tick).
+# Dependencies are built optimized, and our own crates a little.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

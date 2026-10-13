@@ -119,9 +119,25 @@ module's numbering is done at display time (01 §4).
     place while the others make way. A thin connector with a colour tick joins each marked line
     to its card, bending in the middle of the gap. A connector whose vertical stretch would
     overlap another's steps aside to a lane just left or right of the middle, so lone ones look
-    as they always did; the hovered one is drawn solid and thicker. Spare width beyond a
-    comfortable card goes half to the text column (up to about 120px more) and half to the cards
-    (up to 560px), so a wide window is not left with a blank strip. Clicking marked text edits
+    as they always did; the hovered one is drawn solid and thicker. The margin takes about 2/7 of the
+    reader's width (between 220 and 560px, and never so wide that the text falls below its 640px
+    column), and its panel runs alongside the text, from its top to its bottom. The margin has its own menu (a button at its top; its choices open over the cards): the same four
+    kinds as the reader's menu (Strong's numbers, Marks, Footnotes, References), but each says whether
+    that kind's cards sit in the margin or pop over the text where clicked. The reader's menu says
+    whether the kind shows at all. Every cross reference marker (when References is on) has its list of passages in the margin,
+    like a footnote, and each passage is a link with the writer's right click and pull-away. Likewise every word with a Strong's number has its dictionary entry there (looked up when the
+    chapter loads), brought up by pointing at the word, with an "Open in tab" button. Their links in the text (Strong's words, †, ↗)
+    are quiet when the kind is popovers instead of margin cards (plain text, or grey for the marks),
+    and take the link color when pointed at. Words with a Strong's number are always dotted underneath. These two kinds
+    are off by default; unchecked, a click on the word or marker pops the entry or list over the text. In a new stack a note of the user's starts
+    on top of a footnote (not saved). Notes whose cards would run into each other (marks within a card's height of one another, so
+    a few lines) are layered into a **stack**: the top note shows whole, the others peek out behind it,
+    and a bar under it (‹ 2 / 3 ›) cycles through them. Pointing at a mark (or a footnote marker) in the text brings its
+    note to the top; the note being edited is always on top. A stack has one connector, and one
+    footnote sits on the line its marker is on (not the one above, when the marker starts a line).
+    Cards that collide are spread about their marks (some up, some down; the least total distance),
+    not all pushed down. Pointing at a mark, or its footnote marker, lights the edge of its card (or
+    its stack) and dims every other connector and note. Clicking marked text edits
     its card.
   - *Narrower*: **no margin and no cards**. Clicking a mark floats its card (or the cards, when
     marks overlap) under the click, like a toolbar; clicking elsewhere or Esc dismisses it. A

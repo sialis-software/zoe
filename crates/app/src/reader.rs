@@ -70,6 +70,12 @@ pub struct ViewOptions {
     /// The kinds of marker in the text, each shown or not (the reader's menu).
     pub show_footnotes: bool,
     pub show_refs: bool,
+    /// Which kinds of note are in the margin just now (not those that pop over the text): their
+    /// links in the text are drawn in the link color, the others quietly (grey, or as plain text)
+    /// until they are pointed at.
+    pub strongs_in_margin: bool,
+    pub footnotes_in_margin: bool,
+    pub refs_in_margin: bool,
     pub pal: Palette,
     /// Size of the text, and the family it is set in.
     pub body: f32,
@@ -97,7 +103,7 @@ impl Builder<'_> {
         let mut span = span;
         span.font = span.font.or(Some(self.opts.font));
         self.spans.push(span);
-        self.meta.push(SpanMeta { copy, verse, number: false });
+        self.meta.push(SpanMeta { copy, verse, number: false, dotted: false });
     }
 
     fn base(&self, text: String, style: Style) -> Span<'static, Link> {
@@ -135,19 +141,28 @@ impl Builder<'_> {
                 }
                 Inline::Word { text, strongs } => {
                     let sp = self.base(text.clone(), style);
-                    let sp = if self.opts.show_strongs {
-                        sp.underline(true).color(pal.link).link(Link::Strongs(strongs.clone()))
+                    let sp = if self.opts.show_strongs && self.opts.strongs_in_margin {
+                        sp.color(pal.link).link(Link::Strongs(strongs.clone()))
+                    } else if self.opts.show_strongs {
+                        // A popover's word is plain text until pointed at (when it takes the link color).
+                        sp.link(Link::Strongs(strongs.clone()))
                     } else {
                         sp
                     };
                     self.push(sp, true, verse);
+                    // With numbers on, the words that have one are dotted underneath.
+                    if self.opts.show_strongs
+                        && let Some(meta) = self.meta.last_mut()
+                    {
+                        meta.dotted = true;
+                    }
                 }
                 Inline::Footnote { .. } | Inline::CrossRef { .. } if !self.opts.markers_shown(item) => {}
                 Inline::Footnote { text, .. } => {
                     // Big enough to hit without shouting over the text.
                     let s = span("†".to_string())
                         .size(self.opts.body * 0.85)
-                        .color(pal.link)
+                        .color(if self.opts.footnotes_in_margin { pal.link } else { pal.muted })
                         .link(Link::Footnote(text.clone()));
                     self.push(s, false, verse);
                 }
@@ -155,7 +170,7 @@ impl Builder<'_> {
                     // A smaller arrow than the dagger: there can be several to a verse.
                     let s = span("\u{2197}".to_string())
                         .size(self.opts.body * 0.85)
-                        .color(pal.link)
+                        .color(if self.opts.refs_in_margin { pal.link } else { pal.muted })
                         .link(Link::CrossRefs(refs.clone()));
                     self.push(s, false, verse);
                 }
@@ -232,8 +247,8 @@ fn build_blocks(chapter: &Chapter, opts: &ViewOptions) -> Vec<Block<Link>> {
             ast::Block::Heading(h) => {
                 let bold = Font { weight: font::Weight::Bold, ..opts.font };
                 blocks.push(Block {
-                    spans: vec![span(h.clone()).size(15.0).font(bold).color(pal.muted)],
-                    meta: vec![SpanMeta { copy: false, verse: None, number: false }],
+                    spans: vec![span(h.clone()).size(opts.body * 0.8).font(bold).color(pal.muted)],
+                    meta: vec![SpanMeta { copy: false, verse: None, number: false, dotted: false }],
                     indent: 0.0,
                     gap_before: 20.0,
                     soft_break: false,
@@ -305,6 +320,9 @@ mod tests {
             show_strongs,
             show_footnotes: true,
             show_refs: true,
+            strongs_in_margin: false,
+            footnotes_in_margin: false,
+            refs_in_margin: false,
             pal: Palette::for_theme(&iced::Theme::Dark),
             body: 19.0,
             font: crate::fonts::UI,
@@ -333,6 +351,23 @@ mod tests {
                     assert_eq!(got.len(), text.len(), "{book} {ch}:{verse} strongs={strongs}");
                     assert_eq!(got.to_lowercase(), text.to_lowercase(), "{book} {ch}:{verse}");
                 }
+            }
+        }
+    }
+
+    /// Every dictionary card finds the word it belongs to (so pointing at the word can bring its
+    /// card up, and the card can light the word).
+    #[test]
+    fn every_strongs_word_is_found_by_its_card_anchor() {
+        let backend = MockBackend;
+        let module = backend.modules()[0].id.clone();
+        for (book, ch) in backend.available_chapters(&module) {
+            let chapter = backend.chapter(&module, book, ch).unwrap();
+            let widget: ReaderText<'_, Link, ()> = ReaderText::new(1, build_blocks(&chapter, &opts(true)));
+            let spans = widget.link_places();
+            for word in chapter.strongs_words() {
+                let anchor = crate::reader_text::CanonSlice { verse: word.verse, start: word.start, end: word.end };
+                assert!(spans.contains(&anchor), "{book} {ch}: {word:?} has no link at its place");
             }
         }
     }

@@ -12,6 +12,7 @@ pub enum Icon {
     Quote,
     Trash,
     Pencil,
+    Plus,
     /// The hamburger of a menu.
     Menu,
     Back,
@@ -35,6 +36,7 @@ impl Icon {
             Icon::Quote => include_bytes!("../assets/icons/quote.svg"),
             Icon::Trash => include_bytes!("../assets/icons/trash.svg"),
             Icon::Pencil => include_bytes!("../assets/icons/pencil.svg"),
+            Icon::Plus => include_bytes!("../assets/icons/plus.svg"),
             Icon::Menu => include_bytes!("../assets/icons/menu.svg"),
             Icon::Back => include_bytes!("../assets/icons/arrow-left.svg"),
             Icon::Forward => include_bytes!("../assets/icons/arrow-right.svg"),
@@ -71,11 +73,12 @@ impl Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 13] = [
+    const ALL: [Icon; 14] = [
         Icon::Link,
         Icon::Quote,
         Icon::Trash,
         Icon::Pencil,
+        Icon::Plus,
         Icon::Menu,
         Icon::Back,
         Icon::Forward,

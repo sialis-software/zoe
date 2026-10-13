@@ -32,11 +32,42 @@ pub struct FootnoteAt {
     pub text: String,
 }
 
-/// Like [`flatten`], also noting where each footnote's marker falls in the output.
-fn flatten_noting(items: &[Inline], out: &mut String, notes: &mut Vec<(usize, String)>) {
+/// Where a cross reference marker sits (as [`FootnoteAt`]), and the passages it points to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrossRefAt {
+    pub verse: u16,
+    pub offset: usize,
+    pub refs: Vec<RefRange>,
+}
+
+/// Where a word with a Strong's number sits: its verse and the byte range of the word in that
+/// verse's canonical text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WordAt {
+    pub verse: u16,
+    pub start: usize,
+    pub end: usize,
+    pub strongs: String,
+}
+
+/// A marker in the text that has something to say.
+enum Marker {
+    Footnote(String),
+    CrossRef(Vec<RefRange>),
+    Word { strongs: String, len: usize },
+}
+
+/// Like [`flatten`], also noting where each footnote's and cross reference's marker falls in the
+/// output.
+fn flatten_noting(items: &[Inline], out: &mut String, notes: &mut Vec<(usize, Marker)>) {
     for item in items {
         match item {
-            Inline::Footnote { text, .. } => notes.push((out.len(), text.clone())),
+            Inline::Footnote { text, .. } => notes.push((out.len(), Marker::Footnote(text.clone()))),
+            Inline::CrossRef { refs } => notes.push((out.len(), Marker::CrossRef(refs.clone()))),
+            Inline::Word { text, strongs } => {
+                notes.push((out.len(), Marker::Word { strongs: strongs.clone(), len: text.len() }));
+                out.push_str(text);
+            }
             Inline::RedLetter(inner) | Inline::Emphasis(inner) => flatten_noting(inner, out, notes),
             other => flatten(std::slice::from_ref(other), out),
         }
@@ -47,6 +78,38 @@ impl Chapter {
     /// Every footnote with its place in the canonical text, in reading order. A footnote in a
     /// verse with no text of its own is placed at offset 0.
     pub fn footnotes(&self) -> Vec<FootnoteAt> {
+        self.markers()
+            .into_iter()
+            .filter_map(|(verse, offset, marker)| match marker {
+                Marker::Footnote(text) => Some(FootnoteAt { verse, offset, text }),
+                Marker::CrossRef(_) | Marker::Word { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Every cross reference marker with its place, placed as footnotes are.
+    pub fn cross_references(&self) -> Vec<CrossRefAt> {
+        self.markers()
+            .into_iter()
+            .filter_map(|(verse, offset, marker)| match marker {
+                Marker::CrossRef(refs) => Some(CrossRefAt { verse, offset, refs }),
+                Marker::Footnote(_) | Marker::Word { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Every word that carries a Strong's number, with its place, in reading order.
+    pub fn strongs_words(&self) -> Vec<WordAt> {
+        self.markers()
+            .into_iter()
+            .filter_map(|(verse, start, marker)| match marker {
+                Marker::Word { strongs, len } => Some(WordAt { verse, start, end: start + len, strongs }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn markers(&self) -> Vec<(u16, usize, Marker)> {
         let mut lens: BTreeMap<u16, usize> = BTreeMap::new();
         let mut out = Vec::new();
         for block in &self.blocks {
@@ -60,10 +123,8 @@ impl Chapter {
                     Some(len) => *len,
                     None => 0,
                 };
-                out.extend(notes.into_iter().map(|(at, text)| FootnoteAt {
-                    verse: run.verse,
-                    offset: if part.is_empty() { base } else { base + at },
-                    text,
+                out.extend(notes.into_iter().map(|(at, marker)| {
+                    (run.verse, if part.is_empty() { base } else { base + at }, marker)
                 }));
                 if !part.is_empty() {
                     *lens.entry(run.verse).or_insert(0) = base + part.len();

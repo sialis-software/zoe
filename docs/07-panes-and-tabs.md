@@ -42,6 +42,45 @@ its toolbar away and shows a toast (`Shared::toast`, a line over the bottom of t
 about two seconds; a clock subscription runs only while one is showing). A selector panel or other
 pop-up closes when anything outside it is clicked, in any pane.
 
+## Tags (not folders)
+
+People find notes by tag; folders are the app's business. Every new note is filed in `notes/` (the
+templates say what they are with a starting tag: `prayer`, `topic`, `daily`) and the selector lists
+notes flat, with chips for the tags in use (with counts, colored if a pen has the tag). Click chips to
+narrow (a note must have them all; `topic` includes `topic/grace`); the search box matches names,
+text and tags, and `#words` match tags only. Tags are kept lower case, `-` for spaces, `/` to nest.
+A tag box offers the tags in use as you type, in the note's property strip, in the card of a mark
+being written in (so a mark's note can be tagged from the text), and when naming a pen's tag.
+
+**Pens** (Settings) are tags with a color: each is a toolbar button that marks the selected text with
+that style (highlight or underline) in that color and opens a note on it tagged with the tag.
+Clicking a pen's swatch cycles its color; add one by typing a tag.
+
+## New notes and templates (`core/src/templates.rs`)
+
+The note tab's menu has **New note…**, which asks what kind (and then for a title, unless the kind
+says it needs none). The kinds are the **templates**: ordinary markdown notes in the vault's
+`templates/` folder (a new vault is given Prayer list, Topic, Daily and Blank as files, once), so
+they sync and back up with the rest of it. They are not found by the note selector or its search (changing
+what a kind starts with is for those who go looking): the pencil beside a kind in the New note dialog opens
+its template to edit. Adding a file adds a kind; deleting one removes it.
+
+A template is written as in Obsidian: its text after the frontmatter is the new note's text, with
+`{{title}}`, `{{date}}` / `{{date:dddd, MMMM D, YYYY}}` and `{{time}}` / `{{time:HH:mm}}` filled in
+(moment's letters). Whatever the app does differently for a kind is in the template's frontmatter, as
+properties starting with `template_` (not copied to the notes):
+
+| property | meaning |
+|---|---|
+| `template_description` | the line under the kind's name in the dialog |
+| `template_title` | the title when none is typed or asked (`{{date:YYYY-MM-DD}}` for a daily note) |
+| `template_ask_title` | `false`: make the note at once, without a title box |
+| `template_unique` | `true`: one note under that title; asking again opens it |
+
+Every other property (`tags`, `type`, your own) is what the new note starts with, placeholders
+filled. The note's title is the `# heading` it is given (`{{title}}`) and its file name in `notes/`, with
+a number added if the name is taken; characters a file name cannot have are left out of the name only.
+
 ## The note tab's header
 
 Like the Bible tab's toolbar, and the same height: a selector button (styled like the Bible
@@ -142,8 +181,10 @@ there too.
 Three small JSON files in `<data home>/state/`, written through a temporary file, and an unreadable
 one is renamed `*.bad` instead of failing the start:
 
-- `settings.json`: the color scheme (the name of any of iced's themes), the Bible and note text
-  sizes, and the font family for Bible and note text. Changed in the Settings window (its own window, opened from the top
+- `settings.json`: the color scheme (the name of any of iced's themes), a text size for Bible panes and one for note panes, and the font family for
+  Bible and note text. A size applies to the whole pane: in a Bible pane the reading text, footnote and
+  dictionary cards and margin cards (these at 75% of it, so notes sit quietly beside the text) and the chapter title (headings and small labels in proportion); in a
+  note pane the writer's text. Changed in the Settings window (its own window, opened from the top
   bar, so the workspace stays as it is), applied and saved at once. Missing or out-of-range values are repaired on load.
   The window is fixed-size and cannot be minimized. On macOS (`native.rs`) it is also made a child of the
   workspace window, so it moves with it and shows over it in full screen; elsewhere it is a plain small window.
@@ -152,7 +193,10 @@ one is renamed `*.bad` instead of failing the start:
   Hide, Quit).
 - `session.json`: the workspace as it was left, restored at start-up. It is written about a second
   after any change (so scrolling is not a write per pixel) and at once when the window closes.
-- `layouts.json`: workspaces saved by name from the **Layouts** panel. Loading one replaces what is
+- `layouts.json`: workspaces saved by name from the **Layouts** list: click one to load it, × to delete it, or
+  "Save as new layout…". **Default** is always first and built in (not in the file, cannot be deleted
+  or replaced): the Bible on the left half, the first note on the right.
+  "Save as new layout…" at the bottom, which asks for a name in a dialog. Loading one replaces what is
   open; saving under a name already used replaces it.
 
 A saved workspace holds the split tree (axes and sizes), each pane's tabs and which one shows, the

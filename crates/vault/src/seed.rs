@@ -66,7 +66,7 @@ const NOTES: &[(&str, &str)] = &[
     ),
     (
         "prayers/Prayer list.md",
-        "---\ntype: prayer\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[Ps 23]], [[Phil 4:6-7]]\n",
+        "---\ntype: prayer\ntags: [prayer]\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[Ps 23]], [[Phil 4:6-7]]\n",
     ),
 ];
 

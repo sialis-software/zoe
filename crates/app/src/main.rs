@@ -130,8 +130,12 @@ struct App {
     settings_window: Option<iced::window::Id>,
     /// The layouts panel, while it is open.
     panel: Option<Panel>,
-    /// What is typed in the box that names a layout to save.
+    /// The tag typed for a new pen, and the color it will have (an index into `state::PEN_COLORS`).
+    pen_draft: String,
+    pen_color: usize,
+    /// What is typed in the box that names a layout to save, and whether that box is showing.
     layout_draft: String,
+    naming: bool,
     /// The font families to choose from, listed when the settings panel opens.
     families: Vec<String>,
     /// The workspace as last written as the session, and one changed since that is waiting for
@@ -153,6 +157,13 @@ impl fmt::Display for FontChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0.as_deref().unwrap_or("Interface font"))
     }
+}
+
+/// The layout that is always there: it cannot be deleted or replaced.
+const DEFAULT_LAYOUT: &str = "Default";
+
+fn layout_name_id() -> iced::widget::Id {
+    iced::widget::Id::new("layout-name")
 }
 
 /// How long a change to the workspace waits before it is written, so scrolling is not a write
@@ -181,13 +192,23 @@ enum Message {
     ResizeSplit(SplitId, f32),
     ToggleZoom(PaneId),
     SetTheme(Theme),
-    SetReadingSize(f32),
-    SetNoteSize(f32),
+    SetBibleSize(f32),
+    SetNotesSize(f32),
     SetFont(FontChoice),
     ResetSettings,
+    /// The pens (tag shortcuts): the one being named, and changes to them.
+    PenDraft(String),
+    AddPen,
+    RemovePen(usize),
+    CyclePenColor(usize),
+    CyclePenStyle(usize),
+    CycleDraftColor,
     TogglePanel(Panel),
     /// Show the settings window (or bring it forward).
     OpenSettings,
+    /// Ask for a name to save the workspace as a layout under.
+    NameLayout,
+    CancelNaming,
     LayoutDraft(String),
     SaveLayout,
     LoadLayout(String),
@@ -234,6 +255,7 @@ impl App {
             .collect();
         // Marks are files like any other note; the writer can open and edit them.
         notes.extend(backend.mark_files());
+        notes.extend(study_core::templates::builtin());
         App::build(Box::new(backend), notes, None)
     }
 
@@ -286,7 +308,10 @@ impl App {
             main: iced::window::Id::unique(),
             settings_window: None,
             panel: None,
+            pen_draft: String::new(),
+            pen_color: 0,
             layout_draft: String::new(),
+            naming: false,
             families: Vec::new(),
             saved: None,
             unsaved: None,
@@ -504,7 +529,7 @@ impl App {
     /// What a blank tab can turn into: each Bible module, each note.
     fn choices(&self) -> Vec<Choice> {
         let modules = self.sh.backend.modules().into_iter().map(|m| Choice::Bible(m.id, m.abbreviation));
-        let notes = self.sh.notes.keys().filter(|p| !p.starts_with("margins/")).cloned().map(Choice::Note);
+        let notes = self.sh.notes.keys().filter(|p| !p.starts_with("margins/") && !study_core::templates::is_template(p)).cloned().map(Choice::Note);
         let dictionaries = self.sh.backend.dictionaries().into_iter().map(|d| Choice::Dict(d.id, d.abbreviation));
         modules.chain(dictionaries).chain(notes).collect()
     }
@@ -588,6 +613,8 @@ impl App {
             message,
             Message::TogglePanel(_)
                 | Message::OpenSettings
+                | Message::CancelNaming
+                | Message::NameLayout
                 | Message::LayoutDraft(_)
                 | Message::SaveLayout
                 | Message::DeleteLayout(_)
@@ -604,9 +631,11 @@ impl App {
                     t.picker = None;
                     t.renaming = None;
                     t.menu_open = false;
+                    t.choosing = false;
                 }
                 Tab::Bible(t) => {
                     t.menu_open = false;
+                    t.margin_menu_open = false;
                     t.history_open = false;
                 }
                 Tab::Blank(_) | Tab::Dict(_) => {}
@@ -663,6 +692,7 @@ impl App {
                             self.show_note(path);
                         }
                     }
+                    Some(bible_tab::Request::OpenNote(path)) => self.show_note(path),
                     None => {}
                 }
                 task
@@ -777,10 +807,53 @@ impl App {
                 Task::none()
             }
             Message::SetTheme(theme) => self.change_settings(|s| s.theme = theme.to_string()),
-            Message::SetReadingSize(size) => self.change_settings(|s| s.reading_size = size.round()),
-            Message::SetNoteSize(size) => self.change_settings(|s| s.note_size = size.round()),
+            Message::SetBibleSize(size) => self.change_settings(|s| s.bible_size = size.round()),
+            Message::SetNotesSize(size) => self.change_settings(|s| s.notes_size = size.round()),
             Message::SetFont(FontChoice(font)) => self.change_settings(|s| s.font = font),
             Message::ResetSettings => self.change_settings(|s| *s = Settings::default()),
+            Message::PenDraft(text) => {
+                self.pen_draft = text;
+                Task::none()
+            }
+            Message::AddPen => {
+                let tag = study_core::frontmatter::normalize_tag(&self.pen_draft);
+                if tag.is_empty() {
+                    return Task::none();
+                }
+                let color = state::PEN_COLORS[self.pen_color % state::PEN_COLORS.len()].to_string();
+                self.pen_draft.clear();
+                self.pen_color = (self.pen_color + 1) % state::PEN_COLORS.len();
+                self.change_settings(|s| {
+                    // A pen for a tag there already is one for changes that pen's color instead.
+                    match s.pens.iter_mut().find(|p| p.tag == tag) {
+                        Some(pen) => pen.color = color,
+                        None => s.pens.push(state::PenDef { tag, color, style: state::PenStyle::Highlight }),
+                    }
+                })
+            }
+            Message::RemovePen(i) => self.change_settings(|s| {
+                if i < s.pens.len() {
+                    s.pens.remove(i);
+                }
+            }),
+            Message::CyclePenColor(i) => self.change_settings(|s| {
+                if let Some(pen) = s.pens.get_mut(i) {
+                    let at = state::PEN_COLORS.iter().position(|c| c.eq_ignore_ascii_case(&pen.color)).map_or(0, |n| n + 1);
+                    pen.color = state::PEN_COLORS[at % state::PEN_COLORS.len()].to_string();
+                }
+            }),
+            Message::CyclePenStyle(i) => self.change_settings(|s| {
+                if let Some(pen) = s.pens.get_mut(i) {
+                    pen.style = match pen.style {
+                        state::PenStyle::Highlight => state::PenStyle::Underline,
+                        state::PenStyle::Underline => state::PenStyle::Highlight,
+                    };
+                }
+            }),
+            Message::CycleDraftColor => {
+                self.pen_color = (self.pen_color + 1) % state::PEN_COLORS.len();
+                Task::none()
+            }
             Message::TogglePanel(panel) => {
                 self.panel = if self.panel == Some(panel) { None } else { Some(panel) };
                 Task::none()
@@ -795,7 +868,7 @@ impl App {
                 // A fixed-size accessory of the workspace window: it cannot be zoomed, full
                 // screened or minimized by itself (see `native::attach` for the rest).
                 let (id, open) = iced::window::open(iced::window::Settings {
-                    size: iced::Size::new(360.0, 400.0),
+                    size: iced::Size::new(380.0, 600.0),
                     resizable: false,
                     minimizable: false,
                     exit_on_close_request: false,
@@ -805,23 +878,40 @@ impl App {
                 let main = self.main;
                 open.then(move |_| native::attach(main, id)).discard()
             }
+            Message::NameLayout => {
+                self.panel = None;
+                self.naming = true;
+                self.layout_draft.clear();
+                iced::widget::operation::focus(layout_name_id())
+            }
+            Message::CancelNaming => {
+                self.naming = false;
+                self.layout_draft.clear();
+                Task::none()
+            }
             Message::LayoutDraft(text) => {
                 self.layout_draft = text;
                 Task::none()
             }
             Message::SaveLayout => {
                 let name = self.layout_draft.trim().to_string();
-                if !name.is_empty() {
+                if !name.is_empty() && !name.eq_ignore_ascii_case(DEFAULT_LAYOUT) {
                     let workspace = self.workspace();
                     self.sh.save_layout(NamedLayout { name: name.clone(), workspace });
                     self.layout_draft.clear();
+                    self.naming = false;
                     self.sh.toast(format!("Saved layout \u{201c}{name}\u{201d}"));
                 }
                 Task::none()
             }
             Message::LoadLayout(name) => {
-                let Some(layout) = self.sh.layouts.iter().find(|l| l.name == name).cloned() else { return Task::none() };
-                match self.apply_workspace(&layout.workspace) {
+                let workspace = if name == DEFAULT_LAYOUT {
+                    self.default_workspace()
+                } else {
+                    let Some(layout) = self.sh.layouts.iter().find(|l| l.name == name) else { return Task::none() };
+                    layout.workspace.clone()
+                };
+                match self.apply_workspace(&workspace) {
                     Ok(task) => {
                         self.panel = None;
                         task
@@ -1276,7 +1366,7 @@ impl App {
 
     fn window_view(&self, window: iced::window::Id) -> Element<'_, Message> {
         if Some(window) == self.settings_window {
-            container(self.settings_panel()).padding(18).width(Length::Fill).height(Length::Fill).into()
+            iced::widget::scrollable(container(self.settings_panel()).padding(18).width(Length::Fill)).height(Length::Fill).into()
         } else {
             self.view()
         }
@@ -1306,6 +1396,15 @@ impl App {
             iced::window::close_requests().map(Message::CloseRequested),
             native::settings_chosen().map(|()| Message::OpenSettings),
         ];
+        if self.naming {
+            all.push(iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) => Some(Message::CancelNaming),
+                _ => None,
+            }));
+        }
         if self.unsaved.is_some() {
             all.push(iced::time::every(SESSION_DELAY).map(|_| Message::SaveSession));
         }
@@ -1358,6 +1457,9 @@ impl App {
         }
         if let Some(panel) = self.panel {
             layers.push(self.panel_view(panel));
+        }
+        if self.naming {
+            layers.push(self.name_layout_view());
         }
         if let Some(menu) = &self.link_menu {
             layers.push(self.link_menu_view(menu));
@@ -1429,35 +1531,95 @@ impl App {
                 pick_list(Theme::ALL, Some(self.sh.theme()), Message::SetTheme).text_size(13).width(Length::Fill)
             ]
             .spacing(4),
-            column![label("Bible text size"), size_row(settings.reading_size, state::READING_SIZES, Message::SetReadingSize)].spacing(4),
-            column![label("Note text size"), size_row(settings.note_size, state::NOTE_SIZES, Message::SetNoteSize)].spacing(4),
+            column![label("Bible pane text size"), size_row(settings.bible_size, state::BIBLE_SIZES, Message::SetBibleSize)].spacing(4),
+            column![label("Notes pane text size"), size_row(settings.notes_size, state::NOTES_SIZES, Message::SetNotesSize)].spacing(4),
             column![
                 label("Bible and note font"),
                 pick_list(fonts, Some(FontChoice(settings.font.clone())), Message::SetFont).text_size(13).width(Length::Fill)
             ]
             .spacing(4),
+            self.pens_settings(),
             button(text("Reset to defaults").size(13)).padding([4, 10]).style(button::secondary).on_press(Message::ResetSettings),
         ]
         .spacing(12)
         .into()
     }
 
-    fn layouts_panel(&self) -> Element<'_, Message> {
-        let name = text_input("Name this layout…", &self.layout_draft)
-            .on_input(Message::LayoutDraft)
-            .on_submit(Message::SaveLayout)
-            .size(13)
-            .padding([4, 8]);
-        let save = button(text("Save").size(13))
-            .padding([4, 10])
-            .style(button::secondary)
-            .on_press_maybe((!self.layout_draft.trim().is_empty()).then_some(Message::SaveLayout));
-        let mut list = column![].spacing(2);
-        for layout in &self.sh.layouts {
-            let tabs: usize = layout.workspace.panes.iter().map(|p| p.tabs.len()).sum();
+    /// The pens: tags with a color, each a shortcut on the reader's toolbar for a note with that
+    /// tag on the selected text.
+    fn pens_settings(&self) -> Element<'_, Message> {
+        let swatch = |hex: &str, msg: Message| -> Element<'_, Message> {
+            let color = bible_tab::hex_color(hex, 1.0).unwrap_or(iced::Color::WHITE);
+            button(space::horizontal())
+                .width(22)
+                .height(22)
+                .padding(0)
+                .style(move |_: &Theme, _| button::Style {
+                    background: Some(color.into()),
+                    border: iced::Border { radius: 11.0.into(), color: iced::Color { a: 0.5, ..iced::Color::WHITE }, width: 1.0 },
+                    ..button::Style::default()
+                })
+                .on_press(msg)
+                .into()
+        };
+        let mut list = column![].spacing(4);
+        for (i, pen) in self.sh.settings.pens.iter().enumerate() {
+            let style = match pen.style {
+                state::PenStyle::Highlight => "Highlight",
+                state::PenStyle::Underline => "Underline",
+            };
             list = list.push(
                 row![
-                    button(row![text(layout.name.clone()).size(13), space::horizontal(), text(format!("{tabs} tabs")).size(11).style(text::secondary)].align_y(iced::Center))
+                    swatch(&pen.color, Message::CyclePenColor(i)),
+                    text(format!("#{}", pen.tag)).size(13).width(Length::Fill),
+                    button(text(style).size(12)).padding([1, 8]).style(button::secondary).on_press(Message::CyclePenStyle(i)),
+                    button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(Message::RemovePen(i)),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            );
+        }
+        let draft = &self.pen_draft;
+        let new_pen = row![
+            swatch(state::PEN_COLORS[self.pen_color % state::PEN_COLORS.len()], Message::CycleDraftColor),
+            text_input("A tag for a new pen", draft).on_input(Message::PenDraft).on_submit(Message::AddPen).size(13).padding([3, 6]),
+            button(text("Add").size(12)).padding([3, 10]).style(button::secondary).on_press_maybe((!draft.trim().is_empty()).then_some(Message::AddPen)),
+        ]
+        .spacing(8)
+        .align_y(iced::Center);
+        // Tags already in use that fit what is typed, to take instead of typing the rest.
+        let have: Vec<String> = self.sh.settings.pens.iter().map(|p| p.tag.clone()).collect();
+        let mut offered = row![].spacing(4);
+        for (tag, _) in self.sh.tag_suggestions(draft, &have, 5) {
+            offered = offered.push(
+                button(text(format!("#{tag}")).size(11)).padding([1, 6]).style(button::secondary).on_press(Message::PenDraft(tag)),
+            );
+        }
+        column![
+            text("Pens").size(12).style(text::secondary),
+            text("A pen marks the selected text and makes a note with its tag, in its color.").size(11).style(text::secondary),
+            list,
+            new_pen,
+            offered,
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    /// The saved layouts, and a way to save the workspace as another.
+    fn layouts_panel(&self) -> Element<'_, Message> {
+        let mut list = column![
+            button(text(DEFAULT_LAYOUT).size(13))
+                .width(Length::Fill)
+                .padding([4, 8])
+                .style(button::text)
+                .on_press(Message::LoadLayout(DEFAULT_LAYOUT.into()))
+        ]
+        .spacing(2);
+        for layout in &self.sh.layouts {
+            list = list.push(
+                row![
+                    button(text(layout.name.clone()).size(13))
                         .width(Length::Fill)
                         .padding([4, 8])
                         .style(button::text)
@@ -1467,17 +1629,56 @@ impl App {
                 .align_y(iced::Center),
             );
         }
-        if self.sh.layouts.is_empty() {
-            list = list.push(text("No saved layouts yet.").size(13).style(text::secondary));
-        }
         column![
-            text("Layouts").size(16),
-            text("A layout is the panes and tabs as they are now. Saving under a name already used replaces it.").size(12).style(text::secondary),
-            row![name, save].spacing(6),
             list,
+            rule::horizontal(1),
+            button(text("Save as new layout\u{2026}").size(13)).width(Length::Fill).padding([4, 8]).style(button::text).on_press(Message::NameLayout),
         ]
-        .spacing(10)
+        .spacing(8)
         .into()
+    }
+
+    /// Asks for the name to save a layout under, over a dimmed window.
+    fn name_layout_view(&self) -> Element<'_, Message> {
+        let name = self.layout_draft.trim();
+        let reserved = name.eq_ignore_ascii_case(DEFAULT_LAYOUT);
+        let replaces = self.sh.layouts.iter().any(|l| l.name == name);
+        let mut card = column![
+            text("Save as new layout").size(16),
+            text("The panes and tabs as they are now.").size(12).style(text::secondary),
+            text_input("Name", &self.layout_draft)
+                .id(layout_name_id())
+                .on_input(Message::LayoutDraft)
+                .on_submit(Message::SaveLayout)
+                .size(14)
+                .padding([5, 8]),
+        ]
+        .spacing(10);
+        if reserved {
+            card = card.push(text("Default is built in: choose another name.").size(12).style(text::secondary));
+        } else if replaces {
+            card = card.push(text("A layout with this name will be replaced.").size(12).style(text::secondary));
+        }
+        card = card.push(
+            row![
+                space::horizontal(),
+                button(text("Cancel").size(13)).padding([4, 12]).style(button::secondary).on_press(Message::CancelNaming),
+                button(text("Save").size(13)).padding([4, 12]).on_press_maybe((!name.is_empty() && !reserved).then_some(Message::SaveLayout)),
+            ]
+            .spacing(8),
+        );
+        let dim = |_: &Theme| container::Style {
+            background: Some(iced::Color { a: 0.4, ..iced::Color::BLACK }.into()),
+            ..container::Style::default()
+        };
+        let backdrop = iced::widget::mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill).style(dim))
+            .on_press(Message::CancelNaming);
+        let centered = container(iced::widget::opaque(container(card).padding(16).width(340).style(popup_style)))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .padding(iced::Padding { top: 120.0, ..iced::Padding::ZERO });
+        stack![backdrop, centered].into()
     }
 
     /// What applies to the whole window.
@@ -1629,13 +1830,20 @@ impl App {
                 tooltip::Position::Top,
             )
         };
-        row![
-            small(icons::Icon::from_zoom(zoomed), if zoomed { "Show all panes" } else { "Fill the window with this pane" }, Message::ToggleZoom(pane)),
-            small(icons::Icon::PanesAcross, "Split side by side", Message::SplitPane(pane, panes::Axis::Row)),
-            small(icons::Icon::PanesDown, "Split top and bottom", Message::SplitPane(pane, panes::Axis::Column)),
-        ]
-        .spacing(6)
-        .into()
+        let mut controls = row![].spacing(6);
+        // Filling the window means nothing with only one pane (and a zoomed pane needs its button
+        // to get back).
+        if self.panes.len() > 1 || zoomed {
+            controls = controls.push(small(
+                icons::Icon::from_zoom(zoomed),
+                if zoomed { "Show all panes" } else { "Fill the window with this pane" },
+                Message::ToggleZoom(pane),
+            ));
+        }
+        controls
+            .push(small(icons::Icon::PanesAcross, "Split side by side", Message::SplitPane(pane, panes::Axis::Row)))
+            .push(small(icons::Icon::PanesDown, "Split top and bottom", Message::SplitPane(pane, panes::Axis::Column)))
+            .into()
     }
 
     /// A new tab: choose what it becomes.
@@ -1747,6 +1955,9 @@ mod tests {
     use scripture::{Book, RefRange};
     use study_core::margin::{self, Mark, MarkStyle, Slice};
     use study_core::markdown::LinkTarget;
+    fn template_path(name: &str) -> String {
+        format!("templates/{name}.md")
+    }
 
     // ---- saved state ---------------------------------------------------------------------
 
@@ -1815,6 +2026,7 @@ mod tests {
             marks: true,
             footnotes: true,
             refs: true,
+            in_margin: state::MarginKinds::default(),
         }];
         assert!(app.apply_workspace(&saved).is_err());
         assert_eq!(app.panes.len(), 2, "nothing was changed");
@@ -1843,11 +2055,19 @@ mod tests {
     fn layouts_are_saved_loaded_replaced_and_deleted() {
         let (mut app, dir) = with_store();
         let original = shape(&app.workspace());
+        // Naming asks first, and can be backed out of.
+        let _ = app.update(Message::TogglePanel(Panel::Layouts));
+        let _ = app.update(Message::NameLayout);
+        assert!(app.naming && app.panel.is_none(), "the name box replaces the list");
+        let _ = app.update(Message::LayoutDraft("Nope".into()));
+        let _ = app.update(Message::CancelNaming);
+        assert!(!app.naming && app.layout_draft.is_empty() && app.sh.layouts.is_empty());
+        let _ = app.update(Message::NameLayout);
         let _ = app.update(Message::LayoutDraft("  Study  ".into()));
         let _ = app.update(Message::SaveLayout);
         assert_eq!(app.sh.layouts.len(), 1);
         assert_eq!(app.sh.layouts[0].name, "Study");
-        assert!(app.layout_draft.is_empty());
+        assert!(app.layout_draft.is_empty() && !app.naming);
 
         // Change the workspace, then bring the saved one back.
         let _ = app.update(Message::SplitPane(app.panes[0].id, panes::Axis::Column));
@@ -1859,10 +2079,14 @@ mod tests {
 
         // Saving under the same name replaces it; a blank name saves nothing.
         let _ = app.update(Message::SplitPane(app.panes[0].id, panes::Axis::Column));
+        let _ = app.update(Message::NameLayout);
         let _ = app.update(Message::LayoutDraft("Study".into()));
         let _ = app.update(Message::SaveLayout);
+        let _ = app.update(Message::NameLayout);
         let _ = app.update(Message::LayoutDraft("   ".into()));
         let _ = app.update(Message::SaveLayout);
+        assert!(app.naming, "a blank name does not save, and the box stays");
+        let _ = app.update(Message::CancelNaming);
         assert_eq!(app.sh.layouts.len(), 1);
         assert_eq!(app.sh.layouts[0].workspace.panes.len(), 3);
 
@@ -1872,6 +2096,30 @@ mod tests {
         assert!(app.sh.layouts.is_empty());
         assert!(Store::new(dir.path().join("state")).layouts().is_empty());
         let _ = app.update(Message::LoadLayout("Study".into()));
+    }
+
+    #[test]
+    fn the_default_layout_is_always_there_and_puts_the_bible_left_and_a_note_right() {
+        let mut app = App::new();
+        let fresh = shape(&app.workspace());
+        assert!(app.sh.layouts.is_empty());
+        // Rearrange, then ask for the default.
+        let _ = app.update(Message::SplitPane(app.panes[0].id, panes::Axis::Column));
+        app.add_note(0);
+        assert_ne!(shape(&app.workspace()), fresh);
+        let _ = app.update(Message::LoadLayout(DEFAULT_LAYOUT.into()));
+        assert_eq!(shape(&app.workspace()), fresh);
+        let ws = app.workspace();
+        assert!(matches!(&ws.layout, state::Layout::Split { axis: state::AxisSave::Row, fraction, .. } if *fraction == 0.5));
+        assert!(matches!(ws.panes[0].tabs[..], [state::TabSave::Bible { .. }]));
+        assert!(matches!(ws.panes[1].tabs[..], [state::TabSave::Note { .. }]));
+
+        // It is not kept in the saved layouts, and the name cannot be taken.
+        let _ = app.update(Message::NameLayout);
+        let _ = app.update(Message::LayoutDraft(" default ".into()));
+        let _ = app.update(Message::SaveLayout);
+        assert!(app.sh.layouts.is_empty() && app.naming);
+        let _ = app.update(Message::DeleteLayout(DEFAULT_LAYOUT.into()));
     }
 
     #[test]
@@ -1902,8 +2150,8 @@ mod tests {
         let id = app.panes[0].tabs[0];
         let _ = app.update(Message::SetTheme(Theme::Light));
         assert_eq!(app.theme(), Theme::Light);
-        let _ = app.update(Message::SetReadingSize(24.4));
-        let _ = app.update(Message::SetNoteSize(15.0));
+        let _ = app.update(Message::SetBibleSize(24.4));
+        let _ = app.update(Message::SetNotesSize(15.0));
         let _ = app.update(Message::SetFont(FontChoice(Some("Georgia".into()))));
         let Some(Tab::Bible(tab)) = app.tabs.get(&id) else { panic!("no Bible tab") };
         let options = tab.view_options(&app.sh);
@@ -1912,10 +2160,10 @@ mod tests {
 
         let kept = Store::new(dir.path().join("state")).settings();
         assert_eq!(kept, app.sh.settings);
-        assert_eq!((kept.theme.as_str(), kept.reading_size, kept.note_size, kept.font.as_deref()), ("Light", 24.0, 15.0, Some("Georgia")));
+        assert_eq!((kept.theme.as_str(), kept.bible_size, kept.notes_size, kept.font.as_deref()), ("Light", 24.0, 15.0, Some("Georgia")));
 
-        let _ = app.update(Message::SetReadingSize(500.0));
-        assert_eq!(app.sh.settings.reading_size, *state::READING_SIZES.end());
+        let _ = app.update(Message::SetBibleSize(500.0));
+        assert_eq!(app.sh.settings.bible_size, *state::BIBLE_SIZES.end());
         let _ = app.update(Message::ResetSettings);
         assert_eq!(Store::new(dir.path().join("state")).settings(), Settings::default());
     }
@@ -1942,8 +2190,8 @@ mod tests {
         assert_eq!(app.settings_window, Some(window));
         assert!(!app.families.is_empty() || state::installed_families().is_empty());
         let _ = app.update(Message::TogglePanel(Panel::Layouts));
-        let _ = app.update(Message::SetReadingSize(30.0));
-        assert_eq!(app.sh.settings.reading_size, 30.0);
+        let _ = app.update(Message::SetBibleSize(30.0));
+        assert_eq!(app.sh.settings.bible_size, 30.0);
         let _ = app.update(Message::CloseRequested(window));
         assert_eq!(app.settings_window, None);
         let _ = app.update(Message::OpenSettings);
@@ -2567,7 +2815,7 @@ mod tests {
         let mut h = Harness::new(App::new());
         let before = h.app.sh.marks.len();
         h.click_scan(|app| app.bible().text_selection.is_some()).expect("verse selected");
-        let (px, py) = h.center_of("Pray").expect("toolbar");
+        let (px, py) = h.center_of("Prayer").expect("toolbar");
         h.move_to(px, py);
         h.press();
         h.release();
@@ -2731,12 +2979,13 @@ mod tests {
         app.zoomed = Some(app.panes[0].id);
         let mut h = Harness::new(app);
         assert!(h.app.bible().margin_showing, "the reader reports that it has a margin");
-        let (x1, y1) = h.center_of(HEART).expect("a card for the first mark");
-        let (x2, y2) = h.center_of(ETERNAL).expect("a card for the second mark");
+        let (x1, _) = h.center_of(HEART).expect("a card for the first mark");
         // Right of the 640px text column (the reader starts at x=32), always visible.
-        assert!(x1 > 32.0 + 640.0 && x2 > 32.0 + 640.0, "cards at x={x1},{x2}");
-        // Two marks on one verse: stacked, in order, not on top of each other.
-        assert!(y2 > y1 + 30.0, "cards at y={y1} and y={y2}");
+        assert!(x1 > 32.0 + 640.0, "card at x={x1}");
+        // Two marks on one verse make one stack: the top one is built and shown, the other is
+        // underneath (and is not built at all, being out of sight).
+        assert!(h.center_of(ETERNAL).is_none(), "the second mark's card is under the first");
+        assert!(h.app.cards().iter().filter(|c| c.key < FOOTNOTE_KEY).count() >= 2);
     }
 
     #[test]
@@ -2844,30 +3093,6 @@ mod tests {
     }
 
     #[test]
-    fn a_long_card_is_capped_in_height_and_scrolls_inside() {
-        let mut short = App::new();
-        short.zoomed = Some(short.panes[0].id);
-        let mut h = Harness::new(short);
-        let (_, header) = h.center_of("“so loved the world”").unwrap();
-        let (_, next_short) = h.center_of(ETERNAL).unwrap();
-        let short_gap = next_short - header;
-
-        // Sixty lines of text would make a very tall card; the cap keeps the stack tight.
-        let mut app = App::new();
-        app.zoomed = Some(app.panes[0].id);
-        app.sh.marks[0].body = "line of text\n".repeat(60);
-        let mut h = Harness::new(app);
-        let (_, header) = h.center_of("“so loved the world”").unwrap();
-        let (_, next) = h.center_of(ETERNAL).unwrap();
-        let gap = next - header;
-        assert!(
-            gap < short_gap + CARD_BODY_MAX + 20.0,
-            "the second card is {gap}px below the first (a short first card: {short_gap}px)"
-        );
-        assert!(gap > short_gap - 1.0, "and a long card is no shorter than a short one");
-    }
-
-    #[test]
     fn a_long_card_being_edited_is_capped_too() {
         let mut app = App::new();
         app.zoomed = Some(app.panes[0].id);
@@ -2875,10 +3100,9 @@ mod tests {
         let _ = app.update(app.b(BibleMsg::StartEdit(0)));
         let mut h = Harness::new(app);
         let (_, header) = h.center_of("“so loved the world”").unwrap();
-        let (_, next) = h.center_of(ETERNAL).unwrap();
+        let (_, actions) = h.center_of("Delete").expect("the action row is still reachable");
         // header + editor (capped) + action row + padding: nowhere near sixty lines.
-        assert!(next - header < CARD_BODY_MAX + 140.0, "second card {}px below the first", next - header);
-        assert!(h.center_of("Delete").is_some(), "the action row is still reachable");
+        assert!(actions - header < CARD_BODY_MAX + 140.0, "the actions are {}px below the header", actions - header);
     }
 
     #[test]
@@ -2951,8 +3175,10 @@ mod tests {
         assert!(h.app.bible().text_selection.is_some(), "pressing a pen must not clear the selection");
         h.release();
         assert_eq!(h.app.sh.marks.len(), before + 1, "pen click adds a mark");
-        assert!(h.app.bible().text_selection.is_none(), "selection is cleared once applied");
-        assert!(h.center_of("Promise").is_none(), "toolbar hides again once applied");
+        // With no margin the new mark's card opens under the selection, for a note, like Comment.
+        assert!(h.app.bible().editing.is_some(), "the mark's card is open to write in");
+        assert!(h.app.bible().text_selection.is_some(), "the selection stays, for the card to sit under");
+        assert!(h.center_of("Promise").is_none(), "the card takes the toolbar's place");
     }
 
     #[test]
@@ -3040,6 +3266,7 @@ mod tests {
     fn pen_makes_a_mark_that_resolves_back_to_the_selection() {
         let mut app = blank_app();
         select_so_loved(&mut app);
+        app.bible_mut().margin_showing = true; // the card is in the margin: the selection is spent
         let token = app.bible().clear_token;
         let _ = app.update(app.b(BibleMsg::ApplyPen(0)));
 
@@ -3050,7 +3277,8 @@ mod tests {
         assert_eq!(m.prefix, "For God ");
         assert!(m.path().starts_with("margins/John/03/16-highlight-"), "{}", m.path());
         assert!(app.bible().text_selection.is_none() && app.bible().clear_token == token + 1);
-        assert!(matches!(&app.bible().detail, Some(Detail::MarkFile { text, .. }) if text.contains("quote: \"so loved\"")));
+        assert_eq!(app.bible().editing, Some(0), "the new mark's card is open to write a note in");
+        assert!(app.sh.marks[0].to_markdown().contains("quote: \"so loved\""));
 
         let draws = app.mark_draws();
         assert_eq!(draws.len(), 1);
@@ -3608,6 +3836,11 @@ mod tests {
     fn wide_reader() -> Harness {
         let mut app = App::new();
         app.zoomed = Some(app.panes[0].id);
+        // No notes on the marks, so the footnote has the margin to itself (it would be under a
+        // note of the user's, in the stack they make).
+        for mark in &mut app.sh.marks {
+            mark.body.clear();
+        }
         Harness::new(app)
     }
 
@@ -3663,11 +3896,10 @@ mod tests {
     fn without_a_margin_clicking_a_footnote_opens_a_floating_card_that_can_be_closed() {
         let mut h = narrow_reader();
         let (_, y) = h.click_scan(opened).expect("a footnote marker in John 3");
-        let Some(NoteCard { content: NoteContent::Footnote(note) }) = &h.app.bible().note_card else {
+        let Some(NoteCard { content: NoteContent::Footnote(note), .. }) = &h.app.bible().note_card else {
             panic!("expected a footnote card");
         };
         assert!(note.contains("by night"), "{note}");
-        assert!(h.app.bible().detail.is_none(), "it no longer opens in the pane under the reader");
         let card = h.bounds_of_text("Footnote").expect("floating under the click");
         assert!(card.y > y - 4.0, "under the line it came from: {} vs {y}", card.y);
         let (cx, cy) = h.center_of("✕").expect("a close button");
@@ -3730,15 +3962,16 @@ mod tests {
     }
 
     #[test]
-    fn a_strongs_word_pops_its_dictionary_entry_over_the_text_even_with_a_margin() {
+    fn a_strongs_word_pops_its_dictionary_entry_over_the_text_when_not_kept_in_the_margin() {
         let mut app = App::new();
         app.zoomed = Some(app.panes[0].id);
         app.bible_mut().show_strongs = true;
+        app.bible_mut().in_margin.strongs = false;
         let mut h = Harness::new(app);
         assert!(h.app.bible().margin_showing);
         let cards_before = h.app.cards().len();
         let (_, y) = h.click_scan(is_word).expect("a Strong's word in John 3");
-        assert_eq!(h.app.cards().len(), cards_before, "a dictionary never takes a place in the margin");
+        assert_eq!(h.app.cards().len(), cards_before, "chosen out of the margin, it takes no place in it");
         let Some(NoteCard { content: NoteContent::Word { key, entry }, .. }) = &h.app.bible().note_card else { unreachable!() };
         let entry = entry.clone().unwrap_or_else(|| panic!("the mock has an entry for {key}"));
         let label = format!("Strong's {key}");
@@ -3759,6 +3992,7 @@ mod tests {
                 app.zoomed = Some(app.panes[0].id);
             }
             app.bible_mut().show_strongs = true;
+            app.bible_mut().in_margin.strongs = false;
             // Mark all of verse 16, where the Strong's words are.
             select_verses(&mut app, &[16]);
             let _ = app.update(app.b(BibleMsg::ApplyPen(0)));
@@ -3768,7 +4002,8 @@ mod tests {
             let both = |a: &App| is_word(a) && a.bible().popup.as_ref().is_some_and(|p| p.contains(&new));
             h.click_scan(both).unwrap_or_else(|| panic!("a click on a marked Strong's word shows both (narrow: {narrow})"));
             // Both are on screen: the entry's header and the mark's card ("Unlink" is on popped-up cards).
-            assert!(h.bounds_of_text("Unlink").is_some(), "the mark's card is offered (narrow: {narrow})");
+            // (With a margin the mark's card is in it, not popped up, so there is nothing to find here.)
+            assert!(narrow == h.bounds_of_text("Unlink").is_some(), "the mark's card is offered when popped up (narrow: {narrow})");
             assert!(h.app.bible().editing.is_none(), "a lookup does not start an edit");
             // A click elsewhere closes both.
             h.click(60.0, 1300.0);
@@ -3781,6 +4016,7 @@ mod tests {
         let mut app = App::new();
         app.zoomed = Some(app.panes[0].id);
         app.bible_mut().show_strongs = true;
+        app.bible_mut().in_margin.strongs = false;
         let mut h = Harness::new(app);
         h.click_scan(is_word).unwrap();
         let (cx, cy) = h.center_of("✕").expect("a close button");
@@ -4202,16 +4438,59 @@ mod tests {
         if let Ok(w) = std::env::var("SNAP_W") {
             h.size = Size::new(w.parse().unwrap(), 800.0);
         }
+        if let Ok(count) = std::env::var("SNAP_CROWD") {
+            // Many notes on the words of one verse.
+            let canon = h.app.bible().chapter.as_ref().unwrap().canonical_verses();
+            let text = canon[&16].clone();
+            let mut at = 0;
+            for n in 0..count.parse::<usize>().unwrap() {
+                let Some(found) = text[at..].find(' ') else { break };
+                let (start, end) = (at, at + found);
+                at = end + 1;
+                h.app.bible_mut().text_selection = Some(vec![CanonSlice { verse: 16, start, end }]);
+                let _ = h.app.update(h.app.b(BibleMsg::ApplyPen(n % 3)));
+                h.app.sh.marks.last_mut().unwrap().body = format!("Note {} on this word. It says a good deal, over a line or two, to make a tall card.", n + 1);
+            }
+        }
+        if let Ok(at) = std::env::var("SNAP_HOVER") {
+            let (x, y) = at.split_once(',').unwrap();
+            h.move_to(x.parse().unwrap(), y.parse().unwrap());
+        }
+        if std::env::var("SNAP_MARGINMENU").is_ok() {
+            let id = h.app.bid();
+            let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarginMenu));
+        }
+        if std::env::var("SNAP_NEWKIND").is_ok() {
+            let id = h.app.nid();
+            let _ = h.app.update(Message::Note(id, NoteMsg::NewNote));
+        }
+        if std::env::var("SNAP_STRONGSPOP").is_ok() {
+            h.app.bible_mut().show_strongs = true;
+        }
+        if std::env::var("SNAP_STRONGS").is_ok() {
+            let id = h.app.bid();
+            h.app.bible_mut().show_strongs = true;
+            let _ = h.app.update(Message::Bible(id, BibleMsg::SetInMargin(NoteKind::Strongs, true)));
+        }
+        if let Ok(size) = std::env::var("SNAP_BIBLE") {
+            let _ = h.app.update(Message::SetBibleSize(size.parse().unwrap()));
+        }
         if let Ok(panel) = std::env::var("SNAP_PANEL") {
             if panel == "layouts" {
                 let _ = h.app.update(Message::LayoutDraft("Morning study".into()));
                 let _ = h.app.update(Message::SaveLayout);
+                if std::env::var("SNAP_NAMING").is_ok() {
+                    let _ = h.app.update(Message::NameLayout);
+                    let _ = h.app.update(Message::LayoutDraft("Evening".into()));
+                }
             }
-            let _ = h.app.update(Message::SetReadingSize(24.0));
-            let _ = h.app.update(Message::SetNoteSize(20.0));
+            let _ = h.app.update(Message::SetBibleSize(24.0));
+            let _ = h.app.update(Message::SetNotesSize(20.0));
             let _ = h.app.update(Message::SetFont(FontChoice(Some("Georgia".into()))));
             if panel == "layouts" {
-                let _ = h.app.update(Message::TogglePanel(Panel::Layouts));
+                if !h.app.naming {
+                    let _ = h.app.update(Message::TogglePanel(Panel::Layouts));
+                }
             } else {
                 let _ = h.app.update(Message::OpenSettings);
                 h.size = Size::new(360.0, 400.0);
@@ -4245,47 +4524,85 @@ mod tests {
     // ---- the note selector -----------------------------------------------------------
 
     #[test]
-    fn notes_are_grouped_by_type_with_margin_notes_labelled_by_their_passage() {
+    fn notes_are_listed_by_name_with_margin_notes_apart_and_labelled_by_their_passage() {
         let app = App::new();
-        let all = crate::note_tab::groups(&app.sh, "");
+        let none = std::collections::BTreeSet::new();
+        let all = crate::note_tab::groups(&app.sh, "", &none);
         let keys: Vec<&str> = all.iter().map(|g| g.key.as_str()).collect();
-        assert_eq!(keys, ["notes", "prayers", "margins"], "notes first, margin notes last");
+        assert_eq!(keys, ["notes", "margins"], "no folders: notes, then margin notes (and no templates)");
+        assert!(all.iter().flat_map(|g| &g.notes).all(|(p, _)| !p.starts_with("templates/")), "the kinds of note are not found among the notes");
         let labels: Vec<&str> = all[0].notes.iter().map(|(_, l)| l.as_str()).collect();
-        assert_eq!(labels, ["Memory verses", "Nicodemus"], "sorted by name, shown without folder or .md");
-        let margins = &all[2];
+        assert_eq!(labels, ["Memory verses", "Nicodemus", "Prayer list"], "sorted by name, shown without folder or .md");
+        let margins = &all[1];
         assert_eq!(margins.label, "Margin notes");
         assert!(margins.notes.iter().any(|(_, l)| l.starts_with("John 3:16 · ")), "{:?}", margins.notes);
         assert!(margins.notes.iter().all(|(p, _)| p.starts_with("margins/")));
     }
 
     #[test]
-    fn searching_narrows_by_name_or_text_and_hides_empty_groups() {
+    fn searching_narrows_by_name_text_or_tag_and_hides_empty_groups() {
         let app = App::new();
+        let none = std::collections::BTreeSet::new();
         let find = |q: &str| -> Vec<String> {
-            crate::note_tab::groups(&app.sh, q).into_iter().flat_map(|g| g.notes).map(|(p, _)| p).collect()
+            crate::note_tab::groups(&app.sh, q, &none).into_iter().flat_map(|g| g.notes).map(|(p, _)| p).collect()
         };
         assert_eq!(find("nicod")[0], "notes/Nicodemus.md", "a name match comes first");
         assert!(find("nicod").len() > 1, "and notes that mention it follow");
         assert!(find("PRAYER LIST").contains(&"prayers/Prayer list.md".to_string()), "any case");
         assert!(find("bronze serpent").contains(&"notes/Nicodemus.md".to_string()), "by text");
         assert!(find("zzz nothing").is_empty());
-        let groups = crate::note_tab::groups(&app.sh, "prayer");
+        // By tag: the plain word finds a note that has it among its tags, and #word only tags.
+        assert!(find("new-birth").contains(&"notes/Nicodemus.md".to_string()));
+        let hashed = find("#new-bir");
+        assert!(hashed.contains(&"notes/Nicodemus.md".to_string()) && !hashed.contains(&"notes/Memory verses.md".to_string()));
+        assert!(find("#nonesuchtag").is_empty());
+        let groups = crate::note_tab::groups(&app.sh, "prayer", &none);
         assert!(groups.iter().all(|g| !g.notes.is_empty()));
     }
 
     #[test]
-    fn the_selector_opens_over_the_note_and_choosing_a_note_closes_it() {
+    fn tags_narrow_the_selector_and_a_tag_includes_the_tags_inside_it() {
+        let mut app = App::new();
+        app.sh.notes.insert(
+            "notes/Grace.md".into(),
+            "---\ntitle: Grace\ntags: [topic/grace, john]\n---\n\nText\n".into(),
+        );
+        let pick = |tags: &[&str]| -> Vec<String> {
+            let set = tags.iter().map(|t| t.to_string()).collect();
+            crate::note_tab::groups(&app.sh, "", &set).into_iter().filter(|g| g.key == "notes").flat_map(|g| g.notes).map(|(p, _)| p).collect()
+        };
+        assert_eq!(pick(&["john"]), ["notes/Grace.md", "notes/Nicodemus.md"]);
+        assert_eq!(pick(&["topic"]), ["notes/Grace.md"], "topic/grace is under topic");
+        assert_eq!(pick(&["john", "topic/grace"]), ["notes/Grace.md"], "all the chosen tags");
+        assert!(pick(&["topic/gr"]).is_empty(), "a part of a tag is not the tag");
+        // The counts the chips show.
+        let counts = app.sh.tag_counts();
+        assert!(counts.contains(&("john".to_string(), 2)) && counts.contains(&("topic/grace".to_string(), 1)));
+        // Editing a note's tags changes them.
+        app.sh.notes.insert("notes/Grace.md".into(), "---\ntitle: Grace\ntags: [other]\n---\n".into());
+        assert!(app.sh.tag_counts().contains(&("other".to_string(), 1)));
+        assert!(!app.sh.tag_counts().iter().any(|(t, _)| t == "topic/grace"));
+    }
+
+    #[test]
+    fn the_selector_lists_the_notes_and_tag_chips_and_choosing_a_tag_narrows_it() {
         let mut app = App::new();
         let id = app.nid();
         let _ = app.update(Message::Note(id, NoteMsg::TogglePicker));
         let mut h = Harness::new(app);
-        assert!(h.center_of("Prayers").is_some() && h.center_of("Margin notes").is_some(), "the groups are listed");
-        assert!(h.center_of("Nicodemus").is_some() || h.center_of("Memory verses").is_some(), "the open note's group is open");
-        assert!(h.center_of("Prayer list").is_none(), "the others are closed");
-        // Open another group, then pick its note.
-        let (x, y) = h.center_of("Prayers").unwrap();
+        assert!(h.center_of("Margin notes").is_some(), "the margin notes are a group");
+        assert!(h.center_of("Prayer list").is_some() && h.center_of("Nicodemus").is_some(), "the notes are just listed");
+        assert!(h.center_of("#new-birth").is_some(), "with chips for the tags in use");
+        let (x, y) = h.center_of("#new-birth").unwrap();
         h.click(x, y);
-        let (x, y) = h.center_of("Prayer list").expect("the group opened");
+        assert!(h.app.note().picker.as_ref().unwrap().tags.contains("new-birth"));
+        assert!(h.center_of("Prayer list").is_none(), "only the notes with the tag are left");
+        assert!(h.center_of("Nicodemus").is_some());
+        let (x, y) = h.center_of("Clear tags").expect("a way to lift it");
+        h.click(x, y);
+        assert!(h.center_of("Prayer list").is_some());
+        // Choosing a note closes the selector.
+        let (x, y) = h.center_of("Prayer list").unwrap();
         h.click(x, y);
         assert_eq!(h.app.note().path, "prayers/Prayer list.md");
         assert!(h.app.note().picker.is_none(), "choosing closes the selector");
@@ -4350,7 +4667,7 @@ mod tests {
         let _ = app.update(Message::Note(id, NoteMsg::AddTag));
         let text = app.sh.notes["notes/Nicodemus.md"].clone();
         let front = study_core::frontmatter::parse(&text).front;
-        assert_eq!(front.tags, ["john", "new-birth", "Grace"]);
+        assert_eq!(front.tags, ["john", "new-birth", "grace"]);
         assert_eq!(front.title.as_deref(), Some("Notes on Nicodemus"), "the rest is untouched");
         assert!(text.contains("\n# Nicodemus"), "and so is the text");
         assert!(app.note().tag_draft.is_empty(), "the box is cleared");
@@ -4359,7 +4676,7 @@ mod tests {
         let _ = app.update(Message::Note(id, NoteMsg::AddTag));
         assert_eq!(study_core::frontmatter::parse(&app.sh.notes["notes/Nicodemus.md"]).front.tags.len(), 3);
         let _ = app.update(Message::Note(id, NoteMsg::RemoveTag("john".into())));
-        assert_eq!(study_core::frontmatter::parse(&app.sh.notes["notes/Nicodemus.md"]).front.tags, ["new-birth", "Grace"]);
+        assert_eq!(study_core::frontmatter::parse(&app.sh.notes["notes/Nicodemus.md"]).front.tags, ["new-birth", "grace"]);
         // It is a normal edit: undo brings the tag back.
         app.note_mut().doc.perform(EditAction::Undo);
         assert!(app.note().doc.source().contains("john"));
@@ -4387,11 +4704,15 @@ mod tests {
         let mut app = App::new();
         let id = app.nid();
         let _ = app.update(Message::Note(id, NoteMsg::NewNote));
+        assert!(app.note().choosing, "it asks what kind first");
+        assert_eq!(app.note().path, "notes/Memory verses.md", "and has made nothing yet");
+        let _ = app.update(Message::Note(id, NoteMsg::CreateNote(template_path("Blank"))));
+        assert!(!app.note().choosing);
         assert_eq!(app.note().path, "notes/Untitled.md");
         let front = study_core::frontmatter::parse(&app.sh.notes["notes/Untitled.md"]).front;
         assert_eq!(front.title.as_deref(), Some("Untitled"));
         assert!(front.created.is_some());
-        let _ = app.update(Message::Note(id, NoteMsg::NewNote));
+        let _ = app.update(Message::Note(id, NoteMsg::CreateNote(template_path("Blank"))));
         assert_eq!(app.note().path, "notes/Untitled 2.md");
         // The caret is ready below the properties.
         assert_eq!(app.note().doc.selection().head, app.note().doc.front_end());
@@ -4589,6 +4910,40 @@ mod tests {
     }
 
     #[test]
+    fn opening_the_reader_menu_leaves_the_reader_where_it_was_scrolled() {
+        let mut h = Harness::new(App::new());
+        h.size = Size::new(1024.0, 560.0);
+        let id = h.app.bid();
+        // The reader's text (left of where the menu hangs), as pixels.
+        let text_pixels = |h: &mut Harness| -> Vec<u8> {
+            let theme = h.app.theme();
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            h.cache = ui.into_cache();
+            let (w, hh) = (h.size.width as u32, h.size.height as u32);
+            let all = h.renderer.screenshot(Size::new(w, hh), 1.0, iced::Color::BLACK);
+            let mut part = Vec::new();
+            for y in 150..540usize {
+                part.extend_from_slice(&all[(y * w as usize) * 4..(y * w as usize + 240) * 4]);
+            }
+            part
+        };
+        h.move_to(200.0, 300.0);
+        for _ in 0..3 {
+            h.feed(Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Lines { x: 0.0, y: -5.0 } }));
+        }
+        assert!(h.app.bible().scroll_y > 0.0, "the reader scrolled");
+        // (With the pointer over the text it is lit by what is under it, which the menu's layer covers.)
+        h.cursor = mouse::Cursor::Unavailable;
+        let before = text_pixels(&mut h);
+        let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMenu));
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let after = text_pixels(&mut h);
+        let differing = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+        assert!(differing == 0, "the text moved: {differing} of {} bytes differ", before.len());
+    }
+
+    #[test]
     fn each_toggle_hides_its_kind_of_thing() {
         let mut app = App::new();
         app.zoomed = Some(app.panes[0].id);
@@ -4596,7 +4951,7 @@ mod tests {
         let id = app.bid();
         let mut h = Harness::new(app);
         assert!(!h.app.mark_draws().is_empty());
-        let foot = |a: &App| a.cards().iter().filter(|c| c.key >= FOOTNOTE_KEY).count();
+        let foot = |a: &App| a.cards().iter().filter(|c| (FOOTNOTE_KEY..WORD_KEY).contains(&c.key)).count();
         assert_eq!(foot(&h.app), 1);
         // Marks.
         let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarks(false)));
@@ -4608,7 +4963,7 @@ mod tests {
         let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleFootnotes(false)));
         assert_eq!(foot(&h.app), 0);
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
-        assert!(h.click_scan(|a| matches!(a.bible().note_card, Some(NoteCard { content: NoteContent::Footnote(_) }))).is_none());
+        assert!(h.click_scan(|a| matches!(a.bible().note_card, Some(NoteCard { content: NoteContent::Footnote(_), .. }))).is_none());
         let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleFootnotes(true)));
         assert_eq!(foot(&h.app), 1);
     }
@@ -4618,23 +4973,661 @@ mod tests {
         let mut app = App::new();
         app.bible_mut().show_refs = false;
         let mut h = Harness::new(app);
-        let found = |a: &App| matches!(a.bible().note_card, Some(NoteCard { content: NoteContent::References(_) }));
+        let found = |a: &App| matches!(a.bible().note_card, Some(NoteCard { content: NoteContent::References(_), .. }));
         assert!(h.click_scan(found).is_none(), "no markers while References is off");
         let id = h.app.bid();
         let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleRefs(true)));
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
         h.click_scan(found).expect("a cross reference marker");
         assert!(h.center_of("References").is_some(), "the pop-over is titled");
-        let Some(NoteCard { content: NoteContent::References(refs) }) = &h.app.bible().note_card else { unreachable!() };
+        let Some(NoteCard { content: NoteContent::References(refs), .. }) = &h.app.bible().note_card else { unreachable!() };
         assert_eq!(refs.iter().map(ToString::to_string).collect::<Vec<_>>(), ["Numbers 21:9", "Psalms 23:1"]);
         // Each reference is a link with the start of its text.
-        assert!(h.center_of("Psalms 23:1").is_some());
+        // (Each reference is drawn as the writer draws a link, so it has the same right click and
+        // pull-away: those are the editor's own, tested with it.)
         assert!(h.center_of("The Lord is my shepherd; I shall not want.").is_some(), "its text, to tell it apart");
         // Following one takes this tab there.
         let id = h.app.bid();
         let target = LinkTarget::Verse { range: RefRange::parse("Ps 23:1").unwrap(), module: None };
         let _ = h.app.update(Message::Bible(id, BibleMsg::OpenLink(target)));
         assert_eq!((h.app.bible().book, h.app.bible().chapter_no), (Book::PSALMS, 23));
+    }
+
+    #[test]
+    fn a_chapter_of_only_footnotes_still_gets_its_margin() {
+        let mut app = App::new();
+        // No note on any mark, and the reader has not (yet) said it has a margin: the footnotes
+        // alone must be enough for it to make one, or a chapter like that never would.
+        for mark in &mut app.sh.marks {
+            mark.body.clear();
+        }
+        assert!(!app.bible().margin_showing);
+        assert!(!app.bible().cards(&app.sh).is_empty(), "the footnotes are offered as cards");
+        app.zoomed = Some(app.panes[0].id);
+        let mut h = Harness::new(app);
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.app.bible().margin_showing, "a wide reader with footnotes has a margin");
+    }
+
+    #[test]
+    fn links_in_footnotes_and_reference_lists_offer_the_writers_menu_and_pull() {
+        let mut app = App::new();
+        let id = app.bid();
+        // A footnote that mentions a passage is a link view, whose right click and pull-away go
+        // through the card messages (as a mark card's do).
+        let task = app.update(Message::Bible(id, BibleMsg::CardLinkMenu(verse_link("Joh 3:16"), Point::new(40.0, 50.0))));
+        drop(task);
+        assert!(app.link_menu.is_some(), "right clicking the link offers where to open it");
+        let _ = app.update(Message::Bible(id, BibleMsg::CardLinkDrag(verse_link("Joh 3:16"), Point::new(60.0, 70.0))));
+        assert!(matches!(app.drag.as_ref().map(|d| &d.payload), Some(Payload::Link(_))), "and pulling it picks it up");
+    }
+
+    #[test]
+    fn notes_on_one_line_stack_and_the_arrows_cycle_through_them() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        let mut h = Harness::new(app);
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        // The note on "born again" and the footnote on the same line are one stack: the margin
+        // card region, as pixels.
+        let card = |h: &mut Harness| -> Vec<u8> {
+            let theme = h.app.theme();
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            h.cache = ui.into_cache();
+            let w = h.size.width as usize;
+            let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
+            let mut part = Vec::new();
+            for y in 330..430usize {
+                part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
+            }
+            part
+        };
+        h.cursor = mouse::Cursor::Unavailable;
+        let first = card(&mut h);
+        // The bar's right arrow, under the top card.
+        h.click(1298.0, 446.0);
+        h.cursor = mouse::Cursor::Unavailable;
+        let second = card(&mut h);
+        assert_ne!(first, second, "the next note is on top");
+        // It stays on top as the reader is drawn again.
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        h.cursor = mouse::Cursor::Unavailable;
+        assert_eq!(card(&mut h), second);
+    }
+
+    #[test]
+    fn pointing_at_a_mark_brings_its_note_to_the_top_of_its_stack_and_a_click_then_edits() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        let mut h = Harness::new(app);
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let card = |h: &mut Harness| -> Vec<u8> {
+            let theme = h.app.theme();
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            h.cache = ui.into_cache();
+            let w = h.size.width as usize;
+            let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
+            let mut part = Vec::new();
+            for y in 330..430usize {
+                part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
+            }
+            part
+        };
+        // The pointer on the footnote's marker, then on "born again" a few words on.
+        h.move_to(399.0, 343.0);
+        let footnote = card(&mut h);
+        h.move_to(880.0, 343.0);
+        let mark = card(&mut h);
+        assert_ne!(footnote, mark, "each comes to the top as it is pointed at");
+        h.move_to(399.0, 343.0);
+        assert_eq!(card(&mut h), footnote);
+        // With its note on top, a click on the mark edits it.
+        h.click(880.0, 343.0);
+        assert!(h.app.bible().editing.is_some());
+    }
+
+    #[test]
+    fn what_is_under_the_open_margin_menu_is_not_pointed_at() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        let mut h = Harness::new(app);
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let id = h.app.bid();
+        let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarginMenu));
+        // The lower note, as pixels: it is dimmed if a note is thought to be pointed at.
+        let lower = |h: &mut Harness| -> Vec<u8> {
+            let theme = h.app.theme();
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            h.cache = ui.into_cache();
+            let w = h.size.width as usize;
+            let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
+            let mut part = Vec::new();
+            for y in 600..700usize {
+                part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
+            }
+            part
+        };
+        h.cursor = mouse::Cursor::Unavailable;
+        let calm = lower(&mut h);
+        // On the menu's panel, over the note beneath it.
+        h.move_to(1250.0, 380.0);
+        assert_eq!(lower(&mut h), calm, "nothing under the menu is pointed at");
+    }
+
+    #[test]
+    fn strongs_words_have_their_entries_in_the_margin_when_kept_there_and_nothing_opens_on_a_click() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        app.bible_mut().show_strongs = true;
+        let words = |a: &App| a.cards().iter().filter(|c| (WORD_KEY..WORD_KEY * 2).contains(&c.key)).count();
+        assert_eq!(words(&app), 0, "not kept in the margin by default");
+        let id = app.bid();
+        let _ = app.update(Message::Bible(id, BibleMsg::SetInMargin(NoteKind::Strongs, true)));
+        assert!(words(&app) > 0, "an entry for each word with a number");
+        let mut h = Harness::new(app);
+        assert!(h.click_scan(is_word).is_none() || h.app.bible().note_card.is_none(), "a click opens no pop-over");
+        assert!(h.app.bible().note_card.is_none());
+        // Not shown at all, no cards.
+        let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleStrongs(false)));
+        assert_eq!(words(&h.app), 0);
+    }
+
+    #[test]
+    fn every_cross_reference_marker_has_its_list_in_the_margin_when_references_are_kept_there() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        app.bible_mut().in_margin.refs = true;
+        let _ = app.update(app.b(BibleMsg::ToggleRefs(true)));
+        let refs = |a: &App| a.cards().iter().filter(|c| c.key >= (1 << 43)).count();
+        assert_eq!(refs(&app), 1, "John 3 has one cross reference marker in the mock");
+        // A click on the marker has nothing to open: the list is showing already.
+        let mut h = Harness::new(app);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.click_scan(|a| a.bible().note_card.is_some()).is_none(), "no pop-over for a marker whose list is in the margin");
+        // Kept out of the margin, the cards go and the marker opens its list over the text.
+        let id = h.app.bid();
+        let _ = h.app.update(Message::Bible(id, BibleMsg::SetInMargin(NoteKind::Refs, false)));
+        assert_eq!(refs(&h.app), 0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.click_scan(|a| a.bible().note_card.is_some()).is_some());
+        // Not shown at all, no cards either way.
+        let _ = h.app.update(Message::Bible(id, BibleMsg::SetInMargin(NoteKind::Refs, true)));
+        let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleRefs(false)));
+        assert_eq!(refs(&h.app), 0);
+    }
+
+    #[test]
+    fn marks_kept_out_of_the_margin_have_no_cards_in_it_and_pop_up_instead() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        let id = app.bid();
+        let marks = |a: &App| a.cards().iter().filter(|c| c.key < FOOTNOTE_KEY).count();
+        assert!(marks(&app) > 0);
+        let _ = app.update(Message::Bible(id, BibleMsg::SetInMargin(NoteKind::Marks, false)));
+        assert_eq!(marks(&app), 0, "no mark card in the margin");
+        assert!(!app.mark_draws().is_empty(), "the marks are still drawn in the text");
+        let mut h = Harness::new(app);
+        // Clicking a mark floats its card under the click, as in a reader with no margin.
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        h.click(880.0, 343.0);
+        assert!(h.app.bible().popup.is_some(), "the click on \"born again\" floated its card");
+        assert!(h.app.bible().editing.is_none(), "and did not start writing in the margin");
+        assert!(h.app.bible().floating(&h.app.sh).is_some());
+    }
+
+    #[test]
+    #[ignore = "measures how long a crowded margin takes to lay out and draw"]
+    fn timing_a_crowded_margin() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        // Many notes on the words of verses 1 to 8.
+        let canon = app.bible().chapter.as_ref().unwrap().canonical_verses();
+        for verse in 1..=8u16 {
+            let text = canon[&verse].clone();
+            let mut at = 0;
+            while let Some(found) = text[at..].find(' ') {
+                let (start, end) = (at, at + found);
+                at = end + 1;
+                if end <= start {
+                    continue;
+                }
+                app.bible_mut().text_selection = Some(vec![CanonSlice { verse, start, end }]);
+                let _ = app.update(app.b(BibleMsg::ApplyPen(0)));
+                app.sh.marks.last_mut().unwrap().body = "A note on this word, a line or two long, to give the card some height.".into();
+            }
+        }
+        // And a dictionary entry for every word of the chapter, as with Strong's numbers kept in
+        // the margin (the mock has too few of its own).
+        let canon = app.bible().chapter.as_ref().unwrap().canonical_verses();
+        let mut words = Vec::new();
+        for (verse, text) in &canon {
+            let mut at = 0;
+            while let Some(found) = text[at..].find(' ') {
+                let (start, end) = (at, at + found);
+                at = end + 1;
+                if end > start {
+                    words.push(crate::bible_tab::WordCard {
+                        anchor: CanonSlice { verse: *verse, start, end },
+                        entry: study_core::LexiconEntry {
+                            key: "G25".into(),
+                            lemma: "\u{3b1}\u{3b3}\u{3b1}\u{3c0}\u{3ac}\u{3c9}".into(),
+                            transliteration: "agap\u{e1}\u{14d}".into(),
+                            definition: "to love, to wish well to, to have a preference for, to regard with favour; used of the love of God for Christ and of Christ for His disciples.".into(),
+                        },
+                    });
+                }
+            }
+        }
+        app.bible_mut().words = words;
+        app.bible_mut().show_strongs = true;
+        app.bible_mut().in_margin.strongs = true;
+        println!("cards: {}", app.cards().len());
+        let mut h = Harness::new(app);
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let theme = h.app.theme();
+        let start = std::time::Instant::now();
+        for i in 0..10 {
+            h.move_to(100.0 + i as f32, 300.0);
+        }
+        println!("10 pointer moves: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            h.cache = ui.into_cache();
+        }
+        println!("10 view+build+draw: {:?}", start.elapsed());
+        let (mut built, mut drawn) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        for _ in 0..10 {
+            let t = std::time::Instant::now();
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            built += t.elapsed();
+            let t = std::time::Instant::now();
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            drawn += t.elapsed();
+            h.cache = ui.into_cache();
+        }
+        println!("of which in 10 frames: build {built:?}, draw {drawn:?}");
+        let id = h.app.bid();
+        let start = std::time::Instant::now();
+        for i in 0..10 {
+            let _ = h.app.update(Message::Bible(id, BibleMsg::Scrolled(10.0 * i as f32)));
+        }
+        println!("10 scrolled updates: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            let _ = h.app.view();
+        }
+        println!("10 views: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            let _ = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer).into_cache();
+        }
+        println!("10 view+build (no draw, cache dropped): {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn the_margin_menu_goes_when_a_click_lands_anywhere_else() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        let mut h = Harness::new(app);
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let id = h.app.bid();
+        for (name, at) in [("text", (200.0, 330.0)), ("an empty part of the margin", (1250.0, 520.0)), ("a note", (1250.0, 650.0))] {
+            let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarginMenu));
+            assert!(h.app.bible().margin_menu_open);
+            h.click(at.0, at.1);
+            assert!(!h.app.bible().margin_menu_open, "a click on {name} puts the menu away");
+        }
+    }
+
+    #[test]
+    fn pointing_at_a_strongs_word_brings_its_entry_to_the_top_of_its_stack() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        app.bible_mut().show_strongs = true;
+        let id = app.bid();
+        let _ = app.update(Message::Bible(id, BibleMsg::SetInMargin(NoteKind::Strongs, true)));
+        let mut h = Harness::new(app);
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let stack = |h: &mut Harness| -> Vec<u8> {
+            let theme = h.app.theme();
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            h.cache = ui.into_cache();
+            let w = h.size.width as usize;
+            let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
+            let mut part = Vec::new();
+            for y in 590..720usize {
+                part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
+            }
+            part
+        };
+        h.cursor = mouse::Cursor::Unavailable;
+        let calm = stack(&mut h);
+        // "God" and "world" are different words with different entries.
+        h.move_to(767.0, 621.0);
+        let god = stack(&mut h);
+        assert_ne!(god, calm, "its entry came up");
+        h.move_to(935.0, 621.0);
+        let world = stack(&mut h);
+        assert_ne!(world, god, "each word has its own entry");
+        h.move_to(767.0, 621.0);
+        assert_eq!(stack(&mut h), god);
+    }
+
+    #[test]
+    fn links_to_notes_that_pop_over_the_text_are_quiet_until_pointed_at() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        app.bible_mut().show_strongs = true;
+        let h = Harness::new(app);
+        let options = h.app.bible().view_options(&h.app.sh);
+        // Strong's words are popovers by default, footnotes are in the margin.
+        assert!(!options.strongs_in_margin && options.footnotes_in_margin && !options.refs_in_margin);
+    }
+
+    #[test]
+    fn unlinking_a_note_shows_it_in_a_note_tab_so_it_is_not_lost() {
+        let mut app = App::new();
+        let was = app.note().path.clone();
+        assert!(!was.starts_with("margins/"), "a note tab on some other note");
+        let _ = app.update(app.b(BibleMsg::UnlinkMarkAt(0)));
+        let shown = app.note().path.clone();
+        assert!(shown.starts_with("notes/John 3."), "the plain note that was left: {shown}");
+        assert!(app.sh.notes.contains_key(&shown));
+    }
+
+    #[test]
+    fn a_new_note_asks_what_kind_and_starts_from_that_template() {
+        let mut app = App::new();
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::NewNote));
+        let mut h = Harness::new(app);
+        for template in h.app.sh.templates() {
+            assert!(h.center_of(&template.name).is_some(), "{} is offered", template.name);
+            assert!(h.center_of(&template.description).is_some(), "with its description");
+        }
+        assert_eq!(h.app.sh.templates().len(), 4);
+        // Pick one: the note is filed with its folder and type, and opens.
+        let (x, y) = h.center_of("Prayer list").unwrap();
+        h.click(x, y);
+        assert_eq!(h.app.note().pending, Some(template_path("Prayer list")), "the kind first; then it asks for a title");
+        assert!(h.center_of("Title").is_some() || h.app.note().choosing);
+        let (x, y) = h.center_of("Create").expect("the title step has its button");
+        h.click(x, y);
+        assert!(!h.app.note().choosing && h.app.note().pending.is_none());
+        assert_eq!(h.app.note().path, "notes/Prayer list.md", "filed with the notes: tags say what it is");
+        let text = h.app.sh.notes[&h.app.note().path].clone();
+        let front = study_core::frontmatter::parse(&text).front;
+        assert_eq!(front.tags, ["prayer"]);
+        assert!(text.contains("## Requests"));
+
+        // Daily: one a day. The second ask shows the first.
+        let id = h.app.nid();
+        // (It is named by its date, so there is no title to ask for: choosing it makes it.)
+        for _ in 0..2 {
+            let _ = h.app.update(Message::Note(id, NoteMsg::NewNote));
+            let _ = h.app.update(Message::Note(id, NoteMsg::PickKind(template_path("Daily"))));
+            assert!(!h.app.note().choosing && h.app.note().pending.is_none());
+        }
+        let today = h.app.note().path.clone();
+        assert!(study_core::frontmatter::parse(&h.app.sh.notes[&today]).front.tags == ["daily"], "{today}");
+        assert_eq!(h.app.sh.tag_counts().iter().find(|(t, _)| t == "daily"), Some(&("daily".to_string(), 1)), "one a day");
+        // A click outside the choices cancels.
+        let _ = h.app.update(Message::Note(id, NoteMsg::NewNote));
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        h.click(5.0, 700.0);
+        assert!(!h.app.note().choosing);
+    }
+
+    #[test]
+    fn typing_a_tag_offers_the_ones_in_use_and_picking_one_adds_it() {
+        let mut app = App::new();
+        app.open_note("notes/Memory verses.md".into());
+        let id = app.nid();
+        assert!(app.sh.tag_suggestions("", &[], 8).is_empty(), "nothing typed, nothing offered");
+        let _ = app.update(Message::Note(id, NoteMsg::TagDraft("  #JOH".into())));
+        let have = app.sh.tags_of("notes/Memory verses.md");
+        let offered = app.sh.tag_suggestions(&app.note().tag_draft, &have, 8);
+        assert_eq!(offered, [("john".to_string(), 1)], "found whatever the case, and with its count");
+        assert!(app.sh.tag_suggestions("new", &["new-birth".into()], 8).is_empty(), "not the ones it has");
+        assert!(app.sh.tag_suggestions("zzz", &[], 8).is_empty());
+        // The ones that start with it come before the ones that only contain it.
+        app.sh.notes.insert("notes/A.md".into(), "---\ntags: [born-again, a-born]\n---\n".into());
+        let order: Vec<String> = app.sh.tag_suggestions("born", &[], 8).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(order, ["born-again", "a-born"]);
+        // Picking adds it to the note's tags and clears the box.
+        let mut h = Harness::new(app);
+        assert!(h.center_of("Use").is_some() && h.center_of("#john").is_some(), "the suggestion shows");
+        let (x, y) = h.center_of("#john").unwrap();
+        h.click(x, y);
+        assert_eq!(h.app.sh.tags_of("notes/Memory verses.md"), ["john"]);
+        assert!(h.app.note().tag_draft.is_empty());
+    }
+
+    #[test]
+    fn pens_are_tags_with_colors_set_in_the_settings_and_the_toolbar_follows() {
+        let mut app = App::new();
+        let names = |a: &App| a.sh.settings.pens.iter().map(|p| p.name()).collect::<Vec<_>>();
+        assert_eq!(names(&app), ["Promise", "Command", "Growth", "Prayer"]);
+        // A new pen: a tag (in one form), the next color; its color is the tag's everywhere.
+        let _ = app.update(Message::PenDraft("  #Daily Reading".into()));
+        let _ = app.update(Message::AddPen);
+        let pen = app.sh.settings.pens.last().unwrap().clone();
+        assert_eq!((pen.tag.as_str(), pen.name().as_str()), ("daily-reading", "Daily reading"));
+        assert!(app.pen_draft.is_empty());
+        assert_eq!(app.sh.tag_color("daily-reading"), Some(pen.color.clone()));
+        assert_eq!(app.sh.tag_color("daily-reading/early"), Some(pen.color.clone()), "tags inside it have its color");
+        assert_eq!(app.sh.tag_color("other"), None);
+        // The same tag again changes the color rather than adding a second pen.
+        let before = app.sh.settings.pens.len();
+        let _ = app.update(Message::PenDraft("daily reading".into()));
+        let _ = app.update(Message::AddPen);
+        assert_eq!(app.sh.settings.pens.len(), before);
+        // Cycling the color and the style, and removing a pen.
+        let last = before - 1;
+        let color = app.sh.settings.pens[last].color.clone();
+        let _ = app.update(Message::CyclePenColor(last));
+        assert_ne!(app.sh.settings.pens[last].color, color);
+        let _ = app.update(Message::CyclePenStyle(last));
+        assert_eq!(app.sh.settings.pens[last].style, state::PenStyle::Underline);
+        let _ = app.update(Message::RemovePen(last));
+        assert_eq!(names(&app), ["Promise", "Command", "Growth", "Prayer"]);
+
+        // The toolbar offers each pen, and using one marks the text with its tag and color.
+        app.sh.settings.pens.push(state::PenDef { tag: "grace".into(), color: "#FF9F43".into(), style: state::PenStyle::Highlight });
+        select_so_loved(&mut app);
+        let marks = app.sh.marks.len();
+        let pen = app.sh.settings.pens.len() - 1;
+        let _ = app.update(app.b(BibleMsg::ApplyPen(pen)));
+        assert_eq!(app.sh.marks.len(), marks + 1);
+        let mark = app.sh.marks.last().unwrap();
+        assert_eq!((mark.tags.as_slice(), mark.color.as_str()), (&["grace".to_string()][..], "#FF9F43"));
+        // It is a note like any other: its tag is counted.
+        assert!(app.sh.tag_counts().iter().any(|(t, n)| t == "grace" && *n >= 1));
+    }
+
+    #[test]
+    fn settings_files_with_odd_pens_are_repaired() {
+        let s = Settings {
+            pens: vec![
+                state::PenDef { tag: " Promise ".into(), color: "nonsense".into(), style: state::PenStyle::Highlight },
+                state::PenDef { tag: "promise".into(), color: "#112233".into(), style: state::PenStyle::Underline },
+                state::PenDef { tag: "  ".into(), color: "#112233".into(), style: state::PenStyle::Underline },
+            ],
+            ..Settings::default()
+        }
+        .sanitized();
+        assert_eq!(s.pens.len(), 1, "a tag once, and not an empty one");
+        assert_eq!((s.pens[0].tag.as_str(), s.pens[0].color.as_str()), ("promise", "#F5D90A"));
+    }
+
+    #[test]
+    fn a_mark_being_written_in_can_be_tagged_with_autocomplete_and_the_file_follows() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        let id = app.bid();
+        let _ = app.update(app.b(BibleMsg::StartEdit(0)));
+        let path = app.sh.marks[0].path();
+        let before = app.sh.marks[0].tags.clone();
+        // A new tag, typed and entered (in one form).
+        let _ = app.update(Message::Bible(id, BibleMsg::CardTagDraft("  #Hard Sayings".into())));
+        let offered = app.sh.tag_suggestions(&app.bible().card_tag_draft, &app.sh.marks[0].tags, 5);
+        assert!(offered.is_empty(), "nothing in use fits yet");
+        let _ = app.update(Message::Bible(id, BibleMsg::AddCardTag(String::new())));
+        assert!(app.sh.marks[0].tags.contains(&"hard-sayings".to_string()));
+        assert!(app.bible().card_tag_draft.is_empty());
+        assert!(app.sh.notes[&path].contains("hard-sayings"), "in the note file too");
+        // One already in use is offered as it is typed, and picking it adds it.
+        let _ = app.update(Message::Bible(id, BibleMsg::CardTagDraft("new-b".into())));
+        let offered = app.sh.tag_suggestions(&app.bible().card_tag_draft, &app.sh.marks[0].tags, 5);
+        assert_eq!(offered[0].0, "new-birth");
+        let _ = app.update(Message::Bible(id, BibleMsg::AddCardTag("new-birth".into())));
+        assert!(app.sh.marks[0].tags.contains(&"new-birth".to_string()));
+        // The same again changes nothing; taking one off does.
+        let count = app.sh.marks[0].tags.len();
+        let _ = app.update(Message::Bible(id, BibleMsg::AddCardTag("New-Birth".into())));
+        assert_eq!(app.sh.marks[0].tags.len(), count);
+        let _ = app.update(Message::Bible(id, BibleMsg::RemoveCardTag("hard-sayings".into())));
+        assert!(!app.sh.marks[0].tags.contains(&"hard-sayings".to_string()) && !app.sh.notes[&path].contains("hard-sayings"));
+        assert!(before.iter().all(|t| app.sh.marks[0].tags.contains(t)), "the pen's tag stays");
+        // The tag counts follow, so the selector can filter by it.
+        assert!(app.sh.tag_counts().iter().any(|(t, n)| t == "new-birth" && *n >= 2));
+        // The card shows the box while it is written in.
+        let mut h = Harness::new(app);
+        assert!(h.center_of("Add tag").is_some());
+    }
+
+    #[test]
+    fn a_new_note_takes_the_title_typed_as_its_heading_and_file_name() {
+        let mut app = App::new();
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::NewNote));
+        let _ = app.update(Message::Note(id, NoteMsg::PickKind(template_path("Topic"))));
+        assert_eq!(app.note().pending, Some(template_path("Topic")));
+        // Back to the kinds, and on again.
+        let _ = app.update(Message::Note(id, NoteMsg::BackToKinds));
+        assert!(app.note().choosing && app.note().pending.is_none());
+        let _ = app.update(Message::Note(id, NoteMsg::PickKind(template_path("Topic"))));
+        let _ = app.update(Message::Note(id, NoteMsg::NewTitle("Grace and Truth".into())));
+        let mut h = Harness::new(app);
+        let (x, y) = h.center_of("Create").unwrap();
+        h.click(x, y);
+        assert_eq!(h.app.note().path, "notes/Grace and Truth.md");
+        let text = h.app.sh.notes["notes/Grace and Truth.md"].clone();
+        let parsed = study_core::frontmatter::parse(&text);
+        assert_eq!(parsed.front.title.as_deref(), Some("Grace and Truth"));
+        assert!(text.contains("\n# Grace and Truth\n") && text.contains("## Passages"), "{text}");
+        assert!(h.app.note().new_title.is_empty(), "the box starts empty next time");
+        // Blank with a title is a note that starts with its heading; the same title again is numbered.
+        let id = h.app.nid();
+        let _ = h.app.update(Message::Note(id, NoteMsg::NewNote));
+        let _ = h.app.update(Message::Note(id, NoteMsg::PickKind(template_path("Blank"))));
+        let _ = h.app.update(Message::Note(id, NoteMsg::NewTitle("Grace and Truth".into())));
+        let _ = h.app.update(Message::Note(id, NoteMsg::CreateNote(template_path("Blank"))));
+        assert_eq!(h.app.note().path, "notes/Grace and Truth 2.md");
+        assert!(h.app.sh.notes[&h.app.note().path].contains("\n# Grace and Truth\n"));
+        // A title typed before choosing the daily note (a stray one) is not used for it.
+        let _ = h.app.update(Message::Note(id, NoteMsg::NewTitle("Ignored".into())));
+        let _ = h.app.update(Message::Note(id, NoteMsg::CreateNote(template_path("Daily"))));
+        assert!(!h.app.note().path.contains("Ignored"), "{}", h.app.note().path);
+    }
+
+    #[test]
+    fn adding_a_template_file_adds_a_kind_and_editing_its_frontmatter_changes_how_it_behaves() {
+        let mut app = App::new();
+        let id = app.nid();
+        app.sh.notes.insert(
+            "templates/Sermon.md".into(),
+            "---\ntemplate_description: Notes on a sermon.\ntype: sermon\ntags: [sermon]\npreacher: Me\n---\n# {{title}}\n\nPreached {{date}}.\n".into(),
+        );
+        let _ = app.update(Message::Note(id, NoteMsg::NewNote));
+        let mut h = Harness::new(app);
+        assert!(h.center_of("Sermon").is_some() && h.center_of("Notes on a sermon.").is_some(), "the new kind is offered");
+        let (x, y) = h.center_of("Sermon").unwrap();
+        h.click(x, y);
+        let _ = h.app.update(Message::Note(id, NoteMsg::NewTitle("Grace".into())));
+        let (x, y) = h.center_of("Create").unwrap();
+        h.click(x, y);
+        assert_eq!(h.app.note().path, "notes/Grace.md");
+        let text = h.app.sh.notes["notes/Grace.md"].clone();
+        let front = study_core::frontmatter::parse(&text).front;
+        assert_eq!((front.kind.as_deref(), front.tags.as_slice()), (Some("sermon"), &["sermon".to_string()][..]));
+        assert!(front.props.iter().any(|p| p.key == "preacher"), "its own properties come along");
+        assert!(!text.contains("template_"), "the template's logic does not");
+        assert!(text.contains("\n# Grace\n\nPreached 20"), "{text}");
+
+        // The daily template, edited to ask for a title: now it does.
+        let daily = h.app.sh.notes["templates/Daily.md"].replace("template_ask_title: false", "template_ask_title: true");
+        h.app.sh.notes.insert("templates/Daily.md".into(), daily);
+        let id = h.app.nid();
+        let _ = h.app.update(Message::Note(id, NoteMsg::NewNote));
+        let _ = h.app.update(Message::Note(id, NoteMsg::PickKind(template_path("Daily"))));
+        assert_eq!(h.app.note().pending, Some(template_path("Daily")), "it asks for a title now");
+        // And a kind taken away is no longer offered.
+        let _ = h.app.update(Message::Note(id, NoteMsg::CancelNew));
+        h.app.sh.notes.remove("templates/Topic.md");
+        assert!(!h.app.sh.templates().iter().any(|t| t.name == "Topic"));
+    }
+
+    #[test]
+    fn templates_are_notes_to_open_but_not_in_the_tag_counts_or_the_blank_tab_choices() {
+        let app = App::new();
+        assert!(!app.sh.tag_counts().iter().any(|(t, _)| t == "daily" || t == "topic"), "their tags are for the notes made from them");
+        assert!(app.choices().iter().all(|c| !matches!(c, Choice::Note(p) if p.starts_with("templates/"))));
+        assert!(!app.sh.first_ordinary_note().starts_with("templates/"));
+    }
+
+    #[test]
+    fn up_from_a_heading_goes_to_the_blank_line_above_it_in_a_template() {
+        let mut app = App::new();
+        app.open_note("templates/Daily.md".into());
+        let mut h = Harness::new(app);
+        // Focus the writer with a click, then put the caret at the start of the heading.
+        let b = { let id = h.app.note().editor_id(); h.bounds_of(id) };
+        h.click(b.x + b.width - 30.0, b.y + 40.0);
+        let source = h.app.note().doc.source().to_string();
+        let at = source.find("## Reading").unwrap();
+        h.app.note_mut().doc.perform(EditAction::SetCaret { offset: at, extend: false });
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let before = h.app.note().doc.selection().head;
+        h.named(Named::ArrowUp);
+        let after = h.app.note().doc.selection().head;
+        assert!(after < before, "up moved the caret from {before} to {after}");
+        h.named(Named::ArrowUp);
+        let heading = h.app.note().doc.selection().head;
+        assert!(heading < after, "and again, to the heading above the blank line: {after} -> {heading}");
+        // And Down goes back the same way, over the space under a heading.
+        h.named(Named::ArrowDown);
+        let down = h.app.note().doc.selection().head;
+        assert!(down > heading, "down from the heading: {heading} -> {down}");
+        h.named(Named::ArrowDown);
+        assert!(h.app.note().doc.selection().head > down, "and on to the next heading");
+    }
+
+    #[test]
+    fn a_template_is_edited_from_the_pencil_by_its_kind_not_found_by_searching() {
+        let mut app = App::new();
+        let id = app.nid();
+        let none = std::collections::BTreeSet::new();
+        assert!(crate::note_tab::groups(&app.sh, "daily", &none).iter().flat_map(|g| &g.notes).all(|(p, _)| !p.starts_with("templates/")));
+        assert!(crate::note_tab::groups(&app.sh, "template_description", &none).is_empty(), "nor by what they say");
+        let _ = app.update(Message::Note(id, NoteMsg::NewNote));
+        let _ = app.update(Message::Note(id, NoteMsg::EditTemplate(template_path("Daily"))));
+        assert!(!app.note().choosing);
+        assert_eq!(app.note().path, "templates/Daily.md", "the template opens as a note");
     }
 
     // ---- where links open ------------------------------------------------------------------
@@ -4850,7 +5843,7 @@ mod tests {
         app.bible_mut().show_strongs = true;
         let mut h = Harness::new(app);
         h.click_scan(is_word).expect("a Strong's word");
-        let Some(NoteCard { content: NoteContent::Word { key, .. } }) = &h.app.bible().note_card else { unreachable!() };
+        let Some(NoteCard { content: NoteContent::Word { key, .. }, .. }) = &h.app.bible().note_card else { unreachable!() };
         let key = key.clone();
         let (x, y) = h.center_of("Open in tab").expect("a button on the card");
         h.click(x, y);
@@ -5063,14 +6056,19 @@ mod tests {
     }
 
     #[test]
-    fn the_note_menu_holds_rename_and_delete_and_closes_when_used_or_left() {
+    fn the_note_menu_holds_new_rename_and_delete_and_closes_when_used_or_left() {
         let mut app = App::new();
         let id = app.nid();
         let _ = app.update(Message::Note(id, NoteMsg::ToggleMenu));
         assert!(app.note().menu_open);
         let mut h = Harness::new(app);
-        assert!(h.center_of("Rename").is_some() && h.center_of("Delete").is_some(), "both are in the menu");
+        assert!(h.center_of("New note\u{2026}").is_some(), "a new note is started from the menu");
+        assert!(h.center_of("Rename").is_some() && h.center_of("Delete").is_some(), "with rename and delete");
         let mut app = h.app;
+        let _ = app.update(Message::Note(id, NoteMsg::NewNote));
+        assert!(!app.note().menu_open && app.note().choosing, "choosing it closes the menu and asks what kind");
+        let _ = app.update(Message::Note(id, NoteMsg::CancelNew));
+        let _ = app.update(Message::Note(id, NoteMsg::ToggleMenu));
         let _ = app.update(Message::Note(id, NoteMsg::StartRename));
         assert!(!app.note().menu_open && app.note().renaming.is_some());
         let _ = app.update(Message::Note(id, NoteMsg::CancelRename));
@@ -5532,9 +6530,10 @@ mod tests {
     #[test]
     fn clicking_another_card_moves_the_edit_to_it() {
         let (mut h, _) = editing_in_the_margin();
-        // The start of its first line: plain text, not the link further along.
-        let b = h.bounds_of_text(ETERNAL).expect("another card");
-        h.click(b.x + 6.0, b.y + 8.0);
+        // The other note is underneath the one being written (they are one stack), so it is
+        // reached through its mark in the text.
+        let id = h.app.bid();
+        let _ = h.app.update(Message::Bible(id, BibleMsg::MarksClicked(vec![1])));
         assert_eq!(h.app.bible().editing, Some(1), "now writing in the card that was clicked");
     }
 

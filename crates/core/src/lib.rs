@@ -6,6 +6,7 @@ pub mod frontmatter;
 pub mod margin;
 pub mod markdown;
 pub mod mock;
+pub mod templates;
 
 use ast::Chapter;
 use scripture::{Book, RefRange};

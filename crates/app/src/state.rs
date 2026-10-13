@@ -14,8 +14,8 @@ use std::{fs, io};
 
 // ---- settings ------------------------------------------------------------------------------
 
-pub const READING_SIZES: RangeInclusive<f32> = 12.0..=36.0;
-pub const NOTE_SIZES: RangeInclusive<f32> = 12.0..=32.0;
+pub const BIBLE_SIZES: RangeInclusive<f32> = 12.0..=36.0;
+pub const NOTES_SIZES: RangeInclusive<f32> = 12.0..=32.0;
 
 /// How the app looks. Changing one takes effect at once and is saved at once.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -23,17 +23,62 @@ pub const NOTE_SIZES: RangeInclusive<f32> = 12.0..=32.0;
 pub struct Settings {
     /// The color scheme: the name of one of iced's themes ("Dark", "Light", "Nord", …).
     pub theme: String,
-    /// Size of the Bible text.
-    pub reading_size: f32,
-    /// Size of the text in notes and margin cards.
-    pub note_size: f32,
+    /// Size of the text in Bible panes: the reading text and everything beside it (footnotes,
+    /// dictionary entries, margin cards). Other text in the pane is in proportion.
+    #[serde(alias = "reading_size")]
+    pub bible_size: f32,
+    /// Size of the text in note panes.
+    #[serde(alias = "note_size")]
+    pub notes_size: f32,
     /// The family the Bible and notes are set in; `None` is the interface font.
     pub font: Option<String>,
+    /// The pens: each is a shortcut for making a note on the selected text with a tag, in a color.
+    pub pens: Vec<PenDef>,
+}
+
+/// How a pen marks the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PenStyle {
+    Highlight,
+    Underline,
+}
+
+/// A pen: a tag, the color of the tag (and of its marks) and how the text is marked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PenDef {
+    pub tag: String,
+    /// `#RRGGBB`.
+    pub color: String,
+    pub style: PenStyle,
+}
+
+impl PenDef {
+    /// What the pen is called on the toolbar: its tag, capitalized.
+    pub fn name(&self) -> String {
+        let last = self.tag.rsplit('/').next().unwrap_or(&self.tag).replace('-', " ");
+        let mut chars = last.chars();
+        chars.next().map_or_else(String::new, |f| f.to_uppercase().chain(chars).collect())
+    }
+}
+
+/// The colors a pen can be.
+pub const PEN_COLORS: [&str; 8] = ["#F5D90A", "#4DA3FF", "#5FD38D", "#FF7AB6", "#FF9F43", "#B388FF", "#2EC4B6", "#FF6B6B"];
+
+/// The pens a new vault starts with.
+pub fn default_pens() -> Vec<PenDef> {
+    let pen = |tag: &str, color: &str, style| PenDef { tag: tag.into(), color: color.into(), style };
+    vec![
+        pen("promise", "#F5D90A", PenStyle::Highlight),
+        pen("command", "#4DA3FF", PenStyle::Underline),
+        pen("growth", "#5FD38D", PenStyle::Highlight),
+        pen("prayer", "#FF7AB6", PenStyle::Highlight),
+    ]
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: Theme::Dark.to_string(), reading_size: 19.0, note_size: 17.0, font: None }
+        Settings { theme: Theme::Dark.to_string(), bible_size: 19.0, notes_size: 17.0, font: None, pens: default_pens() }
     }
 }
 
@@ -41,9 +86,22 @@ impl Settings {
     /// Settings that make sense, whatever the file said.
     pub fn sanitized(mut self) -> Self {
         let fix = |v: f32, r: &RangeInclusive<f32>, default: f32| if v.is_finite() { v.clamp(*r.start(), *r.end()) } else { default };
-        self.reading_size = fix(self.reading_size, &READING_SIZES, 19.0);
-        self.note_size = fix(self.note_size, &NOTE_SIZES, 17.0);
+        self.bible_size = fix(self.bible_size, &BIBLE_SIZES, 19.0);
+        self.notes_size = fix(self.notes_size, &NOTES_SIZES, 17.0);
         self.font = self.font.filter(|f| !f.trim().is_empty());
+        // Pens: tags in one form, each once, colors that are colors.
+        let mut seen = Vec::new();
+        self.pens.retain_mut(|pen| {
+            pen.tag = study_core::frontmatter::normalize_tag(&pen.tag);
+            let color_ok = pen.color.len() == 7 && pen.color.starts_with('#') && pen.color[1..].chars().all(|c| c.is_ascii_hexdigit());
+            if !color_ok {
+                pen.color = PEN_COLORS[0].to_string();
+            }
+            let fresh = !pen.tag.is_empty() && !seen.contains(&pen.tag);
+            seen.push(pen.tag.clone());
+            fresh
+        });
+        self.pens.truncate(12);
         self
     }
 
@@ -126,9 +184,37 @@ pub struct PaneSave {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TabSave {
     Blank,
-    Bible { module: String, book: String, chapter: u16, scroll: f32, strongs: bool, marks: bool, footnotes: bool, refs: bool },
+    Bible {
+        module: String,
+        book: String,
+        chapter: u16,
+        scroll: f32,
+        strongs: bool,
+        marks: bool,
+        footnotes: bool,
+        refs: bool,
+        /// Which kinds of note sit in the margin; sessions saved before that was a choice have
+        /// the default.
+        #[serde(default)]
+        in_margin: MarginKinds,
+    },
     Note { path: String },
     Dict { module: String, key: String },
+}
+
+/// Which kinds of note sit in a reader's margin (the rest pop over the text where clicked).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarginKinds {
+    pub strongs: bool,
+    pub marks: bool,
+    pub footnotes: bool,
+    pub refs: bool,
+}
+
+impl Default for MarginKinds {
+    fn default() -> Self {
+        MarginKinds { strongs: false, marks: true, footnotes: true, refs: false }
+    }
 }
 
 /// A workspace the user saved under a name.
@@ -219,6 +305,7 @@ mod tests {
                         marks: true,
                         footnotes: false,
                         refs: true,
+                        in_margin: MarginKinds { strongs: true, marks: false, footnotes: true, refs: true },
                     }],
                     active: Some(0),
                 },
@@ -237,7 +324,7 @@ mod tests {
         assert_eq!(store.session(), None);
         assert!(store.layouts().is_empty());
 
-        let settings = Settings { theme: "Nord".into(), reading_size: 22.0, note_size: 15.0, font: Some("Georgia".into()) };
+        let settings = Settings { theme: "Nord".into(), bible_size: 22.0, notes_size: 15.0, font: Some("Georgia".into()), pens: default_pens() };
         store.save_settings(&settings).unwrap();
         store.save_session(&sample()).unwrap();
         store.save_layouts(&[NamedLayout { name: "Study".into(), workspace: sample() }]).unwrap();
@@ -266,8 +353,8 @@ mod tests {
         fs::write(dir.path().join("settings.json"), r#"{ "theme": "Dracula", "reading_size": 400, "font": "" }"#).unwrap();
         let s = store.settings();
         assert_eq!(s.theme, "Dracula");
-        assert_eq!(s.reading_size, *READING_SIZES.end());
-        assert_eq!(s.note_size, 17.0, "missing: the default");
+        assert_eq!(s.bible_size, *BIBLE_SIZES.end());
+        assert_eq!(s.notes_size, 17.0, "missing: the default");
         assert_eq!(s.font, None);
         assert_eq!(s.theme(), Theme::Dracula);
         assert_eq!(Settings { theme: "Nonsense".into(), ..Settings::default() }.theme(), Theme::Dark);

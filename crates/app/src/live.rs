@@ -247,7 +247,16 @@ pub fn boot_at(home: &Path, roots: &[PathBuf], reseed: bool) -> Boot {
             status = format!("Could not write the sample notes: {e}");
         }
     }
-    let notes = vault.read_all().unwrap_or_default();
+    let mut notes = vault.read_all().unwrap_or_default();
+    // A vault with no templates gets the starting ones, as files to edit (they are the kinds of
+    // note there are: more files are more kinds).
+    if !notes.keys().any(|p| study_core::templates::is_template(p)) {
+        for (path, text) in study_core::templates::builtin() {
+            if vault.write(&path, &text).is_ok() {
+                notes.insert(path, text);
+            }
+        }
+    }
     // The index is a cache: if it cannot open, the app works without it.
     let index = vault::Index::open(&home.join("cache").join("index.sqlite")).ok().and_then(|mut ix| {
         ix.sync(&notes).ok()?;
@@ -397,5 +406,23 @@ mod tests {
         assert!(boot.persist.is_none());
         assert!(boot.status.contains("No readable SWORD modules"));
         assert!(!home.path().join("vault").exists());
+    }
+
+    #[test]
+    fn a_vault_without_templates_gets_the_starting_ones_as_files_once() {
+        let home = tempfile::tempdir().unwrap();
+        let first = boot_at(home.path(), &roots(), false);
+        if first.persist.is_none() {
+            return eprintln!("skipped: no readable modules");
+        }
+        let is_template = |notes: &BTreeMap<String, String>| notes.keys().filter(|p| study_core::templates::is_template(p)).count();
+        assert_eq!(is_template(&first.notes), 4);
+        assert!(home.path().join("vault/templates/Daily.md").exists(), "on disk, to be edited");
+        // Edited, and one taken away: nothing is put back over them.
+        std::fs::write(home.path().join("vault/templates/Daily.md"), "---\ntemplate_description: Mine.\n---\n").unwrap();
+        std::fs::remove_file(home.path().join("vault/templates/Blank.md")).unwrap();
+        let second = boot_at(home.path(), &roots(), false);
+        assert_eq!(is_template(&second.notes), 3);
+        assert!(second.notes["templates/Daily.md"].contains("Mine."));
     }
 }

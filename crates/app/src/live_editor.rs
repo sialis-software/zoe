@@ -493,7 +493,26 @@ impl<Message> LiveEditor<'_, Message> {
         if y >= state.content_h - self.padding.y() {
             return Some(self.doc.source().len());
         }
-        Some(self.offset_at(state, Point::new(goal, y)))
+        let head = self.doc.selection().head;
+        let found = self.offset_at(state, Point::new(goal, y));
+        if found != head {
+            return Some(found);
+        }
+        // The step landed in the same block: the space above a heading (or below it) is bigger
+        // than the step. Go on to the block before or after that has a line to land on (the
+        // properties at the top are blocks with no height), at the end or start of it.
+        let at = self.doc.block_index_at(head);
+        let beside = |l: &&Laid| l.total_h() > 0.0;
+        let target = if up {
+            state.laid.get(..at).and_then(|before| before.iter().rev().find(beside)).map(|l| l.y + (l.h - 1.0).max(0.0))
+        } else {
+            state.laid.get(at + 1..).and_then(|after| after.iter().find(beside)).map(|l| l.y + 1.0)
+        };
+        match target {
+            Some(y) => Some(self.offset_at(state, Point::new(goal, y))),
+            None if up => Some(0),
+            None => Some(self.doc.source().len()),
+        }
     }
 
     fn content_point(&self, state: &State, bounds: Rectangle, cursor: mouse::Cursor) -> Option<Point> {

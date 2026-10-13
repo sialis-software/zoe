@@ -171,6 +171,18 @@ pub struct Edit {
     pub text: String,
 }
 
+/// A tag as it is kept: lower case, no `#`, words joined with dashes (`Daily reading` is
+/// `daily-reading`), `/` kept for tags inside tags (`topic/grace`).
+pub fn normalize_tag(tag: &str) -> String {
+    let tag = tag.trim().trim_start_matches('#').trim().to_lowercase();
+    let parts: Vec<String> = tag
+        .split('/')
+        .map(|part| part.split_whitespace().collect::<Vec<_>>().join("-"))
+        .filter(|part| !part.is_empty())
+        .collect();
+    parts.join("/")
+}
+
 /// The kinds of note the app offers (`type:`). Any other value written by hand is kept and shown.
 pub const KINDS: [&str; 4] = ["prayer", "sermon", "study", "journal"];
 
@@ -303,11 +315,11 @@ impl Frontmatter {
     }
 
     pub fn add_tag(&mut self, tag: &str) -> bool {
-        let tag = tag.trim().trim_start_matches('#').trim();
-        if tag.is_empty() || self.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+        let tag = normalize_tag(tag);
+        if tag.is_empty() || self.tags.iter().any(|t| normalize_tag(t) == tag) {
             return false;
         }
-        self.tags.push(tag.to_string());
+        self.tags.push(tag);
         true
     }
 }
@@ -455,7 +467,7 @@ mod tests {
         assert!(f.add_tag("  #Grace "));
         assert!(!f.add_tag("grace"), "the same tag, any case");
         assert!(!f.add_tag("   "));
-        assert_eq!(f.tags, ["Grace"]);
+        assert_eq!(f.tags, ["grace"], "kept in one form");
     }
 
     #[test]
@@ -473,5 +485,17 @@ mod tests {
         assert_eq!(display("2026-10-12T23:41:05-07:00"), "Oct 12, 2026 · 11:41 PM");
         assert_eq!(display("2026-01-05T08:05:00+00:00"), "Jan 5, 2026 · 8:05 AM");
         assert_eq!(display("not a time"), "not a time");
+    }
+
+    #[test]
+    fn tags_are_kept_in_one_form_so_that_the_same_tag_is_the_same_tag() {
+        assert_eq!(normalize_tag("  #Daily Reading "), "daily-reading");
+        assert_eq!(normalize_tag("Topic / Grace"), "topic/grace");
+        assert_eq!(normalize_tag("##"), "");
+        let mut front = Frontmatter::default();
+        assert!(front.add_tag("#Promise"));
+        assert!(!front.add_tag("promise"), "the same tag again is not added");
+        assert!(!front.add_tag("  "));
+        assert_eq!(front.tags, ["promise"]);
     }
 }

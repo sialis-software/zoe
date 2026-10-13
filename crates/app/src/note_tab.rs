@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use study_core::frontmatter::{self, Frontmatter, PropType, Property, Value};
 use study_core::margin::MarkStyle;
 use study_core::markdown::LinkTarget;
+use study_core::templates;
 
 /// Height of a header bar control: a pick list in the Bible tab's toolbar is this tall, so the
 /// bars of the two tab types match.
@@ -85,10 +86,27 @@ pub enum NoteMsg {
     CloseMenu,
     PickerQuery(String),
     ToggleGroup(String),
+    /// Narrow the list to a tag, or lift that again.
+    PickerTag(String),
+    ClearPickerTags,
     /// A new note, made with its properties in place.
+    /// Ask what kind of note to start.
     NewNote,
+    /// A kind was chosen in that dialog: the others then ask for a title, the daily note (whose
+    /// title is the date) is made at once.
+    PickKind(String),
+    /// Open this template to change what a note of its kind starts with.
+    EditTemplate(String),
+    /// The title typed in that dialog, and back to the choice of kind.
+    NewTitle(String),
+    BackToKinds,
+    CancelNew,
+    /// Start a note from this template.
+    CreateNote(String),
     // The properties strip
     TagDraft(String),
+    /// Add this existing tag (from the suggestions).
+    PickTag(String),
     AddTag,
     RemoveTag(String),
     /// Give a note that has none its frontmatter, stamped with the time.
@@ -104,6 +122,127 @@ pub enum NoteMsg {
     NewKey(String),
     NewType(PropType),
     AddProp,
+}
+
+/// The box for a new tag: rounded, and only a little lighter under the pointer.
+fn tag_box_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let base = text_input::default(theme, status);
+    let palette = theme.extended_palette();
+    let edge = match status {
+        text_input::Status::Active => palette.background.strong.color,
+        text_input::Status::Hovered => iced::Color { a: 0.8, ..palette.background.strong.color },
+        text_input::Status::Focused { .. } => palette.primary.base.color,
+        text_input::Status::Disabled => palette.background.weak.color,
+    };
+    let edge = if matches!(status, text_input::Status::Hovered) {
+        // A hint of the focused color, not the whole of it.
+        iced::Color {
+            r: (edge.r + palette.primary.weak.color.r) / 2.0,
+            g: (edge.g + palette.primary.weak.color.g) / 2.0,
+            b: (edge.b + palette.primary.weak.color.b) / 2.0,
+            a: edge.a,
+        }
+    } else {
+        edge
+    };
+    text_input::Style { border: iced::Border { color: edge, width: 1.0, radius: 12.0.into() }, ..base }
+}
+
+/// A tag as a button: filled when it is chosen, and in its color if a pen is for it.
+fn tag_chip_style(theme: &Theme, status: button::Status, on: bool, color: Option<iced::Color>) -> button::Style {
+    let pointed = matches!(status, button::Status::Hovered) && !on;
+    // Pointed at, a chip only lifts a little: the standard hover of a `secondary` button is a lot.
+    let calm = if pointed { button::Status::Active } else { status };
+    let base = if on { button::primary(theme, calm) } else { button::secondary(theme, calm) };
+    let mut style = button::Style { border: iced::Border { radius: 12.0.into(), ..base.border }, ..base };
+    if let Some(color) = color {
+        style.text_color = if on { theme.extended_palette().background.base.text } else { color };
+        style.border = iced::Border { color, width: 1.0, radius: 12.0.into() };
+        style.background = Some(iced::Color { a: if on { 0.55 } else if pointed { 0.22 } else { 0.12 }, ..color }.into());
+    } else if pointed
+        && let Some(iced::Background::Color(c)) = style.background
+    {
+        let t = theme.extended_palette().background.base.text;
+        let lift = |a: f32, b: f32| a + (b - a) * 0.12;
+        style.background = Some(iced::Color { r: lift(c.r, t.r), g: lift(c.g, t.g), b: lift(c.b, t.b), a: c.a }.into());
+    }
+    style
+}
+
+/// The color of tag `tag`, if it has one.
+fn tag_color(sh: &Shared, tag: &str) -> Option<iced::Color> {
+    sh.tag_color(tag).and_then(|hex| crate::bible_tab::hex_color(&hex, 1.0))
+}
+
+fn new_title_id() -> iced::widget::Id {
+    iced::widget::Id::new("new-note-title")
+}
+
+/// The dialog that asks what kind of note to start: a dimmed backdrop (a click on it cancels) and
+/// the choices.
+fn template_dialog<'a>(sh: &Shared, title: &str, pending: Option<&str>) -> (Element<'a, NoteMsg>, Element<'a, NoteMsg>) {
+    let dim = mouse_area(
+        container(space::horizontal()).width(Length::Fill).height(Length::Fill).style(|_: &Theme| container::Style {
+            background: Some(iced::Color { a: 0.55, ..iced::Color::BLACK }.into()),
+            ..container::Style::default()
+        }),
+    )
+    .on_press(NoteMsg::CancelNew)
+    .into();
+    let content: Element<'a, NoteMsg> = match pending.and_then(|p| sh.templates().into_iter().find(|t| t.path == p)) {
+        // The kind is chosen: now what to call it.
+        Some(template) => column![
+            text(format!("New {}", template.name.to_lowercase())).size(17),
+            text_input("Title", title)
+                .id(new_title_id())
+                .on_input(NoteMsg::NewTitle)
+                .on_submit(NoteMsg::CreateNote(template.path.clone()))
+                .size(14)
+                .padding(6),
+            text("It is the note's heading and its file name.").size(12).style(text::secondary),
+            row![
+                button(text("Back").size(14)).padding([6, 14]).style(button::text).on_press(NoteMsg::BackToKinds),
+                space::horizontal(),
+                button(text("Cancel").size(14)).padding([6, 14]).style(button::secondary).on_press(NoteMsg::CancelNew),
+                button(text("Create").size(14)).padding([6, 14]).on_press(NoteMsg::CreateNote(template.path.clone())),
+            ]
+            .spacing(8),
+        ]
+        .spacing(10)
+        .into(),
+        // First, what kind.
+        None => {
+            let mut choices = column![].spacing(4);
+            for template in sh.templates() {
+                choices = choices.push(
+                    row![
+                        button(column![text(template.name.clone()).size(15), text(template.description.clone()).size(12).style(text::secondary)].spacing(2))
+                            .width(Length::Fill)
+                            .padding([8, 12])
+                            .style(button::text)
+                            .on_press(NoteMsg::PickKind(template.path.clone())),
+                        // For those who want a kind to start differently: its template is a note.
+                        iced::widget::tooltip(
+                            button(crate::icons::Icon::Pencil.view(14.0)).padding(6).style(button::text).on_press(NoteMsg::EditTemplate(template.path.clone())),
+                            container(text("Edit this template").size(12)).padding(4).style(container::rounded_box),
+                            iced::widget::tooltip::Position::Left,
+                        ),
+                    ]
+                    .align_y(iced::Center),
+                );
+            }
+            column![
+                text("New note").size(17),
+                text("What kind?").size(13).style(text::secondary),
+                choices,
+                row![space::horizontal(), button(text("Cancel").size(14)).padding([6, 14]).style(button::secondary).on_press(NoteMsg::CancelNew)],
+            ]
+            .spacing(10)
+            .into()
+        }
+    };
+    let dialog = container(content).padding(18).width(380).style(crate::popup_style);
+    (dim, container(opaque(dialog)).center(Length::Fill).into())
 }
 
 /// A kind of note for the type picker: none, or one of the app's, or one written by hand.
@@ -144,6 +283,8 @@ enum Deleting {
 #[derive(Default)]
 pub struct Picker {
     pub query: String,
+    /// The tags the list is narrowed to (a note must have all of them).
+    pub tags: BTreeSet<String>,
     /// Groups the person opened or closed by hand, against their usual state: the group of
     /// the open note starts open, the rest closed.
     pub toggled: BTreeSet<String>,
@@ -158,6 +299,12 @@ pub struct NoteTab {
     pub picker: Option<Picker>,
     /// The confirmation to delete the open margin note is showing.
     pub confirm_delete: bool,
+    /// The dialog that asks what kind of note to start is showing.
+    pub choosing: bool,
+    /// The title typed in it.
+    pub new_title: String,
+    /// The kind chosen, while its title is asked for.
+    pub pending: Option<String>,
     /// What is being typed in the strip's tag box.
     pub tag_draft: String,
     /// The name being typed, while the note is being renamed.
@@ -203,50 +350,65 @@ pub fn label_of(sh: &Shared, path: &str) -> String {
     if stem.is_empty() { "Note".into() } else { stem.to_string() }
 }
 
-/// The type of note a path is: by its top folder.
-fn group_of(path: &str) -> (String, String) {
-    let top = path.split_once('/').map_or("notes", |(top, _)| top);
-    let label = match top {
-        "notes" => "Notes".to_string(),
-        "margins" => "Margin notes".to_string(),
-        other => {
-            let mut c = other.chars();
-            c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
-        }
-    };
-    (top.to_string(), label)
+/// Whether a note with `have` among its tags is under tag `wanted`: that tag, or one inside it
+/// (`topic/grace` is under `topic`).
+pub fn under_tag(have: &[String], wanted: &str) -> bool {
+    have.iter().any(|t| {
+        let t = frontmatter::normalize_tag(t);
+        t == wanted || t.starts_with(&format!("{wanted}/"))
+    })
 }
 
-/// Every note, grouped by type: Notes first, other types alphabetically, margin notes last. A
-/// `query` keeps only the notes whose name or text contains it (any case).
-pub fn groups(sh: &Shared, query: &str) -> Vec<Group> {
-    let q = query.trim().to_lowercase();
-    let mut out: Vec<Group> = Vec::new();
-    for (path, body) in sh.notes.iter() {
-        let label = label_of(sh, path);
-        if !q.is_empty() && !label.to_lowercase().contains(&q) && !path.to_lowercase().contains(&q) && !body.to_lowercase().contains(&q) {
-            continue;
-        }
-        let (key, group_label) = group_of(path);
-        match out.iter_mut().find(|g| g.key == key) {
-            Some(g) => g.notes.push((path.clone(), label)),
-            None => out.push(Group { key, label: group_label, notes: vec![(path.clone(), label)] }),
+/// The notes in the selector: the ordinary ones, then the margin notes (which are tagged too).
+/// Not the templates.
+/// Notes are found by tag, not folder. `query` is words that must each be in a note's name,
+/// text or tags (any case), and `#words` that must each be in one of its tags; `tags` are tags a
+/// note must be under.
+pub fn groups(sh: &Shared, query: &str, tags: &BTreeSet<String>) -> Vec<Group> {
+    let query = query.trim().to_lowercase();
+    let (mut words, mut wanted_tags) = (Vec::new(), Vec::new());
+    for token in query.split_whitespace() {
+        match token.strip_prefix('#') {
+            Some(tag) if !tag.is_empty() => wanted_tags.push(frontmatter::normalize_tag(tag)),
+            Some(_) => {}
+            None => words.push(token),
         }
     }
-    let rank = |key: &str| match key {
-        "notes" => 0,
-        "margins" => 2,
-        _ => 1,
-    };
-    out.sort_by(|a, b| rank(&a.key).cmp(&rank(&b.key)).then(a.label.cmp(&b.label)));
+    let mut out: Vec<Group> = Vec::new();
+    for (path, body) in sh.notes.iter() {
+        let have = sh.tags_of(path);
+        if !tags.iter().all(|t| under_tag(&have, t)) {
+            continue;
+        }
+        let normalized: Vec<String> = have.iter().map(|t| frontmatter::normalize_tag(t)).collect();
+        if !wanted_tags.iter().all(|w| normalized.iter().any(|t| t.contains(w.as_str()))) {
+            continue;
+        }
+        let label = label_of(sh, path);
+        let (name, text, tag_text) = (label.to_lowercase(), body.to_lowercase(), normalized.join(" "));
+        if !words.iter().all(|w| name.contains(w) || path.to_lowercase().contains(w) || text.contains(w) || tag_text.contains(w)) {
+            continue;
+        }
+        // The templates are not among the notes found: changing what a kind of note starts with
+        // is for those who go looking (the pencil by a kind in the New note dialog).
+        if templates::is_template(path) {
+            continue;
+        }
+        let (key, group_label) = if path.starts_with("margins/") { ("margins", "Margin notes") } else { ("notes", "Notes") };
+        match out.iter_mut().find(|g| g.key == key) {
+            Some(g) => g.notes.push((path.clone(), label)),
+            None => out.push(Group { key: key.into(), label: group_label.into(), notes: vec![(path.clone(), label)] }),
+        }
+    }
+    out.sort_by_key(|g| g.key == "margins");
     for g in &mut out {
         // Margin notes keep their order in the canon; the rest go by name. When searching,
         // notes whose name matches come before those that only mention it.
         if g.key != "margins" {
             g.notes.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
         }
-        if !q.is_empty() {
-            g.notes.sort_by_key(|(_, label)| !label.to_lowercase().contains(&q));
+        if let Some(first) = words.first() {
+            g.notes.sort_by_key(|(_, label)| !label.to_lowercase().contains(first));
         }
     }
     out
@@ -255,7 +417,7 @@ pub fn groups(sh: &Shared, query: &str) -> Vec<Group> {
 impl Picker {
     /// Whether a group shows its notes: always while searching, else as the person left it.
     pub fn is_open(&self, group: &Group, current: &str) -> bool {
-        if !self.query.trim().is_empty() {
+        if !self.query.trim().is_empty() || !self.tags.is_empty() || group.key == "notes" {
             return true;
         }
         let usual = group.notes.iter().any(|(p, _)| p == current);
@@ -273,6 +435,9 @@ impl NoteTab {
             doc,
             picker: None,
             confirm_delete: false,
+            choosing: false,
+            new_title: String::new(),
+            pending: None,
             tag_draft: String::new(),
             renaming: None,
             menu_open: false,
@@ -353,15 +518,15 @@ impl NoteTab {
         sh.notes.insert(self.path.clone(), self.doc.source().to_string());
     }
 
-    /// Make a new note, named so as not to clash, and open it.
-    fn new_note(&mut self, sh: &mut Shared) {
-        let path = (1..)
-            .map(|n| if n == 1 { "notes/Untitled.md".to_string() } else { format!("notes/Untitled {n}.md") })
-            .find(|p| !sh.notes.contains_key(p))
-            .unwrap_or_default();
-        let title = path.trim_end_matches(".md").rsplit('/').next().unwrap_or_default().to_string();
-        sh.notes.insert(path.clone(), frontmatter::new_note(Some(&title)));
-        self.open(sh, path);
+    /// Start a note from `template` and show it (today's daily note, if there is one, is shown as
+    /// it is).
+    fn new_note(&mut self, sh: &mut Shared, template: &str, title: Option<&str>) {
+        let Some(template) = sh.templates().into_iter().find(|t| t.path == template) else { return };
+        let made = templates::plan(&template, &chrono::Local::now(), title, |path| sh.notes.contains_key(path));
+        if let Some(text) = made.text {
+            sh.notes.insert(made.path.clone(), text);
+        }
+        self.open(sh, made.path);
     }
 
     /// Index of the mark whose file is open here.
@@ -451,8 +616,46 @@ impl NoteTab {
                     }
                 }
             }
-            NoteMsg::NewNote => self.new_note(sh),
+            NoteMsg::NewNote => {
+                self.menu_open = false;
+                self.choosing = true;
+                self.new_title.clear();
+                self.pending = None;
+            }
+            NoteMsg::PickKind(path) => {
+                // A kind that is made at once (the daily note, named by its date) asks for nothing.
+                if sh.templates().iter().any(|t| t.path == path && !t.ask_title) {
+                    return self.update(sh, NoteMsg::CreateNote(path));
+                }
+                self.pending = Some(path);
+                self.new_title.clear();
+                task = iced::widget::operation::focus(new_title_id());
+            }
+            NoteMsg::EditTemplate(path) => {
+                self.choosing = false;
+                self.pending = None;
+                self.open(sh, path);
+            }
+            NoteMsg::NewTitle(title) => self.new_title = title,
+            NoteMsg::BackToKinds => self.pending = None,
+            NoteMsg::CancelNew => {
+                self.choosing = false;
+                self.pending = None;
+            }
+            NoteMsg::CreateNote(template) => {
+                self.choosing = false;
+                self.pending = None;
+                // (A kind that asks for no title is not given the one typed.)
+                let title = std::mem::take(&mut self.new_title);
+                self.new_note(sh, &template, Some(&title));
+            }
             NoteMsg::TagDraft(draft) => self.tag_draft = draft,
+            NoteMsg::PickTag(tag) => {
+                self.tag_draft.clear();
+                self.change_properties(sh, |f| {
+                    f.add_tag(&tag);
+                });
+            }
             NoteMsg::AddTag => {
                 let tag = std::mem::take(&mut self.tag_draft);
                 self.change_properties(sh, |f| {
@@ -512,6 +715,18 @@ impl NoteTab {
                     self.drafts.clear();
                     self.change_properties(sh, |f| f.props.push(Property { key, value: Value::empty(kind) }));
                     self.new_key.clear();
+                }
+            }
+            NoteMsg::PickerTag(tag) => {
+                if let Some(p) = &mut self.picker
+                    && !p.tags.remove(&tag)
+                {
+                    p.tags.insert(tag);
+                }
+            }
+            NoteMsg::ClearPickerTags => {
+                if let Some(p) = &mut self.picker {
+                    p.tags.clear();
                 }
             }
             NoteMsg::ToggleGroup(key) => {
@@ -604,46 +819,49 @@ impl NoteTab {
             .on_link_drag(NoteMsg::LinkDrag)
             .embed(move |target| sh.embed_for(&embed_module, target))
             .placeholder("Write here…")
-            .size(sh.settings.note_size)
+            .size(sh.settings.notes_size)
             .font(sh.settings.text_font())
             .padding(16)
             .height(Length::Fill);
         pane = pane.push(editor);
 
-        if self.confirm_delete {
+        // A pop-up, or the delete dialog, goes over the note. The two layers it takes are always
+        // in the tree, empty when there is none, so that opening one does not rebuild the editor
+        // beneath (which would lose where it was scrolled).
+        let nothing = || -> Element<'a, NoteMsg> { space::horizontal().width(0).height(0).into() };
+        let dismiss = |msg: NoteMsg| -> Element<'a, NoteMsg> {
+            mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill)).on_press(msg).into()
+        };
+        let (behind, front): (Element<'a, NoteMsg>, Element<'a, NoteMsg>) = if self.choosing {
+            template_dialog(sh, &self.new_title, self.pending.as_deref())
+        } else if self.confirm_delete {
             let what = match self.open_mark_index(sh).and_then(|i| sh.marks.get(i)) {
                 Some(mark) => Deleting::Margin(mark.anchor.to_string()),
                 None => Deleting::Note(label_of(sh, &self.path)),
             };
-            return self.confirmation(pane.into(), what);
-        }
-        if self.menu_open {
-            let dismiss = mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill))
-                .on_press(NoteMsg::CloseMenu);
+            self.confirmation(what)
+        } else if self.menu_open {
             let panel = container(opaque(self.menu_panel(sh)))
                 .padding(iced::Padding { top: PANEL_TOP, right: 16.0, bottom: 0.0, left: 0.0 })
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(iced::alignment::Horizontal::Right);
-            return stack![pane, dismiss, panel].into();
-        }
-        match &self.picker {
-            None => pane.into(),
+            (dismiss(NoteMsg::CloseMenu), panel.into())
+        } else if let Some(picker) = &self.picker {
             // The panel sits over the note under the selector; a click anywhere else closes it.
-            Some(picker) => {
-                let dismiss = mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill))
-                    .on_press(NoteMsg::ClosePicker);
-                let panel = container(opaque(self.panel(sh, picker)))
-                    .padding(iced::Padding { top: PANEL_TOP, right: 0.0, bottom: 0.0, left: 16.0 })
-                    .width(Length::Fill)
-                    .height(Length::Fill);
-                stack![pane, dismiss, panel].into()
-            }
-        }
+            let panel = container(opaque(self.panel(sh, picker)))
+                .padding(iced::Padding { top: PANEL_TOP, right: 0.0, bottom: 0.0, left: 16.0 })
+                .width(Length::Fill)
+                .height(Length::Fill);
+            (dismiss(NoteMsg::ClosePicker), panel.into())
+        } else {
+            (nothing(), nothing())
+        };
+        stack![pane, behind, front].into()
     }
 
-    /// What can be done to the note: rename it (not a margin note, which is named by its passage),
-    /// delete it.
+    /// What can be done: start a new note, rename this one (not a margin note, which is named by
+    /// its passage), delete it.
     fn menu_panel<'a>(&self, sh: &Shared) -> Element<'a, NoteMsg> {
         let item = |icon: crate::icons::Icon, label: &'static str, msg: NoteMsg| {
             button(row![icon.view(16.0), text(label).size(14)].spacing(10).align_y(iced::Center))
@@ -652,17 +870,17 @@ impl NoteTab {
                 .style(button::text)
                 .on_press(msg)
         };
-        let mut items = column![].spacing(2);
+        let mut items = column![item(crate::icons::Icon::Plus, "New note\u{2026}", NoteMsg::NewNote)].spacing(2);
         if self.open_mark_index(sh).is_none() {
             items = items.push(item(crate::icons::Icon::Pencil, "Rename", NoteMsg::StartRename));
         }
         items = items.push(item(crate::icons::Icon::Trash, "Delete", NoteMsg::AskDelete));
-        container(items).padding(6).width(160).style(container::rounded_box).into()
+        container(items).padding(6).width(160).style(crate::popup_style).into()
     }
 
-    /// The note with a dialog over it that dims what is behind: nothing else can be clicked, and
-    /// a click on the dimmed part cancels.
-    fn confirmation<'a>(&self, under: Element<'a, NoteMsg>, what: Deleting) -> Element<'a, NoteMsg> {
+    /// The layers of a dialog over the note: one that dims what is behind (nothing else can be
+    /// clicked, and a click on the dimmed part cancels) and the dialog.
+    fn confirmation<'a>(&self, what: Deleting) -> (Element<'a, NoteMsg>, Element<'a, NoteMsg>) {
         let (title, detail) = match what {
             Deleting::Margin(passage) => (
                 "Delete this margin note?".to_string(),
@@ -679,7 +897,8 @@ impl NoteTab {
                 ..container::Style::default()
             }),
         )
-        .on_press(NoteMsg::CancelDelete);
+        .on_press(NoteMsg::CancelDelete)
+        .into();
         let dialog = container(
             column![
                 text(title).size(17),
@@ -697,7 +916,7 @@ impl NoteTab {
         .width(380)
         .style(container::rounded_box);
         let centred = container(opaque(dialog)).center(Length::Fill);
-        stack![under, dim, centred].into()
+        (dim, centred.into())
     }
 
     /// The properties, above the text: a strip with when the note was made and its tags (and a
@@ -718,21 +937,25 @@ impl NoteTab {
                     .push(button(text("Stamp it now").size(12)).padding([2, 8]).style(button::secondary).on_press(NoteMsg::AddProperties));
             }
         }
+        // The tags, and the box to add one, under the time: bigger, and easy to find.
+        let mut tags = row![].spacing(6).align_y(iced::Center);
         for tag in &front.tags {
-            strip = strip.push(
-                button(row![text(format!("#{tag}")).size(12), text("\u{00D7}").size(14)].spacing(4).align_y(iced::Center))
-                    .padding([1, 8])
-                    .style(button::secondary)
+            let color = tag_color(sh, tag);
+            tags = tags.push(
+                button(row![text(format!("#{tag}")).size(13), text("\u{00D7}").size(15)].spacing(4).align_y(iced::Center))
+                    .padding([3, 10])
+                    .style(move |theme: &Theme, status| tag_chip_style(theme, status, false, color))
                     .on_press(NoteMsg::RemoveTag(tag.clone())),
             );
         }
-        strip = strip.push(
+        tags = tags.push(
             text_input("Add tag", &self.tag_draft)
                 .on_input(NoteMsg::TagDraft)
                 .on_submit(NoteMsg::AddTag)
-                .size(12)
-                .padding([2, 6])
-                .width(90),
+                .size(13)
+                .padding([4, 10])
+                .style(tag_box_style)
+                .width(130),
         );
         let toggle = button(
             row![text("Properties").size(12), crate::icons::Icon::chevron(self.props_open).view(14.0)]
@@ -748,7 +971,23 @@ impl NoteTab {
         ]
         .spacing(8)
         .align_y(iced::Center);
-        let mut out = column![container(bar).padding([6, 16])];
+        let tag_row = scrollable(tags).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0)));
+        let mut out = column![container(column![bar, tag_row].spacing(6)).padding([6, 16])];
+        // Tags in use that fit what is being typed, to pick instead of typing the rest.
+        let suggestions = sh.tag_suggestions(&self.tag_draft, &front.tags, 8);
+        if !suggestions.is_empty() {
+            let mut chips = row![text("Use").size(12).style(text::secondary)].spacing(6).align_y(iced::Center);
+            for (tag, count) in suggestions {
+                let color = tag_color(sh, &tag);
+                chips = chips.push(
+                    button(row![text(format!("#{tag}")).size(12), text(count.to_string()).size(11).style(text::secondary)].spacing(4))
+                        .padding([1, 6])
+                        .style(move |theme: &Theme, status| tag_chip_style(theme, status, false, color))
+                        .on_press(NoteMsg::PickTag(tag)),
+                );
+            }
+            out = out.push(container(scrollable(chips).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0)))).padding(iced::Padding { top: 0.0, right: 16.0, bottom: 6.0, left: 16.0 }));
+        }
         if self.props_open {
             out = out.push(self.properties_editor(&front));
         }
@@ -846,58 +1085,87 @@ impl NoteTab {
 
     /// The selector panel: a search box, then each type of note with its notes.
     fn panel<'a>(&'a self, sh: &'a Shared, picker: &'a Picker) -> Element<'a, NoteMsg> {
-        let search = text_input("Search notes…", &picker.query)
+        let search = text_input("Search notes or #tags…", &picker.query)
             .id(self.search_id())
             .on_input(NoteMsg::PickerQuery)
             .size(14)
             .padding(6);
-        let all = groups(sh, &picker.query);
+        // The tags to narrow by: the ones chosen first, then the most used.
+        let counts = sh.tag_counts();
+        let mut shown: Vec<(String, usize)> = picker
+            .tags
+            .iter()
+            .map(|t| (t.clone(), counts.iter().find(|(c, _)| c == t).map_or(0, |(_, n)| *n)))
+            .collect();
+        shown.extend(counts.iter().filter(|(t, _)| !picker.tags.contains(t)).take(14).cloned());
+        let mut chips: Vec<Element<'a, NoteMsg>> = Vec::new();
+        for (tag, count) in shown {
+            let on = picker.tags.contains(&tag);
+            let color = tag_color(sh, &tag);
+            let chip = button(row![text(format!("#{tag}")).size(12), text(count.to_string()).size(11).style(text::secondary)].spacing(4))
+                .padding([1, 6])
+                .style(move |theme: &Theme, status| tag_chip_style(theme, status, on, color))
+                .on_press(NoteMsg::PickerTag(tag.clone()));
+            chips.push(chip.into());
+        }
+        let chips = iced::widget::Row::with_children(chips).spacing(4).wrap().vertical_spacing(4);
+        let all = groups(sh, &picker.query, &picker.tags);
         let mut list = column![].spacing(2);
-        list = list.push(
-            button(text("+ New note").size(13))
-                .width(Length::Fill)
-                .padding([4, 8])
-                .style(button::text)
-                .on_press(NoteMsg::NewNote),
-        );
         if all.is_empty() {
             list = list.push(text("No note matches.").size(13).style(text::secondary));
         }
         for group in &all {
             let open = picker.is_open(group, &self.path);
-            let header = button(
-                row![
-                    text(if open { "▾" } else { "▸" }).size(12),
-                    text(group.label.clone()).size(13),
-                    space::horizontal(),
-                    text(group.notes.len().to_string()).size(12).style(text::secondary),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-            )
-            .width(Length::Fill)
-            .padding([4, 8])
-            .style(button::text)
-            .on_press(NoteMsg::ToggleGroup(group.key.clone()));
-            list = list.push(header);
+            // The ordinary notes are just the list; only the margin notes fold away.
+            if group.key != "notes" {
+                let header = button(
+                    row![
+                        text(if open { "▾" } else { "▸" }).size(12),
+                        text(group.label.clone()).size(13),
+                        space::horizontal(),
+                        text(group.notes.len().to_string()).size(12).style(text::secondary),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center),
+                )
+                .width(Length::Fill)
+                .padding([4, 8])
+                .style(button::text)
+                .on_press(NoteMsg::ToggleGroup(group.key.clone()));
+                list = list.push(header);
+            }
             if open {
                 for (path, label) in &group.notes {
                     let current = *path == self.path;
+                    let tags: Vec<String> = sh.tags_of(path).iter().map(|t| frontmatter::normalize_tag(t)).collect();
+                    let tag_line = tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ");
                     list = list.push(
-                        button(text(label.clone()).size(13))
-                            .width(Length::Fill)
-                            .padding(iced::Padding { top: 3.0, right: 8.0, bottom: 3.0, left: 28.0 })
-                            .style(if current { button::secondary } else { button::text })
-                            .on_press(NoteMsg::PickNote(NoteChoice(path.clone()))),
+                        button(
+                            row![
+                                text(label.clone()).size(13),
+                                space::horizontal(),
+                                text(tag_line).size(11).style(text::secondary),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Center),
+                        )
+                        .width(Length::Fill)
+                        .padding(iced::Padding { top: 3.0, right: 8.0, bottom: 3.0, left: if group.key == "notes" { 8.0 } else { 28.0 } })
+                        .style(if current { button::secondary } else { button::text })
+                        .on_press(NoteMsg::PickNote(NoteChoice(path.clone()))),
                     );
                 }
             }
         }
-        container(column![search, scrollable(list).height(Length::Shrink)].spacing(8))
+        let mut top = column![search, chips].spacing(8);
+        if !picker.tags.is_empty() {
+            top = top.push(button(text("Clear tags").size(12)).padding([1, 6]).style(button::text).on_press(NoteMsg::ClearPickerTags));
+        }
+        container(column![top, scrollable(list).height(Length::Shrink)].spacing(8))
             .padding(10)
-            .width(300)
-            .max_height(420)
-            .style(container::rounded_box)
+            .width(340)
+            .max_height(460)
+            .style(crate::popup_style)
             .into()
     }
 }

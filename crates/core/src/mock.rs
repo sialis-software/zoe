@@ -138,7 +138,7 @@ const NOTES: [(&str, &str); 3] = [
     ),
     (
         "prayers/Prayer list.md",
-        "---\ntype: prayer\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[Ps 23]]\n",
+        "---\ntype: prayer\ntags: [prayer]\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[Ps 23]]\n",
     ),
 ];
 

@@ -12,6 +12,8 @@ use vault::{Index, Vault};
 pub struct NoteMap {
     map: BTreeMap<String, String>,
     dirty: BTreeSet<String>,
+    /// Counts every change, so what is worked out from the notes can tell when to be again.
+    revision: u64,
 }
 
 pub enum Change {
@@ -29,11 +31,12 @@ impl Deref for NoteMap {
 impl NoteMap {
     /// Notes already on disk: nothing to write back.
     pub fn loaded(map: BTreeMap<String, String>) -> Self {
-        NoteMap { map, dirty: BTreeSet::new() }
+        NoteMap { map, dirty: BTreeSet::new(), revision: 0 }
     }
 
     pub fn insert(&mut self, path: String, text: String) {
         if self.map.get(&path) != Some(&text) {
+            self.revision += 1;
             self.dirty.insert(path.clone());
             self.map.insert(path, text);
         }
@@ -41,6 +44,7 @@ impl NoteMap {
 
     pub fn remove(&mut self, path: &str) {
         if self.map.remove(path).is_some() {
+            self.revision += 1;
             self.dirty.insert(path.to_string());
         }
     }
@@ -48,6 +52,7 @@ impl NoteMap {
     /// Remove a note, returning its text (`None` if there was none).
     pub fn remove_if_present(&mut self, path: &str) -> Option<String> {
         let text = self.map.remove(path)?;
+        self.revision += 1;
         self.dirty.insert(path.to_string());
         Some(text)
     }
@@ -56,6 +61,10 @@ impl NoteMap {
         if !self.map.contains_key(&path) {
             self.insert(path, make());
         }
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn take_changes(&mut self) -> Vec<Change> {

@@ -3,13 +3,12 @@
 //! margin cards, footnote and dictionary cards. Self-contained: it keeps its own state, and
 //! reads and changes the shared notes and marks through [`Shared`].
 
-use crate::fonts;
 use crate::history::History;
 use crate::live_editor::{live_editor, live_view};
 use crate::opening::Spec;
 use crate::palette::Palette;
 use crate::reader::{self, Link};
-use crate::reader_text::{CanonSlice, CardSpec, FloatKind, MarkDraw, MarkKind};
+use crate::reader_text::{CanonSlice, CardElement, CardSpec, FloatKind, MarkDraw, MarkKind};
 use crate::shared::{Shared, TabId};
 use iced::widget::operation::{AbsoluteOffset, RelativeOffset, scroll_by, scroll_to, snap_to};
 use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, space, text};
@@ -25,30 +24,23 @@ use study_core::{LexiconEntry, ModuleId};
 
 /// The tallest a card's text gets; beyond this it scrolls inside the card (about eight lines).
 pub const CARD_BODY_MAX: f32 = 136.0;
+
+/// The size of the text in the cards beside the reading text (footnotes, dictionary entries,
+/// margin notes): a little smaller than the reading text, so the notes sit quietly beside it.
+fn card_size(sh: &Shared) -> f32 {
+    sh.settings.bible_size * CARD_TEXT_SCALE
+}
+
+const CARD_TEXT_SCALE: f32 = 0.75;
+
+/// How tall a card's text may get before it scrolls: at the default text size, `CARD_BODY_MAX`,
+/// and in proportion to the size after that.
+fn card_body_max(sh: &Shared) -> f32 {
+    CARD_BODY_MAX * sh.settings.bible_size / crate::state::Settings::default().bible_size
+}
 /// Width of the text column. A reader wider than this plus room for cards shows a margin
 /// beside it; a narrower one has no margin and floats a card under a clicked mark instead.
 pub const TEXT_COLUMN: f32 = 640.0;
-
-/// A pen: what a mark looks like and means (docs/05 §2). Mock set; real ones come from
-/// the vault's config.
-pub struct Pen {
-    pub name: &'static str,
-    pub style: MarkStyle,
-    pub color: &'static str,
-    pub tag: &'static str,
-}
-
-pub const PENS: [Pen; 4] = [
-    Pen { name: "Promise", style: MarkStyle::Highlight, color: "#F5D90A", tag: "promise" },
-    Pen { name: "Command", style: MarkStyle::Underline, color: "#4DA3FF", tag: "command" },
-    Pen { name: "Growth", style: MarkStyle::Highlight, color: "#5FD38D", tag: "growth" },
-    Pen { name: "Pray", style: MarkStyle::Highlight, color: "#FF7AB6", tag: "prayer" },
-];
-
-/// Shown under the reader after marking text (the file that mark would be saved as).
-pub enum Detail {
-    MarkFile { path: String, text: String },
-}
 
 /// What a card opened from the text shows.
 pub enum NoteContent {
@@ -67,7 +59,21 @@ pub struct NoteCard {
 }
 
 /// Keys of the always-shown footnote cards: this plus the footnote's number in the chapter.
+/// The kinds of note the reader can show (and the margin can hold).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoteKind {
+    Strongs,
+    Marks,
+    Footnotes,
+    Refs,
+}
+
 pub const FOOTNOTE_KEY: u64 = 1 << 40;
+/// Keys of the dictionary entry cards of the chapter's Strong's words, and the margin's own menu.
+pub const WORD_KEY: u64 = 1 << 41;
+/// Keys of the cards of the chapter's cross reference markers: this plus the marker's number.
+const CROSSREF_KEY: u64 = 1 << 43;
+const MARGIN_MENU_KEY: u64 = 1 << 42;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChapterChoice(pub Book, pub u16);
@@ -123,7 +129,6 @@ pub enum BibleMsg {
     AutoScroll(f32),
     /// A press in the text: nothing to do here, but the workspace hears it.
     Pressed,
-    CloseDetail,
     CloseNoteCard,
     /// A link in a card's comment, or in a list of references.
     OpenLink(LinkTarget),
@@ -159,7 +164,14 @@ pub enum BibleMsg {
     ToggleRefs(bool),
     /// The reader's menu (the hamburger): open or close it.
     ToggleMenu,
+    /// The margin's menu, and its choice, for each kind of note, of whether it sits in the margin.
+    ToggleMarginMenu,
+    SetInMargin(NoteKind, bool),
     CloseMenu,
+    /// The tag box of the card being written in, and its changes.
+    CardTagDraft(String),
+    AddCardTag(String),
+    RemoveCardTag(String),
 }
 
 /// Something the tab cannot do alone, for the workspace to carry out.
@@ -173,6 +185,8 @@ pub enum Request {
     Drag(Spec, iced::Point),
     /// Show the note behind mark `index` in a note tab.
     OpenMark(usize),
+    /// Show the note at this path in a note tab.
+    OpenNote(String),
 }
 
 /// A book and chapter number.
@@ -243,8 +257,17 @@ pub struct BibleTab {
     pub show_refs: bool,
     /// The reader's menu is open.
     pub menu_open: bool,
-    pub detail: Option<Detail>,
+    /// Which kinds of note show in the margin, when the reader is wide enough for one; the rest
+    /// pop over the text where clicked.
+    pub in_margin: crate::state::MarginKinds,
+    /// The margin's own menu (the choice just above) is open.
+    pub margin_menu_open: bool,
+    /// What is typed in the tag box of the card being written in.
+    pub card_tag_draft: String,
     pub note_card: Option<NoteCard>,
+    /// The chapter's Strong's words with their entries, when they are kept in the margin (looked
+    /// up when the chapter loads, not for every drawing).
+    pub words: Vec<WordCard>,
 }
 
 /// A note's document, with the caret just below its frontmatter (the properties are shown and
@@ -280,16 +303,17 @@ fn reader_message(event: reader::Event) -> BibleMsg {
 /// The toolbar the reader floats under a text selection. Each pen is its own name written the
 /// way it marks: highlighted behind the word, or underlined in its colour. Beside them, the
 /// comment button and two icon buttons that copy the selection to the clipboard.
-fn pen_toolbar() -> Element<'static, BibleMsg> {
+fn pen_toolbar(sh: &Shared) -> Element<'static, BibleMsg> {
     use iced::widget::{stack, tooltip};
     let mut bar = row![].spacing(2).align_y(iced::Center);
-    for (i, pen) in PENS.iter().enumerate() {
-        let color = hex_color(pen.color, 1.0).unwrap_or(Color::WHITE);
+    for (i, pen) in sh.settings.pens.iter().enumerate() {
+        let color = hex_color(&pen.color, 1.0).unwrap_or(Color::WHITE);
+        let name = pen.name();
         let label: Element<'static, BibleMsg> = match pen.style {
             // Underlined: the name in the pen's colour with a line of it just under, as wide as
             // the name (the line is a layer over the name, so the name sets the width).
-            MarkStyle::Underline => stack![
-                container(text(pen.name).size(13).color(color))
+            crate::state::PenStyle::Underline => stack![
+                container(text(name.clone()).size(13).color(color))
                     .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 4.0, left: 0.0 }),
                 container(container(space::horizontal()).width(Length::Fill).height(2).style(move |_: &Theme| {
                     container::Style { background: Some(color.into()), ..container::Style::default() }
@@ -300,7 +324,7 @@ fn pen_toolbar() -> Element<'static, BibleMsg> {
             ]
             .into(),
             // Highlighted: the name on a band of its colour, as the text will be marked.
-            _ => container(text(pen.name).size(13))
+            crate::state::PenStyle::Highlight => container(text(name).size(13))
                 .padding([1, 4])
                 .style(move |_: &Theme| container::Style {
                     background: Some(Color { a: 0.45, ..color }.into()),
@@ -352,8 +376,23 @@ pub fn copy_text(refs: &[RefRange], module: &str, quote: bool) -> String {
 }
 
 /// Footnote text, with scripture references in it (`See Mrk 9:29`) as links to the reader.
-pub fn footnote_body<'a>(note: &str, link: Color) -> Element<'a, BibleMsg> {
+pub fn footnote_body<'a>(sh: &Shared, note: &str, link: Color) -> Element<'a, BibleMsg> {
     use iced::widget::{rich_text, span};
+    // References drawn as the writer draws links, so they can also be right clicked (where to
+    // open it) and pulled away to a tab or pane. That means writing the text as markdown, so
+    // only text with nothing in it that markdown would take for something else.
+    let refs = find_refs(note);
+    if !refs.is_empty() && !note.contains(['*', '_', '`', '#', '[', ']', '<', '>', '\\', '\n']) {
+        let mut markdown = String::new();
+        let mut at = 0;
+        for (range, _) in &refs {
+            markdown.push_str(&note[at..range.start]);
+            markdown.push_str(&format!("[[{}]]", &note[range.clone()]));
+            at = range.end;
+        }
+        markdown.push_str(&note[at..]);
+        return link_view(sh, markdown);
+    }
     let mut spans = Vec::new();
     let mut at = 0;
     for (range, target) in find_refs(note) {
@@ -367,17 +406,58 @@ pub fn footnote_body<'a>(note: &str, link: Color) -> Element<'a, BibleMsg> {
         spans.push(span(note[at..].to_string()));
     }
     rich_text(spans)
-        .size(14)
+        .size(card_size(sh))
+        .font(sh.settings.text_font())
         .on_link_click(|range: RefRange| BibleMsg::OpenLink(LinkTarget::Verse { range, module: None }))
         .into()
+}
+
+/// Text with `[[links]]` in it, set like a card's text and with a link's usual behaviour: a click
+/// opens it, a right click offers where, and pulling it away takes it to a tab or pane.
+fn link_view<'a>(sh: &Shared, markdown: String) -> Element<'a, BibleMsg> {
+    live_view(Document::new(&markdown), Palette::for_theme(&sh.theme()))
+        .fit_width()
+        .size(card_size(sh))
+        .font(sh.settings.text_font())
+        .padding([2.0, 0.0])
+        .on_link(BibleMsg::OpenLink)
+        .on_link_menu(BibleMsg::CardLinkMenu)
+        .on_link_drag(BibleMsg::CardLinkDrag)
+        .into()
+}
+
+/// A dictionary entry: the word in its language and its transliteration, then the definition.
+fn word_body<'a>(sh: &Shared, e: &study_core::LexiconEntry) -> Element<'a, BibleMsg> {
+    let (size, font) = (card_size(sh), sh.settings.text_font());
+    let mut head = row![].spacing(8).align_y(iced::Alignment::Center);
+    if !e.lemma.is_empty() {
+        head = head.push(text(e.lemma.clone()).size(size * 1.2).font(font));
+    }
+    if !e.transliteration.is_empty() {
+        let italic = Font { style: font::Style::Italic, ..font };
+        head = head.push(text(e.transliteration.clone()).size(size).font(italic).style(text::secondary));
+    }
+    column![head, text(e.definition.clone()).size(size).font(font)].spacing(4).into()
+}
+
+/// A word with a Strong's number, where it is, and what the dictionary says of it.
+pub struct WordCard {
+    pub anchor: CanonSlice,
+    pub entry: study_core::LexiconEntry,
 }
 
 /// Where a footnote's marker sits among the reader's canonical text: the character just
 /// before it (or the first one after, at a verse's start). A verse with no text of its own
 /// borrows the end of the nearest verse before it that has some.
 pub fn footnote_anchor(canon: &margin::CanonicalText, note: &study_core::ast::FootnoteAt) -> Option<CanonSlice> {
-    let (verse, text) = canon.range(..=note.verse).rev().find(|(_, t)| !t.is_empty())?;
-    let end = if *verse == note.verse { note.offset.min(text.len()) } else { text.len() };
+    marker_anchor(canon, note.verse, note.offset)
+}
+
+/// The same for any marker in the text (a footnote's, a cross reference's), by its verse and
+/// the offset in that verse's text where it comes.
+pub fn marker_anchor(canon: &margin::CanonicalText, at_verse: u16, offset: usize) -> Option<CanonSlice> {
+    let (verse, text) = canon.range(..=at_verse).rev().find(|(_, t)| !t.is_empty())?;
+    let end = if *verse == at_verse { offset.min(text.len()) } else { text.len() };
     match text[..end].char_indices().next_back() {
         Some((start, _)) => Some(CanonSlice { verse: *verse, start, end }),
         None => {
@@ -437,8 +517,11 @@ impl BibleTab {
             show_footnotes: true,
             show_refs: false,
             menu_open: false,
-            detail: None,
+            in_margin: crate::state::MarginKinds::default(),
+            margin_menu_open: false,
+            card_tag_draft: String::new(),
             note_card: None,
+            words: Vec::new(),
         }
     }
 
@@ -464,6 +547,26 @@ impl BibleTab {
         self.chapter_no = chapter;
         self.chapter = sh.backend.chapter(&self.module, book, chapter).map_err(|e| e.to_string());
         self.history = History::new(self.place(None));
+        self.refresh_words(sh);
+    }
+
+    /// Look up the entries of the chapter's Strong's words, if they are wanted in the margin.
+    fn refresh_words(&mut self, sh: &Shared) {
+        self.words.clear();
+        let Ok(chapter) = &self.chapter else { return };
+        if !(self.show_strongs && self.in_margin.strongs) {
+            return;
+        }
+        let mut known: std::collections::HashMap<String, Option<study_core::LexiconEntry>> = std::collections::HashMap::new();
+        for at in chapter.strongs_words() {
+            let entry = known.entry(at.strongs.clone()).or_insert_with(|| sh.backend.lexicon_entry(&at.strongs));
+            if let Some(entry) = entry {
+                self.words.push(WordCard {
+                    anchor: CanonSlice { verse: at.verse, start: at.start, end: at.end },
+                    entry: entry.clone(),
+                });
+            }
+        }
     }
 
     /// Where this tab is now, as a history entry.
@@ -487,9 +590,9 @@ impl BibleTab {
         self.stop_edit(sh);
         self.editing = None;
         self.reveal = None;
-        self.detail = None;
         self.note_card = None;
         self.chapter = sh.backend.chapter(&self.module, book, chapter).map_err(|e| e.to_string());
+        self.refresh_words(sh);
     }
 
     /// Show a footnote or dictionary card at `at`. Whatever else was open there is dismissed.
@@ -568,13 +671,23 @@ impl BibleTab {
     /// Marks were clicked: write in the first when its card is in the margin (and `edit` says a
     /// click on a mark means to edit it), else float the cards under the click. Empty means
     /// the click-away that ends an edit and any popup.
+    /// Whether marks' cards are beside the text (there is a margin, and marks are among what it
+    /// holds), rather than floating under a click.
+    fn marks_in_margin(&self) -> bool {
+        self.margin_showing && self.in_margin.marks
+    }
+
+    fn footnotes_in_margin(&self) -> bool {
+        self.margin_showing && self.in_margin.footnotes
+    }
+
     fn marks_clicked(&mut self, sh: &mut Shared, ids: Vec<usize>, edit: bool) -> Task<BibleMsg> {
         if ids.is_empty() {
             // The popup closed: that finishes any edit going on in it.
             self.popup = None;
             self.finish_editing(sh);
             Task::none()
-        } else if self.margin_showing && edit {
+        } else if self.marks_in_margin() && edit {
             // The cards are already beside the text: write in the one clicked.
             self.popup = None;
             self.start_edit(sh, ids[0])
@@ -723,11 +836,24 @@ impl BibleTab {
         Some(sh.marks.len() - 1)
     }
 
-    pub fn apply_pen(&mut self, sh: &mut Shared, pen: usize) {
-        let Some(pen) = PENS.get(pen) else { return };
-        if let Some(index) = self.make_mark(sh, pen.style, pen.color, vec![pen.tag.to_string()], false) {
-            let mark = &sh.marks[index];
-            self.detail = Some(Detail::MarkFile { path: mark.path(), text: mark.to_markdown() });
+    /// Mark the selected text with pen `pen`, and open the mark's card to write a note in, as
+    /// "Comment" does.
+    pub fn apply_pen(&mut self, sh: &mut Shared, pen: usize) -> Task<BibleMsg> {
+        let Some(pen) = sh.settings.pens.get(pen).cloned() else { return Task::none() };
+        self.stop_edit(sh);
+        // With no margin the card appears under the selection, so keep it selected.
+        let keep = !self.marks_in_margin();
+        let style = match pen.style {
+            crate::state::PenStyle::Highlight => MarkStyle::Highlight,
+            crate::state::PenStyle::Underline => MarkStyle::Underline,
+        };
+        match self.make_mark(sh, style, &pen.color, vec![pen.tag.clone()], keep) {
+            Some(index) => {
+                self.card_doc = Document::new("");
+                self.editing = Some(index);
+                iced::widget::operation::focus(self.card_editor_id())
+            }
+            None => Task::none(),
         }
     }
 
@@ -756,6 +882,7 @@ impl BibleTab {
         let Some(mark) = sh.marks.get(index) else { return Task::none() };
         // The caret goes after the last character, not on the empty line a trailing newline
         // leaves, so typing adds to what is there.
+        self.card_tag_draft.clear();
         self.card_doc = Document::new(&mark.body);
         let end = mark.body.trim_end_matches(['\n', '\r']).len();
         self.card_doc.perform(EditAction::SetCaret { offset: end, extend: false });
@@ -783,7 +910,7 @@ impl BibleTab {
     /// removed for being empty, if any.
     pub fn finish_editing(&mut self, sh: &mut Shared) -> Option<usize> {
         let removed = self.stop_edit(sh);
-        if !self.margin_showing && self.text_selection.is_some() {
+        if !self.marks_in_margin() && self.text_selection.is_some() {
             self.text_selection = None;
             self.clear_token += 1;
         }
@@ -816,6 +943,18 @@ impl BibleTab {
             self.menu_open = false;
             self.history_open = false;
         }
+        // So is the margin's menu: it stays for what is done in it, and goes for anything else.
+        if !matches!(
+            message,
+            BibleMsg::ToggleMarginMenu
+                | BibleMsg::SetInMargin(..)
+                | BibleMsg::MarginChanged(_)
+                | BibleMsg::AutoScroll(_)
+                | BibleMsg::Scrolled(_)
+                | BibleMsg::SelectionChanged(None)
+        ) {
+            self.margin_menu_open = false;
+        }
         let before = (self.book, self.chapter_no);
         let mut request = None;
         let task = match message {
@@ -829,9 +968,11 @@ impl BibleTab {
             BibleMsg::MarginChanged(on) => {
                 self.margin_showing = on;
                 if on {
-                    self.popup = None;
+                    if self.in_margin.marks {
+                        self.popup = None;
+                    }
                     // The margin shows every footnote itself, so one opened as a popup is moot.
-                    if matches!(self.note_card, Some(NoteCard { content: NoteContent::Footnote(_), .. })) {
+                    if self.in_margin.footnotes && matches!(self.note_card, Some(NoteCard { content: NoteContent::Footnote(_), .. })) {
                         self.note_card = None;
                     }
                 }
@@ -840,7 +981,7 @@ impl BibleTab {
             BibleMsg::AddComment => {
                 self.stop_edit(sh);
                 // With no margin the card appears under the selection, so keep it selected.
-                let keep = !self.margin_showing;
+                let keep = !self.marks_in_margin();
                 match self.make_mark(sh, MarkStyle::None, "#8A9099", Vec::new(), keep) {
                     Some(index) => {
                         self.card_doc = Document::new("");
@@ -875,7 +1016,10 @@ impl BibleTab {
                 Task::none()
             }
             BibleMsg::UnlinkMarkAt(i) => {
+                // The note stays as a plain note: show it, so it is not lost sight of.
+                let kept = sh.marks.get(i).map(|mark| mark.unlinked_note().0);
                 self.unlink_mark(sh, i);
+                request = kept.map(Request::OpenNote);
                 Task::none()
             }
             BibleMsg::OpenMarkInWriter(i) => {
@@ -887,40 +1031,39 @@ impl BibleTab {
             BibleMsg::SelectionChanged(sel) => {
                 // A new selection ends an edit; so does losing the selection a no-margin
                 // reader was showing the card under (clicking elsewhere, Esc).
-                if sel.is_some() || (self.editing.is_some() && !self.margin_showing) {
+                if sel.is_some() || (self.editing.is_some() && !self.marks_in_margin()) {
                     self.stop_edit(sh);
                 }
                 self.text_selection = sel;
                 Task::none()
             }
-            BibleMsg::ApplyPen(i) => {
-                self.apply_pen(sh, i);
-                Task::none()
-            }
+            BibleMsg::ApplyPen(i) => self.apply_pen(sh, i),
             BibleMsg::Link(Link::Footnote(text), at, marks) => {
                 // With a margin the footnotes are already showing beside the text.
-                if !self.margin_showing {
+                if !self.footnotes_in_margin() {
                     self.open_note_card(sh, at, NoteContent::Footnote(text));
                 }
                 self.marks_clicked(sh, marks, false)
             }
             BibleMsg::Link(Link::Strongs(key), at, marks) => {
-                let entry = sh.backend.lexicon_entry(&key);
-                self.open_note_card(sh, at, NoteContent::Word { key, entry });
+                // With the margin keeping them, every entry is already showing beside the text.
+                if !(self.margin_showing && self.in_margin.strongs) {
+                    let entry = sh.backend.lexicon_entry(&key);
+                    self.open_note_card(sh, at, NoteContent::Word { key, entry });
+                }
                 // A word inside marked text is both: show its entry and its marks, so either
                 // can be picked.
                 self.marks_clicked(sh, marks, false)
             }
             BibleMsg::Link(Link::CrossRefs(refs), at, marks) => {
-                self.open_note_card(sh, at, NoteContent::References(refs));
+                // With the margin keeping them, the lists are already showing beside the text.
+                if !(self.margin_showing && self.in_margin.refs) {
+                    self.open_note_card(sh, at, NoteContent::References(refs));
+                }
                 self.marks_clicked(sh, marks, false)
             }
             BibleMsg::Link(Link::Ref(target), _, _) => {
                 request = Some(Request::Open(Spec::Verse { range: target, module: None }));
-                Task::none()
-            }
-            BibleMsg::CloseDetail => {
-                self.detail = None;
                 Task::none()
             }
             BibleMsg::CloseNoteCard => {
@@ -992,6 +1135,7 @@ impl BibleTab {
             }
             BibleMsg::ToggleStrongs(on) => {
                 self.show_strongs = on;
+                self.refresh_words(sh);
                 Task::none()
             }
             BibleMsg::ToggleMarks(on) => {
@@ -1003,16 +1147,34 @@ impl BibleTab {
             }
             BibleMsg::ToggleFootnotes(on) => {
                 self.show_footnotes = on;
-                if matches!(self.note_card, Some(NoteCard { content: NoteContent::Footnote(_) })) {
+                if matches!(self.note_card, Some(NoteCard { content: NoteContent::Footnote(_), .. })) {
                     self.note_card = None;
                 }
                 Task::none()
             }
             BibleMsg::ToggleRefs(on) => {
                 self.show_refs = on;
-                if matches!(self.note_card, Some(NoteCard { content: NoteContent::References(_) })) {
+                if matches!(self.note_card, Some(NoteCard { content: NoteContent::References(_), .. })) {
                     self.note_card = None;
                 }
+                Task::none()
+            }
+            BibleMsg::ToggleMarginMenu => {
+                self.margin_menu_open = !self.margin_menu_open;
+                Task::none()
+            }
+            BibleMsg::SetInMargin(kind, on) => {
+                match kind {
+                    NoteKind::Strongs => self.in_margin.strongs = on,
+                    NoteKind::Marks => self.in_margin.marks = on,
+                    NoteKind::Footnotes => self.in_margin.footnotes = on,
+                    NoteKind::Refs => self.in_margin.refs = on,
+                }
+                self.refresh_words(sh);
+                // Whatever was open is where it was; start afresh.
+                self.stop_edit(sh);
+                self.popup = None;
+                self.note_card = None;
                 Task::none()
             }
             BibleMsg::ToggleMenu => {
@@ -1041,6 +1203,32 @@ impl BibleTab {
                 self.scroll_y = y;
                 Task::none()
             }
+            BibleMsg::CardTagDraft(draft) => {
+                self.card_tag_draft = draft;
+                Task::none()
+            }
+            BibleMsg::AddCardTag(tag) => {
+                // Typed and entered (the box), or picked from the suggestions.
+                let tag = if tag.is_empty() { std::mem::take(&mut self.card_tag_draft) } else { tag };
+                self.card_tag_draft.clear();
+                if let Some(index) = self.editing
+                    && let Some(mark) = sh.marks.get(index)
+                {
+                    let mut tags = mark.tags.clone();
+                    tags.push(tag);
+                    sh.set_mark_tags(index, tags);
+                }
+                Task::none()
+            }
+            BibleMsg::RemoveCardTag(tag) => {
+                if let Some(index) = self.editing
+                    && let Some(mark) = sh.marks.get(index)
+                {
+                    let tags = mark.tags.iter().filter(|t| **t != tag).cloned().collect();
+                    sh.set_mark_tags(index, tags);
+                }
+                Task::none()
+            }
             BibleMsg::CloseMenu => {
                 self.menu_open = false;
                 Task::none()
@@ -1059,27 +1247,30 @@ impl BibleTab {
 
     pub fn view<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
         let content = column![self.toolbar(sh), iced::widget::rule::horizontal(1), self.reader_pane(sh)];
-        if self.history_open {
-            let dismiss = iced::widget::mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill))
-                .on_press(BibleMsg::CloseHistory);
+        // A pop-up (the history list or the reader's menu) hangs from its button; a click anywhere
+        // else puts it away. The layers are always in the tree, empty when there is no pop-up, so
+        // that opening one does not rebuild the reader beneath (which would lose its scroll).
+        let nothing = || -> Element<'a, BibleMsg> { space::horizontal().width(0).height(0).into() };
+        let dismiss = |msg: BibleMsg| -> Element<'a, BibleMsg> {
+            iced::widget::mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill)).on_press(msg).into()
+        };
+        let (away, panel): (Element<'a, BibleMsg>, Element<'a, BibleMsg>) = if self.history_open {
             let panel = container(iced::widget::opaque(self.history_panel(sh)))
                 .padding(iced::Padding { top: 8.0 + 31.0 + 3.0, right: 0.0, bottom: 0.0, left: 16.0 })
                 .width(Length::Fill)
                 .height(Length::Fill);
-            return iced::widget::stack![content, dismiss, panel].into();
-        }
-        if !self.menu_open {
-            return content.into();
-        }
-        // The menu hangs from its button; a click anywhere else puts it away.
-        let dismiss = iced::widget::mouse_area(container(space::horizontal()).width(Length::Fill).height(Length::Fill))
-            .on_press(BibleMsg::CloseMenu);
-        let panel = container(iced::widget::opaque(self.menu_panel()))
-            .padding(iced::Padding { top: 8.0 + 31.0 + 3.0, right: 16.0, bottom: 0.0, left: 0.0 })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right);
-        iced::widget::stack![content, dismiss, panel].into()
+            (dismiss(BibleMsg::CloseHistory), panel.into())
+        } else if self.menu_open {
+            let panel = container(iced::widget::opaque(self.menu_panel()))
+                .padding(iced::Padding { top: 8.0 + 31.0 + 3.0, right: 16.0, bottom: 0.0, left: 0.0 })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right);
+            (dismiss(BibleMsg::CloseMenu), panel.into())
+        } else {
+            (nothing(), nothing())
+        };
+        iced::widget::stack![content, away, panel].into()
     }
 
     /// The places this tab has been, newest first; the one it is at is marked.
@@ -1090,7 +1281,7 @@ impl BibleTab {
             let label = if i == at { format!("\u{2022} {}", place.label(sh)) } else { format!("  {}", place.label(sh)) };
             list = list.push(button(text(label).size(14)).width(Length::Fill).style(button::text).on_press(BibleMsg::GoTo(i)));
         }
-        container(scrollable(list).height(Length::Shrink)).padding(8).max_width(300).max_height(360).style(container::rounded_box).into()
+        container(scrollable(list).height(Length::Shrink)).padding(8).max_width(300).max_height(360).style(crate::popup_style).into()
     }
 
     /// What the reader shows: each kind of thing in the text, on or off.
@@ -1108,7 +1299,8 @@ impl BibleTab {
             .spacing(10),
         )
         .padding(14)
-        .style(container::rounded_box)
+        .width(230)
+        .style(crate::popup_style)
         .into()
     }
 
@@ -1122,8 +1314,9 @@ impl BibleTab {
     /// Previous and next chapter, to put at the top and bottom of the text.
     fn chapter_links<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
         let (prev, next) = self.neighbours(sh);
+        let size = sh.settings.bible_size * 0.7;
         let link = |label: String, msg: BibleMsg, target: Option<ChapterId>| {
-            let b = button(text(label).size(13)).padding([2, 6]).style(button::text);
+            let b = button(text(label).size(size)).padding([2, 6]).style(button::text);
             if target.is_some() { b.on_press(msg) } else { b }
         };
         let prev_label = prev.map_or("\u{2190} Previous".to_string(), |(b, c)| format!("\u{2190} {b} {c}"));
@@ -1194,7 +1387,10 @@ impl BibleTab {
             show_footnotes: self.show_footnotes,
             show_refs: self.show_refs,
             pal: Palette::for_theme(&sh.theme()),
-            body: sh.settings.reading_size,
+            strongs_in_margin: self.margin_showing && self.in_margin.strongs,
+            footnotes_in_margin: self.margin_showing && self.in_margin.footnotes,
+            refs_in_margin: self.margin_showing && self.in_margin.refs,
+            body: sh.settings.bible_size,
             font: sh.settings.text_font(),
             module: sh.module_abbreviation(&self.module),
         }
@@ -1203,7 +1399,8 @@ impl BibleTab {
     /// Cards for the marks in view that have something written, plus the one being written.
     pub fn cards<'a>(&'a self, sh: &'a Shared) -> Vec<CardSpec<'a, BibleMsg>> {
         let mut out = Vec::new();
-        for (index, slices) in self.visible_marks(sh) {
+        // Marks' cards are in the margin only when marks are kept there (else they pop up).
+        for (index, slices) in self.visible_marks(sh).into_iter().filter(|_| self.in_margin.marks) {
             let mark = &sh.marks[index];
             let writing = self.editing == Some(index);
             if mark.body.trim().is_empty() && !writing {
@@ -1216,12 +1413,15 @@ impl BibleTab {
                 color: hex_color(&mark.color, 1.0).unwrap_or(Color::WHITE),
                 pinned: writing,
                 follows_link: false,
-                element: self.card_view(sh, index, false),
+                header: false,
+                element: CardElement::new(move || self.card_view(sh, index, false)),
             });
         }
-        // Beside the text every footnote of the chapter is shown, so none can be closed.
-        if self.margin_showing
-            && self.show_footnotes
+        // Beside the text every footnote of the chapter is shown, so none can be closed. (Offered
+        // whether or not there is a margin yet: the reader only makes one when it has cards, so
+        // waiting for it to say it has one would leave a chapter of only footnotes without.)
+        if self.show_footnotes
+            && self.in_margin.footnotes
             && let Ok(chapter) = &self.chapter
         {
             let canon = chapter.canonical_verses();
@@ -1234,35 +1434,168 @@ impl BibleTab {
                     color,
                     pinned: false,
                     follows_link: true,
-                    element: reference_card(sh, "Footnote", footnote_body(&note.text, color), false, false, None),
+                        header: false,
+                    element: {
+                        let text = note.text.clone();
+                        CardElement::new(move || reference_card(sh, "Footnote", footnote_body(sh, &text, color), false, false, None))
+                    },
                 });
             }
+        }
+        // Every cross reference marker of the chapter has its list of passages beside the text,
+        // like a footnote, when they are kept in the margin.
+        if self.show_refs
+            && self.in_margin.refs
+            && let Ok(chapter) = &self.chapter
+        {
+            let canon = chapter.canonical_verses();
+            let color = Palette::for_theme(&sh.theme()).link;
+            for (i, marker) in chapter.cross_references().iter().enumerate() {
+                let Some(anchor) = marker_anchor(&canon, marker.verse, marker.offset) else { continue };
+                out.push(CardSpec {
+                    key: CROSSREF_KEY + i as u64,
+                    anchor,
+                    color,
+                    pinned: false,
+                    follows_link: true,
+                        header: false,
+                    element: {
+                        let refs = marker.refs.clone();
+                        CardElement::new(move || reference_card(sh, "References", self.reference_list(sh, &refs), false, false, None))
+                    },
+                });
+            }
+        }
+        // Every word with a Strong's number has its dictionary entry beside the text, when they
+        // are kept in the margin: hovering the word brings its entry up.
+        if self.show_strongs && self.in_margin.strongs {
+            let color = Palette::for_theme(&sh.theme()).link;
+            for (i, word) in self.words.iter().enumerate() {
+                out.push(CardSpec {
+                    key: WORD_KEY + i as u64,
+                    anchor: word.anchor,
+                    color,
+                    pinned: false,
+                    follows_link: true,
+                    header: false,
+                    element: CardElement::new(move || {
+                        reference_card(
+                            sh,
+                            &format!("Strong's {}", word.entry.key),
+                            word_body(sh, &word.entry),
+                            false,
+                            false,
+                            Some(("Open in tab", BibleMsg::OpenWord(word.entry.key.clone()))),
+                        )
+                    }),
+                });
+            }
+        }
+        // The margin's own menu, at the top of it, once there is something to put in one.
+        {
+            out.push(CardSpec {
+                key: MARGIN_MENU_KEY,
+                anchor: CanonSlice { verse: 1, start: 0, end: 0 },
+                color: Color::TRANSPARENT,
+                pinned: false,
+                follows_link: false,
+                header: true,
+                element: CardElement::new(move || self.margin_menu()),
+            });
         }
         out
     }
 
+    /// The tags of the mark being written in: each can be taken off, and others added, with the
+    /// ones in use offered as the name is typed.
+    fn card_tags<'a>(&'a self, sh: &'a Shared, index: usize) -> Element<'a, BibleMsg> {
+        let meta = sh.settings.bible_size * 0.7;
+        let tags = sh.marks.get(index).map(|m| m.tags.clone()).unwrap_or_default();
+        let chip = |label: String, color: Option<Color>, msg: BibleMsg| {
+            let color = color.unwrap_or(Color::from_rgb(0.62, 0.65, 0.72));
+            button(text(label).size(meta))
+                .padding([0, 6])
+                .style(move |_: &Theme, _| button::Style {
+                    text_color: color,
+                    border: iced::Border { color, width: 1.0, radius: 8.0.into() },
+                    background: Some(Color { a: 0.12, ..color }.into()),
+                    ..button::Style::default()
+                })
+                .on_press(msg)
+        };
+        let mut chips = row![].spacing(4).align_y(iced::Center);
+        for tag in &tags {
+            let color = sh.tag_color(tag).and_then(|hex| hex_color(&hex, 1.0));
+            chips = chips.push(chip(format!("#{tag} \u{00D7}"), color, BibleMsg::RemoveCardTag(tag.clone())));
+        }
+        chips = chips.push(
+            iced::widget::text_input("Add tag", &self.card_tag_draft)
+                .on_input(BibleMsg::CardTagDraft)
+                .on_submit(BibleMsg::AddCardTag(String::new()))
+                .size(meta)
+                .padding([1, 6])
+                .width(90),
+        );
+        let mut out = column![chips].spacing(4);
+        let offered = sh.tag_suggestions(&self.card_tag_draft, &tags, 5);
+        if !offered.is_empty() {
+            let mut row = row![].spacing(4);
+            for (tag, _) in offered {
+                let color = sh.tag_color(&tag).and_then(|hex| hex_color(&hex, 1.0));
+                row = row.push(chip(format!("#{tag}"), color, BibleMsg::AddCardTag(tag)));
+            }
+            out = out.push(row);
+        }
+        out.into()
+    }
+
+    /// The button at the top of the margin and, when open, its choice.
+    fn margin_menu<'a>(&self) -> Element<'a, BibleMsg> {
+        let button = button(container(crate::icons::Icon::Menu.view(16.0)).center(Length::Fill))
+            .width(26)
+            .height(26)
+            .padding(0)
+            .style(button::secondary)
+            .on_press(BibleMsg::ToggleMarginMenu);
+        let mut column = column![row![space::horizontal(), button]].spacing(4).width(Length::Fill);
+        if self.margin_menu_open {
+            column = column.push(
+                container(self.where_notes_show()).padding(12).width(Length::Fill).style(crate::popup_style),
+            );
+        }
+        column.into()
+    }
+
+    /// The same list as the reader's menu, but of which kinds of note sit in the margin: the
+    /// reader's menu says whether a kind shows at all, this says where its cards go.
+    fn where_notes_show<'a>(&self) -> Element<'a, BibleMsg> {
+        let item = |label: &'static str, on: bool, kind: NoteKind| {
+            checkbox(on).label(label).on_toggle(move |on| BibleMsg::SetInMargin(kind, on)).size(16).text_size(14)
+        };
+        column![
+            text("In the margin").size(12).style(text::secondary),
+            item("Strong's numbers", self.in_margin.strongs, NoteKind::Strongs),
+            item("Marks", self.in_margin.marks, NoteKind::Marks),
+            item("Footnotes", self.in_margin.footnotes, NoteKind::Footnotes),
+            item("References", self.in_margin.refs, NoteKind::Refs),
+        ]
+        .spacing(10)
+        .into()
+    }
+
     /// The card for a footnote or a dictionary entry opened by a click.
     pub fn note_card_view<'a>(&'a self, sh: &'a Shared, card: &'a NoteCard, fill: bool) -> Element<'a, BibleMsg> {
+        let (size, font) = (card_size(sh), sh.settings.text_font());
         let (label, body): (String, Element<'_, BibleMsg>) = match &card.content {
             NoteContent::Footnote(note) => {
-                ("Footnote".into(), footnote_body(note, Palette::for_theme(&sh.theme()).link))
+                ("Footnote".into(), footnote_body(sh, note, Palette::for_theme(&sh.theme()).link))
             }
             NoteContent::References(refs) => ("References".into(), self.reference_list(sh, refs)),
             NoteContent::Word { key, entry: None } => (
                 format!("Strong's {key}"),
-                text("No installed dictionary has an entry for this number.").size(14).style(text::secondary).into(),
+                text("No installed dictionary has an entry for this number.").size(size).font(font).style(text::secondary).into(),
             ),
-            NoteContent::Word { key, entry: Some(e) } => {
-                let mut head = row![].spacing(8).align_y(iced::Alignment::Center);
-                if !e.lemma.is_empty() {
-                    head = head.push(text(e.lemma.clone()).size(22));
-                }
-                if !e.transliteration.is_empty() {
-                    let italic = Font { style: font::Style::Italic, ..fonts::UI };
-                    head = head.push(text(e.transliteration.clone()).size(14).font(italic).style(text::secondary));
-                }
-                (format!("Strong's {key}"), column![head, text(e.definition.clone()).size(14)].spacing(4).into())
-            }
+            NoteContent::Word { key, entry: Some(e) } => (format!("Strong's {key}"), word_body(sh, e)),
         };
         // A dictionary entry can be taken to a tab of its own.
         let open = match &card.content {
@@ -1274,8 +1607,7 @@ impl BibleTab {
 
     /// The passages a cross reference marker points to, each a link to open it, with the start of
     /// its text so it can be told from the others.
-    fn reference_list<'a>(&'a self, sh: &'a Shared, refs: &'a [RefRange]) -> Element<'a, BibleMsg> {
-        let link = Palette::for_theme(&sh.theme()).link;
+    fn reference_list<'a>(&self, sh: &Shared, refs: &[RefRange]) -> Element<'a, BibleMsg> {
         let mut list = column![].spacing(6);
         for range in refs {
             let preview = sh
@@ -1289,14 +1621,11 @@ impl BibleTab {
                 })
                 .filter(|t| !t.is_empty());
             let mut entry = column![
-                button(text(range.to_string()).size(14).color(link))
-                    .padding(0)
-                    .style(button::text)
-                    .on_press(BibleMsg::OpenLink(LinkTarget::Verse { range: *range, module: None }))
+                link_view(sh, format!("[[{range}]]"))
             ]
             .spacing(1);
             if let Some(preview) = preview {
-                entry = entry.push(text(preview).size(12).style(text::secondary));
+                entry = entry.push(text(preview).size(card_size(sh) * 0.8).font(sh.settings.text_font()).style(text::secondary));
             }
             list = list.push(entry);
         }
@@ -1310,6 +1639,7 @@ impl BibleTab {
         let color = hex_color(&mark.color, 1.0).unwrap_or(Color::WHITE);
         let writing = self.editing == Some(index);
 
+        let meta = card_size(sh) * 0.7;
         let about = if mark.is_verse_level() {
             mark.anchor.to_string()
         } else {
@@ -1322,12 +1652,12 @@ impl BibleTab {
         let fill = writing || popup;
         let header = if fill {
             row![
-                text(about).size(12).style(text::secondary),
+                text(about).size(meta).style(text::secondary),
                 space::horizontal(),
-                text(mark.tags.join(", ")).size(12).style(text::secondary),
+                text(mark.tags.join(", ")).size(meta).style(text::secondary),
             ]
         } else {
-            row![text(about).size(12).style(text::secondary), text(mark.tags.join(", ")).size(12).style(text::secondary)]
+            row![text(about).size(meta).style(text::secondary), text(mark.tags.join(", ")).size(meta).style(text::secondary)]
         }
         .spacing(12);
 
@@ -1343,14 +1673,14 @@ impl BibleTab {
                 .on_link_menu(BibleMsg::CardLinkMenu)
                 .on_link_drag(BibleMsg::CardLinkDrag)
                 .embed(move |target| sh.embed_for(&module, target))
-                .size(14.0 * sh.settings.note_size / 17.0)
+                .size(card_size(sh))
                 .font(sh.settings.text_font())
                 .padding(4)
                 // The editor scrolls itself once its text outgrows this.
-                .max_height(CARD_BODY_MAX)
+                .max_height(card_body_max(sh))
                 .into()
         } else if bare {
-            button(text("Add a note…").size(14))
+            button(text("Add a note…").size(card_size(sh)).font(sh.settings.text_font()))
                 .padding(0)
                 .width(Length::Fill)
                 .style(button::text)
@@ -1361,10 +1691,10 @@ impl BibleTab {
             // text scrolls inside the card instead of making the card tall.
             live_view(Document::new(&full), pal)
                 .fit_width()
-                .size(14.0 * sh.settings.note_size / 17.0)
+                .size(card_size(sh))
                 .font(sh.settings.text_font())
                 .padding([2.0, 0.0])
-                .max_height(CARD_BODY_MAX)
+                .max_height(card_body_max(sh))
                 .on_link(BibleMsg::OpenLink)
                 .on_link_menu(BibleMsg::CardLinkMenu)
                 .on_link_drag(BibleMsg::CardLinkDrag)
@@ -1378,7 +1708,7 @@ impl BibleTab {
         };
 
         let small = |label: &'static str, msg: BibleMsg| {
-            button(text(label).size(12)).padding([2, 6]).style(button::text).on_press(msg)
+            button(text(label).size(meta)).padding([2, 6]).style(button::text).on_press(msg)
         };
         let mut footer = row![].spacing(2);
         if writing || bare || popup {
@@ -1389,7 +1719,11 @@ impl BibleTab {
         }
 
         let width = if fill { Length::Fill } else { Length::Shrink };
-        let content = column![header, body, footer].spacing(6).width(width);
+        let mut content = column![header].spacing(6).width(width);
+        if writing {
+            content = content.push(self.card_tags(sh, index));
+        }
+        let content = content.push(body).push(footer);
         container(content)
             .padding(10)
             .width(width)
@@ -1409,10 +1743,11 @@ impl BibleTab {
         // A dictionary entry (or a footnote, in a reader with no margin to put it in) pops over
         // the text under the click. Dictionaries never take a place in the margin.
         // A click on a Strong's word inside a mark shows both, one above the other.
-        let marks = self.popup.as_ref().filter(|_| !self.margin_showing || self.note_card.is_some());
-        if self.note_card.is_some() || marks.is_some() {
+        let marks = self.popup.as_ref().filter(|_| !self.marks_in_margin());
+        let note_card = self.note_card.as_ref();
+        if note_card.is_some() || marks.is_some() {
             let mut cards = column![].spacing(6);
-            if let Some(card) = self.note_card.as_ref() {
+            if let Some(card) = note_card {
                 cards = cards.push(self.note_card_view(sh, card, true));
             }
             for &i in marks.into_iter().flatten().filter(|&&i| i < sh.marks.len()) {
@@ -1423,13 +1758,13 @@ impl BibleTab {
         }
         // A comment being written in a reader with no margin: its card, under the selection.
         if let Some(index) = self.editing.filter(|&i| i < sh.marks.len())
-            && !self.margin_showing
+            && !self.marks_in_margin()
             && self.text_selection.is_some()
         {
             let card = container(self.card_view(sh, index, true)).padding(6).width(360).style(container::rounded_box);
             return Some((FloatKind::UnderSelection, card.into()));
         }
-        self.text_selection.is_some().then(|| (FloatKind::UnderSelection, pen_toolbar()))
+        self.text_selection.is_some().then(|| (FloatKind::UnderSelection, pen_toolbar(sh)))
     }
 
     fn reader_pane<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
@@ -1442,34 +1777,14 @@ impl BibleTab {
             Err(e) => text(e.clone()).into(),
         };
         let bold = Font { weight: font::Weight::Bold, ..sh.settings.text_font() };
-        let title = text(format!("{} {}", self.book, self.chapter_no)).size(30).font(bold);
+        let title = text(format!("{} {}", self.book, self.chapter_no)).size(sh.settings.bible_size * 1.6).font(bold);
 
         let scroller = scrollable(container(column![self.chapter_links(sh), title, body, self.chapter_links(sh), space::vertical().height(20)].spacing(16)).padding(32).width(Length::Fill))
             .id(self.reader_id())
             .on_scroll(|v| BibleMsg::Scrolled(v.absolute_offset().y))
             .height(Length::Fill);
 
-        let mut pane = column![scroller];
-        if let Some(detail) = &self.detail {
-            let content: Element<'_, BibleMsg> = match detail {
-                Detail::MarkFile { path, text: body } => column![
-                    text(format!("Mark saved as {path}")).size(12),
-                    text(body.clone()).size(12).font(Font::MONOSPACE)
-                ]
-                .spacing(4)
-                .into(),
-            };
-            pane = pane.push(
-                container(
-                    row![content, space::horizontal(), button(text("✕").size(12)).style(button::text).on_press(BibleMsg::CloseDetail)]
-                        .align_y(iced::Alignment::Start),
-                )
-                .padding(12)
-                .width(Length::Fill)
-                .style(container::rounded_box),
-            );
-        }
-        pane.into()
+        column![scroller].into()
     }
 }
 
@@ -1484,22 +1799,23 @@ pub fn reference_card<'a>(
     action: Option<(&'static str, BibleMsg)>,
 ) -> Element<'a, BibleMsg> {
     let color = Palette::for_theme(&sh.theme()).link;
-    let mut header = row![text(label.to_string()).size(12).style(text::secondary)]
+    let meta = card_size(sh) * 0.7;
+    let mut header = row![text(label.to_string()).size(meta).style(text::secondary)]
         .spacing(16)
         .align_y(iced::Alignment::Center);
     if fill {
         header = header.push(space::horizontal());
     }
     if let Some((label, message)) = action {
-        header = header.push(button(text(label).size(12)).padding([0, 6]).style(button::text).on_press(message));
+        header = header.push(button(text(label).size(meta)).padding([0, 6]).style(button::text).on_press(message));
     }
     if closable {
         header = header
-            .push(button(text("✕").size(12)).padding([0, 4]).style(button::text).on_press(BibleMsg::CloseNoteCard));
+            .push(button(text("✕").size(meta)).padding([0, 4]).style(button::text).on_press(BibleMsg::CloseNoteCard));
     }
     let width = if fill { Length::Fill } else { Length::Shrink };
     let body = scrollable(container(body).padding([0, 8]).width(width)).height(Length::Shrink);
-    container(column![header, container(body).max_height(CARD_BODY_MAX)].spacing(6).width(width))
+    container(column![header, container(body).max_height(card_body_max(sh))].spacing(6).width(width))
         .padding(10)
         .width(width)
         .style(move |theme: &Theme| container::Style {

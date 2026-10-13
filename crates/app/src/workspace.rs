@@ -28,6 +28,43 @@ impl App {
         Workspace { layout: save_node(&self.layout), panes, focus: self.focus, zoomed: self.zoomed }
     }
 
+    /// The built-in layout: the Bible on the left half, a note on the right.
+    pub fn default_workspace(&self) -> Workspace {
+        let module = self.first_module();
+        let (book, chapter) = self.sh.first_chapter(&module);
+        // The Bible tab's usual view options, as a new tab has them.
+        let tab = BibleTab::started(0, &self.sh, module.clone(), None);
+        let bible = TabSave::Bible {
+            module: module.0,
+            book: book.osis().to_string(),
+            chapter,
+            scroll: 0.0,
+            strongs: tab.show_strongs,
+            marks: tab.show_marks,
+            footnotes: tab.show_footnotes,
+            refs: tab.show_refs,
+            in_margin: tab.in_margin,
+        };
+        let note = match self.sh.first_ordinary_note() {
+            path if path.is_empty() => TabSave::Blank,
+            path => TabSave::Note { path },
+        };
+        Workspace {
+            layout: Layout::Split {
+                axis: AxisSave::Row,
+                fraction: 0.5,
+                a: Box::new(Layout::Pane { id: 1 }),
+                b: Box::new(Layout::Pane { id: 2 }),
+            },
+            panes: vec![
+                PaneSave { id: 1, tabs: vec![bible], active: Some(0) },
+                PaneSave { id: 2, tabs: vec![note], active: Some(0) },
+            ],
+            focus: 1,
+            zoomed: None,
+        }
+    }
+
     /// Replace what is open with `saved`. A tab whose module or note is gone is left out (and a
     /// pane left with no tabs with it); if nothing at all can be put back, nothing changes and
     /// this says so.
@@ -127,7 +164,7 @@ impl App {
                     Tab::Dict(Box::new(DictTab::new(id, &self.sh, module, key)))
                 })
             }
-            TabSave::Bible { module, book, chapter, scroll, strongs, marks, footnotes, refs } => {
+            TabSave::Bible { module, book, chapter, scroll, strongs, marks, footnotes, refs, in_margin } => {
                 let module = ModuleId(module.clone());
                 if !self.sh.backend.modules().iter().any(|m| m.id == module) {
                     return None;
@@ -144,6 +181,7 @@ impl App {
                 let id = self.take_id();
                 let mut tab = BibleTab::restored(id, &self.sh, module, book, chapter, scroll);
                 (tab.show_strongs, tab.show_marks, tab.show_footnotes, tab.show_refs) = (*strongs, *marks, *footnotes, *refs);
+                tab.in_margin = *in_margin;
                 Some(Tab::Bible(Box::new(tab)))
             }
         }
@@ -162,6 +200,7 @@ fn save_tab(tab: &Tab) -> TabSave {
             marks: t.show_marks,
             footnotes: t.show_footnotes,
             refs: t.show_refs,
+            in_margin: t.in_margin,
         },
         Tab::Note(t) => TabSave::Note { path: t.path.clone() },
         Tab::Dict(t) => TabSave::Dict { module: t.module.0.clone(), key: t.key.clone() },

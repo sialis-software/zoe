@@ -12,7 +12,9 @@ pub struct Slot {
 
 /// Top `y` for each slot (same order as `slots`). Cards keep to the order of their anchors,
 /// sit level with their marks when there is room, and otherwise stack with `gap` between
-/// them. Pinned cards hold their anchor and the others make way, upwards as well as down.
+/// them. Cards that collide are spread about their marks (some up, some down) so that, in
+/// all, they sit as near them as can be (a least-squares fit), rather than all being pushed
+/// down. Pinned cards hold their anchor and the others make way, upwards as well as down.
 pub fn place_column(slots: &[Slot], gap: f32) -> Vec<f32> {
     let n = slots.len();
     let mut order: Vec<usize> = (0..n).collect();
@@ -27,8 +29,36 @@ pub fn place_column(slots: &[Slot], gap: f32) -> Vec<f32> {
         }
     };
 
+    // Each card's top is its offset `z` from where it would sit if all those before it were
+    // stacked tight above it, and those offsets may only grow. Pooling neighbours that would
+    // break that, at their average, gives the closest fit to the anchors.
+    let mut before = 0.0_f32;
+    let mut prefix = vec![0.0_f32; n];
     for &i in &order {
-        y[i] = slots[i].anchor;
+        prefix[i] = before;
+        before += slots[i].height + gap;
+    }
+    // Pools of (sum of targets, count).
+    let mut pools: Vec<(f32, usize)> = Vec::new();
+    for &i in &order {
+        pools.push((slots[i].anchor - prefix[i], 1));
+        while pools.len() > 1 {
+            let (b, a) = (pools[pools.len() - 1], pools[pools.len() - 2]);
+            if a.0 / a.1 as f32 <= b.0 / b.1 as f32 {
+                break;
+            }
+            pools.pop();
+            let last = pools.len() - 1;
+            pools[last] = (a.0 + b.0, a.1 + b.1);
+        }
+    }
+    let mut at = 0;
+    for (sum, count) in pools {
+        let z = (sum / count as f32).max(0.0);
+        for &i in &order[at..at + count] {
+            y[i] = z + prefix[i];
+        }
+        at += count;
     }
     forward(&mut y);
 
@@ -106,12 +136,16 @@ mod tests {
     }
 
     #[test]
-    fn colliding_cards_stack_in_anchor_order_with_a_gap() {
-        // Two marks on the same line, and a third just below them.
+    fn colliding_cards_stack_in_anchor_order_with_a_gap_around_their_marks() {
+        // Two marks on the same line, and a third just below them: the stack is centred on
+        // them (the best fit), not started at the first and left to run on below.
         let slots = [slot(200.0, 60.0), slot(200.0, 60.0), slot(230.0, 60.0)];
         let ys = place_column(&slots, 8.0);
-        assert_eq!(ys, [200.0, 268.0, 336.0]);
+        assert!((ys[0] - 142.0).abs() < 0.01 && (ys[1] - 210.0).abs() < 0.01 && (ys[2] - 278.0).abs() < 0.01, "{ys:?}");
         no_overlap(&slots, &ys, 8.0);
+        let drift = |ys: &[f32]| ys.iter().zip(&slots).map(|(y, s)| (y - s.anchor).abs()).fold(0.0, f32::max);
+        assert!(drift(&ys) < 68.0 + 48.0 + 1.0, "farther than when stacked downward from the first: {}", drift(&ys));
+        assert!(drift(&ys) < 106.0 - 0.0, "the old way left the last card 106 below its mark");
     }
 
     #[test]
@@ -126,7 +160,7 @@ mod tests {
     fn a_card_near_the_top_cannot_go_above_zero() {
         let slots = [slot(5.0, 50.0), slot(10.0, 50.0)];
         let ys = place_column(&slots, 8.0);
-        assert_eq!(ys, [5.0, 63.0]);
+        assert_eq!(ys, [0.0, 58.0]);
     }
 
     #[test]

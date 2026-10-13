@@ -12,6 +12,7 @@ use scripture::Book;
 use std::collections::{BTreeMap, BTreeSet};
 use study_core::margin::Mark;
 use study_core::frontmatter;
+use study_core::templates::{self, Template};
 use study_core::markdown::{self, LinkTarget, find_links};
 use study_core::{ModuleId, StudyBackend};
 
@@ -59,6 +60,8 @@ pub struct Shared {
     pub status: String,
     pub toast: Option<Toast>,
     pub events: Vec<Event>,
+    /// Every tag with the number of notes that have it, as of the notes' revision it is for.
+    tag_cache: std::cell::RefCell<(u64, Vec<(String, usize)>)>,
 }
 
 impl Shared {
@@ -81,6 +84,7 @@ impl Shared {
             status: String::new(),
             toast: None,
             events: Vec::new(),
+            tag_cache: std::cell::RefCell::new((u64::MAX, Vec::new())),
         }
     }
 
@@ -148,13 +152,67 @@ impl Shared {
         }
     }
 
+    /// Every tag in use, with how many notes have it: the most used first, then by name.
+    pub fn tag_counts(&self) -> Vec<(String, usize)> {
+        let revision = self.notes.revision();
+        let mut cache = self.tag_cache.borrow_mut();
+        if cache.0 != revision {
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for (path, text) in self.notes.iter().filter(|(path, _)| !templates::is_template(path)) {
+                let _ = path;
+                for tag in frontmatter::parse(text).front.tags {
+                    *counts.entry(frontmatter::normalize_tag(&tag)).or_default() += 1;
+                }
+            }
+            let mut all: Vec<(String, usize)> = counts.into_iter().filter(|(t, _)| !t.is_empty()).collect();
+            all.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            *cache = (revision, all);
+        }
+        cache.1.clone()
+    }
+
+    /// Tags to offer for what has been typed in a tag box: those in use that contain it (those
+    /// that start with it first, then the more used), but not `have`. At most `limit`.
+    pub fn tag_suggestions(&self, typed: &str, have: &[String], limit: usize) -> Vec<(String, usize)> {
+        let typed = frontmatter::normalize_tag(typed);
+        if typed.is_empty() {
+            return Vec::new();
+        }
+        let have: Vec<String> = have.iter().map(|t| frontmatter::normalize_tag(t)).collect();
+        let mut found: Vec<(String, usize)> =
+            self.tag_counts().into_iter().filter(|(t, _)| t.contains(&typed) && !have.contains(t)).collect();
+        found.sort_by_key(|(t, n)| (!t.starts_with(&typed), std::cmp::Reverse(*n), t.clone()));
+        found.truncate(limit);
+        found
+    }
+
+    /// The color a tag has, if a pen is for it (or for the tag it is inside).
+    pub fn tag_color(&self, tag: &str) -> Option<String> {
+        let tag = frontmatter::normalize_tag(tag);
+        self.settings
+            .pens
+            .iter()
+            .find(|pen| pen.tag == tag || tag.starts_with(&format!("{}/", pen.tag)))
+            .map(|pen| pen.color.clone())
+    }
+
+    /// The tags of the note at `path`.
+    pub fn tags_of(&self, path: &str) -> Vec<String> {
+        self.notes.get(path).map(|text| frontmatter::parse(text).front.tags).unwrap_or_default()
+    }
+
     pub fn note_paths(&self) -> Vec<String> {
         self.notes.keys().cloned().collect()
     }
 
     /// The first note that is not a margin file: what a note tab opens when it has nothing.
     pub fn first_ordinary_note(&self) -> String {
-        self.notes.keys().find(|p| !p.starts_with("margins/")).cloned().unwrap_or_default()
+        self.notes.keys().find(|p| !p.starts_with("margins/") && !templates::is_template(p)).cloned().unwrap_or_default()
+    }
+
+    /// The kinds of note there are: the templates in the vault, by name.
+    pub fn templates(&self) -> Vec<Template> {
+        templates::all(self.notes.iter())
     }
 
     pub fn module_abbreviation(&self, module: &ModuleId) -> String {
@@ -334,6 +392,25 @@ impl Shared {
         }
         self.notes.insert(path.clone(), markdown);
         self.events.push(Event::NoteRewritten { old, new: path });
+    }
+
+    /// Give mark `index` these tags (in one form, each once) and keep its note file in step.
+    pub fn set_mark_tags(&mut self, index: usize, tags: Vec<String>) {
+        let Some(mark) = self.marks.get_mut(index) else { return };
+        let mut kept: Vec<String> = Vec::new();
+        for tag in tags {
+            let tag = frontmatter::normalize_tag(&tag);
+            if !tag.is_empty() && !kept.contains(&tag) {
+                kept.push(tag);
+            }
+        }
+        if mark.tags == kept {
+            return;
+        }
+        mark.tags = kept;
+        let (path, markdown) = (mark.path(), mark.to_markdown());
+        self.notes.insert(path.clone(), markdown);
+        self.events.push(Event::NoteRewritten { old: path.clone(), new: path });
     }
 
     /// A fresh mark id: unique across sessions, since a vault can already hold marks.
