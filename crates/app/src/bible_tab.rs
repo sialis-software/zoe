@@ -130,6 +130,8 @@ pub enum BibleMsg {
     OpenCommentary,
     /// Search the Bible for the selected words.
     SearchSelection,
+    /// Open the search tab.
+    OpenSearch,
     /// Marks under a click in the reader (several when they overlap); empty = dismissed.
     MarksClicked(Vec<usize>),
     AutoScroll(f32),
@@ -199,6 +201,8 @@ pub enum Request {
     OpenCommentary(Book, u16, Option<u16>),
     /// A search for these words.
     Search(String),
+    /// The search tab, to type in.
+    OpenSearch,
 }
 
 /// A book and chapter number.
@@ -1065,6 +1069,10 @@ impl BibleTab {
                 request = kept.map(Request::OpenNote);
                 Task::none()
             }
+            BibleMsg::OpenSearch => {
+                request = Some(Request::OpenSearch);
+                Task::none()
+            }
             BibleMsg::SearchSelection => {
                 // The selected words (the first verse's, if it runs over several), as typed in the search box.
                 let words = self.selection_context().map(|(slices, canon)| {
@@ -1417,6 +1425,12 @@ impl BibleTab {
             .padding(0)
             .style(button::secondary)
             .on_press(BibleMsg::ToggleMenu);
+        let search = button(container(crate::icons::Icon::Search.view(18.0)).center(Length::Fill))
+            .width(31)
+            .height(31)
+            .padding(0)
+            .style(button::secondary)
+            .on_press(BibleMsg::OpenSearch);
         let arrow = |icon: crate::icons::Icon, on: bool, msg: BibleMsg| {
             let b = button(container(icon.view(18.0)).center(Length::Fill)).width(31).height(31).padding(0).style(button::secondary);
             if on { b.on_press(msg) } else { b }
@@ -1436,9 +1450,9 @@ impl BibleTab {
             pick_list(books, Some(BookChoice(self.book)), BibleMsg::PickBook),
             pick_list(chapters, Some(current), BibleMsg::PickChapter),
             space::horizontal(),
-            menu,
+            row![search, menu].spacing(4),
         ]
-        .spacing(16)
+        .spacing(12)
         .align_y(iced::Center);
         container(bar).padding([8, 16]).into()
     }

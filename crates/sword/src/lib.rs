@@ -48,10 +48,16 @@ impl From<std::io::Error> for Error {
     }
 }
 
+/// The search path the environment sets, if it does: it replaces every other place.
+pub fn path_override() -> Option<std::ffi::OsString> {
+    std::env::var_os("ZOE_SWORD_PATH").or_else(|| std::env::var_os("BIBLE_STUDY_SWORD_PATH"))
+}
+
 /// Where modules are looked for, in search order: `SWORD_PATH` and the app's own folder
-/// `~/.config/sword`. `BIBLE_STUDY_SWORD_PATH` (colon-separated) replaces both.
+/// `~/.config/sword`. `ZOE_SWORD_PATH` (colon-separated; the older name `BIBLE_STUDY_SWORD_PATH`
+/// also works) replaces both.
 pub fn default_roots() -> Vec<PathBuf> {
-    if let Some(v) = std::env::var_os("BIBLE_STUDY_SWORD_PATH") {
+    if let Some(v) = path_override() {
         return std::env::split_paths(&v).collect();
     }
     let mut roots = Vec::new();

@@ -253,6 +253,20 @@ impl Config {
         fs::read_to_string(home.join(Self::FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
     }
 
+    /// The data folder was moved from `old` to `home`: the folders the choices name inside it
+    /// are the same ones in their new place.
+    pub fn moved(home: &Path, old: &Path) {
+        let mut config = Config::load(home);
+        let follow = |path: &mut PathBuf| {
+            if let Ok(rest) = path.strip_prefix(old) {
+                *path = home.join(rest);
+            }
+        };
+        config.vault.as_mut().map(follow);
+        config.module_folders.iter_mut().for_each(follow);
+        let _ = config.save(home);
+    }
+
     pub fn save(&self, home: &Path) -> io::Result<()> {
         fs::create_dir_all(home)?;
         let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;

@@ -6,7 +6,7 @@ A Cargo workspace; everything except the UI crate is GUI-agnostic so tests are f
 a CLI is easy, and other frontends stay possible.
 
 ```
-bible-study/
+zoe/
   crates/
     sword/       # read SWORD library: conf parser, drivers, versification, markup->AST
     scripture/   # canon tables, OSIS refs, reference parser, versification mapping

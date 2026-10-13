@@ -88,8 +88,8 @@ impl LiveBackend {
                 open.insert(m.name().to_string(), Arc::new(Open { bible, chapters }));
             }
         }
-        // The first module is the one the app opens: LSB for now, or `BIBLE_STUDY_MODULE`.
-        let preferred = std::env::var("BIBLE_STUDY_MODULE").unwrap_or_else(|_| DEFAULT_MODULE.into());
+        // The first module is the one the app opens: LSB for now, or `ZOE_MODULE`.
+        let preferred = std::env::var("ZOE_MODULE").or_else(|_| std::env::var("BIBLE_STUDY_MODULE")).unwrap_or_else(|_| DEFAULT_MODULE.into());
         infos.sort_by_key(|m: &ModuleInfo| !m.abbreviation.eq_ignore_ascii_case(&preferred));
         let mut named: Vec<(u8, Dictionary)> = Vec::new();
         for m in lib.modules().filter(|m| m.kind() == Kind::Lexicon) {
@@ -273,9 +273,13 @@ pub fn index_path(home: &Path, dir: &Path) -> PathBuf {
 pub fn boot() -> Boot {
     let reseed = std::env::args().any(|a| a == "--reseed");
     let home = vault::data_home();
+    // Data kept under the app's earlier name comes along.
+    if let Some(old) = vault::migrate_data_home(&home) {
+        crate::state::Config::moved(&home, &old);
+    }
     let config = crate::state::Config::load(&home);
     // The app's own folder for modules is there to be put modules in.
-    if std::env::var_os("BIBLE_STUDY_SWORD_PATH").is_none()
+    if sword::path_override().is_none()
         && let Some(own) = sword::default_roots().into_iter().find(|r| r.ends_with(".config/sword"))
     {
         let _ = std::fs::create_dir_all(own);
@@ -284,9 +288,9 @@ pub fn boot() -> Boot {
 }
 
 /// Where to look for modules: the folders the person added, then the usual places (or only
-/// what `BIBLE_STUDY_SWORD_PATH` says).
+/// what `ZOE_SWORD_PATH` says).
 pub fn module_roots(added: &[PathBuf]) -> Vec<PathBuf> {
-    if std::env::var_os("BIBLE_STUDY_SWORD_PATH").is_some() {
+    if sword::path_override().is_some() {
         return sword::default_roots();
     }
     let mut roots = added.to_vec();
@@ -541,7 +545,7 @@ mod tests {
             return eprintln!("skipped: LSB is not installed");
         }
         assert_eq!(live.modules()[0].abbreviation, "LSB");
-        assert!(live.modules().len() > 1 || std::env::var("BIBLE_STUDY_SWORD_PATH").is_ok());
+        assert!(live.modules().len() > 1 || sword::path_override().is_some());
     }
 
     #[test]

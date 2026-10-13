@@ -15,7 +15,7 @@ use iced::{Element, Length, Task, Theme};
 use std::path::{Path, PathBuf};
 
 /// The name offered for a new vault's folder.
-pub const DEFAULT_NAME: &str = "Bible Study Vault";
+pub const DEFAULT_NAME: &str = "Zoe Vault";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -255,7 +255,7 @@ impl App {
     pub fn welcome_view(&self, why: &Onboarding) -> Element<'_, Message> {
         let intro = match why {
             Onboarding::First => column![
-                text("Welcome").size(30),
+                text("Welcome to Zoe").size(30),
                 text(
                     "Your notes, highlights and margin notes are kept in a vault: an ordinary folder of \
                      Markdown files that you own. You can back it up, sync it, or open it in any other editor."
@@ -680,7 +680,7 @@ mod pen_tests {
         let mut settings = app.sh.settings.clone();
         settings.pens = vec![PenDef { tag: "wisdom".into(), color: "#4DA3FF".into(), style: PenStyle::Underline }];
         app.sh.set_settings(settings);
-        assert!(a.path().join(".bible-study/pens.json").exists());
+        assert!(a.path().join(".zoe/pens.json").exists());
         let _ = app.switch_vault(b.path().into(), none).unwrap();
         assert_eq!(app.sh.settings.pens, crate::state::default_pens(), "another vault has its own");
         let _ = app.switch_vault(a.path().into(), none).unwrap();
@@ -696,7 +696,36 @@ mod pen_tests {
         app.sh.settings.pens.truncate(1);
         app.sh.load_pens(true);
         assert_eq!(app.sh.settings.pens.len(), 1);
-        let kept = std::fs::read_to_string(dir.path().join(".bible-study/pens.json")).unwrap();
+        let kept = std::fs::read_to_string(dir.path().join(".zoe/pens.json")).unwrap();
         assert!(kept.contains(&app.sh.settings.pens[0].tag));
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+
+    #[test]
+    fn the_choices_follow_the_data_folder_when_it_moves_and_a_vaults_pens_follow_its_folder() {
+        let base = tempfile::tempdir().unwrap();
+        let (old, home) = (base.path().join("bible-study"), base.path().join("zoe"));
+        let elsewhere = base.path().join("Notes");
+        std::fs::create_dir_all(old.join("vault")).unwrap();
+        Config { vault: Some(old.join("vault")), module_folders: vec![old.join("mods"), elsewhere.clone()] }.save(&old).unwrap();
+        assert_eq!(vault::migrate_data_home(&home), Some(old.clone()));
+        Config::moved(&home, &old);
+        let config = Config::load(&home);
+        assert_eq!(config.vault, Some(home.join("vault")), "the default vault is where it moved to");
+        assert_eq!(config.module_folders, vec![home.join("mods"), elsewhere], "and only paths inside the folder change");
+
+        // A vault with pens in the old hidden folder keeps them in the new one.
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir(vault.path().join(".bible-study")).unwrap();
+        std::fs::write(vault.path().join(".bible-study/pens.json"), r##"[{"tag":"wisdom","color":"#4DA3FF","style":"underline"}]"##).unwrap();
+        let mut app = App::new();
+        app.sh.vault = Some(vault.path().into());
+        app.sh.load_pens(false);
+        assert_eq!(app.sh.settings.pens.len(), 1);
+        assert!(vault.path().join(".zoe/pens.json").exists() && !vault.path().join(".bible-study").exists());
     }
 }

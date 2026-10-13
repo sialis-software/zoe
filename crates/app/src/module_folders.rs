@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn folders_the_person_added_are_searched_first_and_each_place_once() {
-        if std::env::var_os("BIBLE_STUDY_SWORD_PATH").is_some() {
+        if sword::path_override().is_some() {
             return eprintln!("skipped: the search path is set by the environment");
         }
         let mine = PathBuf::from("/somewhere/modules");
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn the_apps_own_folder_is_the_only_usual_place() {
-        if std::env::var_os("BIBLE_STUDY_SWORD_PATH").is_some() || std::env::var_os("SWORD_PATH").is_some() {
+        if sword::path_override().is_some() || std::env::var_os("SWORD_PATH").is_some() {
             return eprintln!("skipped: the search path is set by the environment");
         }
         let roots = sword::default_roots();

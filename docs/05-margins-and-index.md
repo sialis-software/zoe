@@ -215,7 +215,7 @@ Module index: `verse_text(ord, text)` + FTS5, `word_lemma(ord, strongs, morph)`.
 The app now runs on a real vault and real modules (crates `vault`, `sword`).
 
 - **Vault**: any folder of markdown files, chosen by the user. The choice is kept in
-  `<home>/config.json` (`<home>` is `$BIBLE_STUDY_HOME`, else `~/Library/Application Support/bible-study`
+  `<home>/config.json` (`<home>` is `$ZOE_HOME`, else `~/Library/Application Support/zoe`
   on macOS); with none saved, an earlier version's `<home>/vault` is used. Every edit is written
   through to its file (atomic write-then-rename) after each update; deleting or renaming a mark
   removes the old file. Marks load from `margins/` on start.
@@ -230,7 +230,7 @@ The app now runs on a real vault and real modules (crates `vault`, `sword`).
 - **Index per vault**: `<home>/cache/index-<hash of the vault path>.sqlite` (the default vault
   keeps `index.sqlite`), so nothing but notes is ever written into a vault.
 - **Seed data**: an empty vault is seeded with four linked notes and nine marks anchored in
-  ASV's real text (a quote a module words differently is skipped). `bible-study --reseed`
+  ASV's real text (a quote a module words differently is skipped). `zoe --reseed`
   restores the samples without touching other files.
 - **Index**: SQLite in `<home>/cache/` (outside the vault, per §6): `files`,
   `links` (verse/embed/note/sword links plus each mark's anchor, as book/chapter/verse
@@ -302,3 +302,19 @@ design so nothing built now rules it out.
 - Should `books/` and `studies/` be absorbed into series, leaving one concept?
 - Does deleting a series document remove membership, or leave dangling links that the app
   offers to repair?
+
+### Names
+
+The app is called Zoe. Its data folder is `zoe` (earlier `bible-study`: on the first start after the
+rename the old folder is moved to the new name and the vault and module folders chosen in
+`config.json` are followed along), the hidden folder in a vault is `.zoe` (earlier `.bible-study`,
+moved the same way), and the environment variables are `ZOE_HOME`, `ZOE_SWORD_PATH` and `ZOE_MODULE`
+(the old `BIBLE_STUDY_*` names still work). On a Mac, `scripts/bundle-macos.sh` makes `target/Zoe.app`
+so the Dock and menu bar use the name and the icon (the artwork in `crates/app/assets/app/zoe.png` on a
+rounded square, made by `scripts/make-icon.swift`, whose 1024 px result is also kept as `zoe-rounded.png`); run outside a bundle the app sets its own Dock icon,
+and on other systems the window's icon, from that rounded picture.
+
+The program file is `Zoe` (a `[[bin]]` in `crates/app/Cargo.toml`; `cargo run -p zoe` still runs it), so that
+the Dock shows the capital outside a bundle. The mark in the header bar is `crates/app/assets/app/zoe.svg`,
+the artwork traced to a path (the original, which draws the letter as text in a font the viewer must have,
+is kept as `zoe-source.svg`), drawn in the color of the text.

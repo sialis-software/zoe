@@ -9,19 +9,33 @@ pub struct Vault {
     root: PathBuf,
 }
 
-/// Where this app keeps its data: `BIBLE_STUDY_HOME`, else the platform's data directory.
+/// Where this app keeps its data: `ZOE_HOME` (or the older `BIBLE_STUDY_HOME`), else the platform's
+/// data directory.
 pub fn data_home() -> PathBuf {
-    if let Some(p) = std::env::var_os("BIBLE_STUDY_HOME") {
+    if let Some(p) = std::env::var_os("ZOE_HOME").or_else(|| std::env::var_os("BIBLE_STUDY_HOME")) {
         return PathBuf::from(p);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/bible-study")
+        home.join("Library/Application Support/zoe")
     } else if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(x).join("bible-study")
+        PathBuf::from(x).join("zoe")
     } else {
-        home.join(".local/share/bible-study")
+        home.join(".local/share/zoe")
     }
+}
+
+/// The folder the data was kept in before the app was called Zoe, next to where it is now.
+pub const OLD_DATA_FOLDER: &str = "bible-study";
+
+/// Move the data folder of the app's earlier name to `home` (the new one), if there is one and
+/// `home` does not exist yet. Gives the old place, if it was moved.
+pub fn migrate_data_home(home: &Path) -> Option<PathBuf> {
+    let old = home.parent()?.join(OLD_DATA_FOLDER);
+    if home.file_name()? != "zoe" || home.exists() || !old.is_dir() {
+        return None;
+    }
+    fs::rename(&old, home).ok().map(|()| old)
 }
 
 fn invalid(path: &str) -> io::Error {
@@ -135,6 +149,23 @@ mod tests {
         v.remove("notes/Top.md").unwrap();
         v.remove("notes/Top.md").unwrap();
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn data_kept_under_the_old_name_moves_to_the_new_folder_once() {
+        let base = tempfile::tempdir().unwrap();
+        let (old, new) = (base.path().join(OLD_DATA_FOLDER), base.path().join("zoe"));
+        assert_eq!(migrate_data_home(&new), None, "nothing to move");
+        fs::create_dir_all(old.join("vault")).unwrap();
+        fs::write(old.join("vault/Note.md"), "# Note").unwrap();
+        assert_eq!(migrate_data_home(&base.path().join("elsewhere")), None, "only for the app's own folder");
+        assert_eq!(migrate_data_home(&new), Some(old.clone()));
+        assert!(!old.exists());
+        assert_eq!(fs::read_to_string(new.join("vault/Note.md")).unwrap(), "# Note");
+        // A new folder that is there is never written over by an old one.
+        fs::create_dir_all(&old).unwrap();
+        assert_eq!(migrate_data_home(&new), None);
+        assert!(old.exists());
     }
 
     #[test]

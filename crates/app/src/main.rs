@@ -380,6 +380,7 @@ impl App {
             size: iced::Size::new(1280.0, 800.0),
             // Closing saves the session first (see `Message::CloseRequested`).
             exit_on_close_request: false,
+            icon: native::window_icon(),
             ..iced::window::Settings::default()
         });
         app.main = main;
@@ -912,6 +913,7 @@ impl App {
                     }
                     Some(bible_tab::Request::OpenNote(path)) => self.show_note(path),
                     Some(bible_tab::Request::OpenBacklinks(passage)) => self.show_backlinks(id, Target::Passage(passage)),
+                    Some(bible_tab::Request::OpenSearch) => return Task::batch([task, self.show_search(None)]),
                     Some(bible_tab::Request::Search(words)) => return Task::batch([task, self.show_search(Some(words))]),
                     Some(bible_tab::Request::OpenCommentary(book, chapter, verse)) => return Task::batch([task, self.show_commentary(id, book, chapter, verse)]),
                     None => {}
@@ -1690,7 +1692,7 @@ impl App {
     }
 
     fn window_title(&self, window: iced::window::Id) -> String {
-        if Some(window) == self.settings_window { "Settings".into() } else { "Bible Study (prototype)".into() }
+        if Some(window) == self.settings_window { "Settings".into() } else { "Zoe".into() }
     }
 
     fn window_view(&self, window: iced::window::Id) -> Element<'_, Message> {
@@ -2069,7 +2071,12 @@ impl App {
 
     /// What applies to the whole window.
     fn top_bar(&self) -> Element<'_, Message> {
-        let mut bar = row![space::horizontal()].spacing(16).align_y(iced::Center);
+        // The app's mark at the left, in the color of the text.
+        let mark = iced::widget::svg(iced::widget::svg::Handle::from_memory(include_bytes!("../assets/app/zoe.svg").as_slice()))
+            .width(10.2)
+            .height(24)
+            .style(|theme: &Theme, _status| iced::widget::svg::Style { color: Some(theme.extended_palette().background.base.text) });
+        let mut bar = row![mark, space::horizontal()].spacing(16).align_y(iced::Center);
         if !self.sh.status.is_empty() {
             bar = bar.push(text(self.sh.status.clone()).size(13).style(text::danger));
         }
@@ -3503,6 +3510,20 @@ mod tests {
         assert!(saved.panes.iter().any(|p| p.tabs.iter().any(|t| matches!(t, state::TabSave::Search { best: true, query, .. } if query.contains("God so loved")))));
         let _ = app.apply_workspace(&saved);
         assert!(app.tabs.values().any(|t| matches!(t, Tab::Search(s) if s.options.by_relevance && s.draft.contains("God so loved"))));
+    }
+
+    #[test]
+    fn the_readers_search_button_opens_the_search_tab_once() {
+        let mut app = App::new();
+        let bid = app.bid();
+        let searches = |app: &App| app.tabs.values().filter(|t| matches!(t, Tab::Search(_))).count();
+        assert_eq!(searches(&app), 0);
+        let _ = app.update(Message::Bible(bid, BibleMsg::OpenSearch));
+        assert_eq!(searches(&app), 1);
+        let id = app.tabs.iter().find(|(_, t)| matches!(t, Tab::Search(_))).map(|(i, _)| *i).unwrap();
+        assert_eq!(app.panes.iter().find(|p| p.active == Some(id)).map(|p| p.id), Some(app.focus), "shown");
+        let _ = app.update(Message::Bible(bid, BibleMsg::OpenSearch));
+        assert_eq!(searches(&app), 1, "the same tab again");
     }
 
     #[test]

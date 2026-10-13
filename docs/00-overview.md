@@ -1,4 +1,4 @@
-# Bible Study App — Overview
+# Zoe (Bible Study App) — Overview
 
 Working title: **TBD**. This document is the entry point; see the others for detail:
 

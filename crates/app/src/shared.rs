@@ -132,7 +132,13 @@ impl Shared {
 
     /// The file in the vault that keeps its pens, so they go where the vault goes.
     fn pens_file(&self) -> Option<std::path::PathBuf> {
-        self.vault.as_ref().map(|dir| dir.join(".bible-study").join("pens.json"))
+        let folder = self.vault.as_ref()?.join(PENS_FOLDER);
+        // A vault from before the app was called Zoe kept them in a folder of the old name.
+        let old = folder.with_file_name(OLD_PENS_FOLDER);
+        if !folder.exists() && old.is_dir() {
+            let _ = std::fs::rename(&old, &folder);
+        }
+        Some(folder.join("pens.json"))
     }
 
     /// Take the pens the vault keeps. A vault with none yet gets the ones in use if `carry` (the
@@ -603,6 +609,10 @@ impl Shared {
         }
     }
 }
+
+/// The hidden folder in a vault where the app keeps what is not a note, and its earlier name.
+const PENS_FOLDER: &str = ".zoe";
+const OLD_PENS_FOLDER: &str = ".bible-study";
 
 /// A Strong's number in one spelling: `g0026` and `G26` are `G26`.
 pub fn strongs_name(key: &str) -> Option<String> {

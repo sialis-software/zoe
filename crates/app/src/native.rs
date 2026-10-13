@@ -18,6 +18,28 @@ pub fn install_menu(window: Id) -> Task<()> {
     imp::install_menu(window)
 }
 
+/// The app's picture, as a window's icon (where windows have one: not on a Mac, whose Dock icon
+/// is set from it when the app runs outside a bundle).
+pub fn window_icon() -> Option<iced::window::Icon> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let (pixels, width, height) = icon_pixels()?;
+    iced::window::icon::from_rgba(pixels, width, height).ok()
+}
+
+/// The artwork as 8-bit RGBA, with its width and height.
+fn icon_pixels() -> Option<(Vec<u8>, u32, u32)> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(ICON)).read_info().ok()?;
+    let mut pixels = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut pixels).ok()?;
+    (info.color_type == png::ColorType::Rgba && info.bit_depth == png::BitDepth::Eight).then_some((pixels, info.width, info.height))
+}
+
+/// The artwork on the rounded square (made by `scripts/make-icon.swift`) that every system gets: a
+/// Dock or taskbar shows what it is given as it is.
+const ICON: &[u8] = include_bytes!("../assets/app/zoe-rounded.png");
+
 /// The menu bar's Settings… item being chosen.
 pub fn settings_chosen() -> Subscription<()> {
     imp::settings_chosen()
@@ -51,8 +73,17 @@ mod imp {
 
     pub fn install_menu(window: Id) -> Task<()> {
         window::run(window, |_| {
+            // Run outside an app bundle, the system would name the app after its file: Zoe is its name.
+            objc2_foundation::NSProcessInfo::processInfo().setProcessName(&objc2_foundation::NSString::from_str("Zoe"));
+            // Likewise the Dock's picture: a bundle has its own, and this only matters without one.
+            if let Some(mtm) = objc2::MainThreadMarker::new() {
+                let data = objc2_foundation::NSData::with_bytes(ICON);
+                if let Some(image) = objc2_app_kit::NSImage::initWithData(<objc2_app_kit::NSImage as objc2::AnyThread>::alloc(), &data) {
+                    unsafe { objc2_app_kit::NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image)) };
+                }
+            }
             let menu = Menu::new();
-            let app = Submenu::new("Bible Study", true);
+            let app = Submenu::new("Zoe", true);
             let settings = MenuItem::with_id(SETTINGS, "Settings\u{2026}", true, Some(Accelerator::new(Modifiers::META, Code::Comma)));
             let _ = app.append_items(&[
                 &PredefinedMenuItem::about(None, None),
@@ -137,5 +168,19 @@ mod imp {
 
     pub fn settings_chosen() -> Subscription<()> {
         Subscription::none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_icon_is_a_square_picture_with_clear_corners() {
+        let (pixels, width, height) = icon_pixels().expect("an 8-bit RGBA picture");
+        assert_eq!((width, height), (1024, 1024));
+        let alpha = |x: usize, y: usize| pixels[(y * width as usize + x) * 4 + 3];
+        assert_eq!((alpha(0, 0), alpha(1023, 1023)), (0, 0), "rounded: the corners show through");
+        assert_eq!(alpha(512, 512), 255);
     }
 }

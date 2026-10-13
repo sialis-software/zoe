@@ -280,30 +280,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "bible-study"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "iced",
- "iced_test",
- "md-editor",
- "muda",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "png 0.18.1",
- "raw-window-handle",
- "rfd",
- "scripture",
- "serde",
- "serde_json",
- "study-core",
- "sword",
- "tempfile",
- "vault",
-]
-
-[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5067,6 +5043,30 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zoe"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "iced",
+ "iced_test",
+ "md-editor",
+ "muda",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "png 0.18.1",
+ "raw-window-handle",
+ "rfd",
+ "scripture",
+ "serde",
+ "serde_json",
+ "study-core",
+ "sword",
+ "tempfile",
+ "vault",
+]
 
 [[package]]
 name = "zune-core"
