@@ -3,7 +3,6 @@
 
 pub mod ast;
 pub mod commentary;
-pub mod devotional;
 pub mod frontmatter;
 pub mod margin;
 pub mod markdown;
@@ -13,6 +12,7 @@ pub mod plan;
 pub mod plan_log;
 pub mod reading_log;
 pub mod search;
+pub mod starter_plans;
 pub mod templates;
 
 use ast::Chapter;
@@ -62,6 +62,11 @@ pub trait StudyBackend {
     fn modules(&self) -> Vec<ModuleInfo>;
     /// Chapters the given module can serve, in canon order.
     fn available_chapters(&self, module: &ModuleId) -> Vec<(Book, u16)>;
+    /// How the module numbers its chapters and verses. Passages in notes are in the KJV's numbering, and
+    /// are mapped into this one (`Versification::map_from_kjv`) to be shown.
+    fn versification(&self, _module: &ModuleId) -> scripture::Versification {
+        scripture::Versification::Kjv
+    }
     fn chapter(&self, module: &ModuleId, book: Book, chapter: u16) -> Result<Chapter, Error>;
     fn lexicon_entry(&self, key: &str) -> Option<LexiconEntry>;
     /// The dictionaries and lexicons installed, in the order to offer them.

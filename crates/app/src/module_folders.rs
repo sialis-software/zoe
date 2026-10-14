@@ -80,9 +80,7 @@ impl App {
             return Task::none();
         }
         if self.no_modules {
-            // The app started on sample text, with no vault open; it starts over with the modules.
-            self.sh.toast("Saved: restart the app to use these modules");
-            return Task::none();
+            return self.leave_sample_text(backend, "Saved: restart the app to use these modules");
         }
         let task = self.install_backend(backend);
         self.sh.toast(done);
@@ -92,14 +90,34 @@ impl App {
     /// Load the modules again from the folders searched, in place: after one was installed or
     /// removed. What is open is put back on the new modules; a tab whose module is gone is dropped.
     pub fn reload_modules(&mut self) -> Task<Message> {
-        if self.no_modules {
-            // The app started on sample text, with no vault open; it starts over with the modules.
-            self.sh.toast("Restart the app to use these modules");
-            return Task::none();
-        }
         let folders = self.config_dir().as_deref().map(Config::load).map(|c| c.module_folders).unwrap_or_default();
         let backend = LiveBackend::open(&live::module_roots(&folders));
+        if self.no_modules {
+            return self.leave_sample_text(backend, "Restart the app to use these modules");
+        }
         self.install_backend(backend)
+    }
+
+    /// The app is on sample text because it found no modules. With a vault open, the first modules
+    /// found take over in place; with none (the app started on sample text) it has to start over.
+    fn leave_sample_text(&mut self, backend: LiveBackend, restart: &str) -> Task<Message> {
+        if self.sh.vault.is_none() || backend.modules().is_empty() {
+            if !backend.modules().is_empty() {
+                self.sh.toast(restart.to_string());
+            }
+            return Task::none();
+        }
+        self.no_modules = false;
+        // What was open was sample text: start from the default layout on the real modules.
+        self.sh.backend = Box::new(backend);
+        self.sh.forget_modules();
+        let workspace = self.default_workspace();
+        let task = self.apply_workspace(&workspace).unwrap_or_else(|e| {
+            self.sh.status = e;
+            Task::none()
+        });
+        self.sh.toast("Modules loaded");
+        task
     }
 
     /// Swap the modules under what is open, and put the workspace back on them.
@@ -204,7 +222,7 @@ mod tests {
         app.home = Some(home.path().into());
         Config { module_folders: vec!["/mods".into()], ..Config::default() }.save(home.path()).unwrap();
         let vault = tempfile::tempdir().unwrap();
-        let _ = app.switch_vault(vault.path().into(), live::Options { samples: live::Samples::Never, templates: false }).unwrap();
+        let _ = app.switch_vault(vault.path().into(), live::Options { samples: live::Samples::Never, templates: false, plans: false }).unwrap();
         let config = Config::load(home.path());
         assert_eq!(config.module_folders, vec![PathBuf::from("/mods")]);
         assert_eq!(config.vault.as_deref(), Some(vault.path()));

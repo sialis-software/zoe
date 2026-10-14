@@ -71,6 +71,19 @@ mod imp {
     const SETTINGS: &str = "settings";
     static CHOSEN: Mutex<Option<mpsc::UnboundedSender<()>>> = Mutex::new(None);
 
+    /// What the system's About panel shows: the name, version and credits, with the app's picture.
+    /// (In a bundle the panel would also read them from the bundle: this makes it the same outside one.)
+    fn about_metadata() -> muda::AboutMetadata {
+        muda::AboutMetadata {
+            name: Some("Zoe".into()),
+            version: Some(crate::about::version().into()),
+            comments: Some("Bible study with SWORD modules and Markdown notes".into()),
+            credits: Some(crate::about::credits_text()),
+            icon: icon_pixels().and_then(|(rgba, width, height)| muda::Icon::from_rgba(rgba, width, height).ok()),
+            ..muda::AboutMetadata::default()
+        }
+    }
+
     pub fn install_menu(window: Id) -> Task<()> {
         window::run(window, |_| {
             // Run outside an app bundle, the system would name the app after its file: Zoe is its name.
@@ -86,7 +99,7 @@ mod imp {
             let app = Submenu::new("Zoe", true);
             let settings = MenuItem::with_id(SETTINGS, "Settings\u{2026}", true, Some(Accelerator::new(Modifiers::META, Code::Comma)));
             let _ = app.append_items(&[
-                &PredefinedMenuItem::about(None, None),
+                &PredefinedMenuItem::about(None, Some(about_metadata())),
                 &PredefinedMenuItem::separator(),
                 &settings,
                 &PredefinedMenuItem::separator(),
@@ -176,7 +189,7 @@ mod imp {
 /// was not one or the system could not be asked.
 pub fn open_external(address: &str) -> bool {
     let address = address.trim();
-    if !md_editor::is_external(address) {
+    if crate::network::blocked() || !md_editor::is_external(address) {
         return false;
     }
     let mut command = if cfg!(target_os = "macos") {

@@ -461,7 +461,7 @@ pub fn groups(sh: &Shared, query: &str, tags: &BTreeSet<String>) -> Vec<Group> {
         if templates::is_template(path) {
             continue;
         }
-        // What was imported into the library (a devotional's days, the reading plans) is far too many
+        // What was imported into the library (the reading plans' days) is far too many
         // for the plain list: it is found by searching, or by its tags.
         let in_library = path.starts_with("library/");
         if in_library && words.is_empty() && wanted_tags.is_empty() && tags.is_empty() {

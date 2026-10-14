@@ -66,8 +66,6 @@ pub enum ManagerMsg {
     ImportPicked(Option<PathBuf>),
     Inspected(Result<Package, String>),
     Export(usize),
-    /// Make the days of a devotional (by its place in the list) notes in the vault's library.
-    ToLibrary(usize),
     ExportTo { name: String, root: PathBuf, dest: Option<PathBuf> },
     Finished(Result<Done, String>),
     FetchList,
@@ -183,10 +181,16 @@ fn fetch_and_install(
     package.install(target, replace).map_err(|e| e.to_string())
 }
 
+/// Whether the app can use a repository module's kind: daily devotionals are not read.
+fn is_supported(m: &RemoteModule) -> bool {
+    !m.category.eq_ignore_ascii_case("Daily Devotional")
+}
+
 /// The repository's modules that match what is typed and chosen. An empty choice matches all.
 fn filter_remote<'a>(list: &'a [RemoteModule], query: &str, language: &str, category: &str, free_only: bool) -> Vec<&'a RemoteModule> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     list.iter()
+        .filter(|m| is_supported(m))
         .filter(|m| language.is_empty() || m.language == language)
         .filter(|m| category.is_empty() || m.category == category)
         .filter(|m| !free_only || (m.free && !m.locked))
@@ -293,6 +297,10 @@ impl App {
         if starts && self.manager.busy.is_some() {
             return Task::none();
         }
+        if crate::network::blocked() && matches!(message, ManagerMsg::FetchList | ManagerMsg::Download(_)) {
+            self.sh.toast(crate::network::WHY);
+            return Task::none();
+        }
         match message {
             ManagerMsg::Open => {
                 if let Some(id) = self.manager_window {
@@ -393,13 +401,6 @@ impl App {
                     self.manager.confirm = Some(Confirm::Replace { package, names });
                     Task::none()
                 }
-            }
-            ManagerMsg::ToLibrary(i) => {
-                let Some(module) = self.manager.installed.get(i).cloned() else { return Task::none() };
-                match self.import_devotional(&module.name, &module.description) {
-                    Ok(note) | Err(note) => self.sh.toast(note),
-                }
-                Task::none()
             }
             ManagerMsg::Export(i) => {
                 let Some(m) = self.manager.installed.get(i) else { return Task::none() };
@@ -549,7 +550,8 @@ impl App {
                 .align_y(iced::Center),
             );
         }
-        if let Some(c) = &m.confirm {
+        // (Removing a module is asked on its own Remove button: see `installed_page`.)
+        if let Some(c) = m.confirm.as_ref().filter(|c| !matches!(c, Confirm::Remove { .. })) {
             status = status.push(self.confirm_card(c));
         }
         let page = match m.page {
@@ -562,15 +564,7 @@ impl App {
 
     fn confirm_card(&self, confirm: &Confirm) -> Element<'_, Message> {
         let (question, yes, danger) = match confirm {
-            Confirm::Remove { name, foreign: false, .. } => (format!("Delete {name} from the app's folder? Its files are removed from the disk."), "Delete".to_string(), true),
-            Confirm::Remove { name, root, foreign: true } => (
-                format!(
-                    "{name} is in {}, which is not the app's own folder. Other programs may use it. Delete its files from there anyway?",
-                    tidy(root)
-                ),
-                format!("Delete from {}", tidy(root)),
-                true,
-            ),
+            Confirm::Remove { .. } => unreachable!("a removal is asked on the module's own button"),
             Confirm::Replace { names, .. } => (format!("{} already installed. Replace {}?", names.join(", "), if names.len() == 1 { "it" } else { "them" }), "Replace".to_string(), true),
             Confirm::Redownload(name) => (format!("{name} is already installed. Download it again and replace it?"), "Replace".to_string(), true),
         };
@@ -618,14 +612,29 @@ impl App {
                 Some(why) => text(format!("The app cannot read it: {why}")).size(11).style(text::danger),
                 None => text("The app can read it").size(11).style(text::success),
             });
-            let mut buttons = column![act("Export\u{2026}", ManagerMsg::Export(i)), {
-                let b = button(text("Remove").size(12)).padding([3, 10]).style(button::danger);
-                if idle { b.on_press(mm(ManagerMsg::AskRemove(i))) } else { b }
-            }]
-            .spacing(4);
-            if module.kind == sword::Kind::Devotional && module.is_readable() {
-                buttons = buttons.push(act("Import to library", ManagerMsg::ToLibrary(i)));
+            // The buttons of a module are one column of one width, with their words in the middle. Asked in
+            // place: Remove turns into "Delete files?" (with Cancel), like a plan's.
+            let asking = matches!(&m.confirm, Some(Confirm::Remove { name, root, .. }) if *name == module.name && *root == module.root);
+            if matches!(&m.confirm, Some(Confirm::Remove { name, root, foreign: true }) if *name == module.name && *root == module.root) {
+                body = body.push(text("This is not the app's own folder: other programs may use these files.").size(11).style(text::danger));
             }
+            let side = |label: &'static str, style: fn(&Theme, button::Status) -> button::Style, msg: Option<ManagerMsg>| {
+                button(container(text(label).size(12)).center_x(Length::Fill))
+                    .width(Length::Fill)
+                    .padding([3, 10])
+                    .style(style)
+                    .on_press_maybe(msg.map(mm))
+            };
+            let buttons = if asking {
+                column![side("Delete files?", button::danger, Some(ManagerMsg::Yes)), side("Cancel", button::secondary, Some(ManagerMsg::No))]
+            } else {
+                column![
+                    side("Export\u{2026}", button::secondary, idle.then_some(ManagerMsg::Export(i))),
+                    side("Remove", button::secondary, idle.then_some(ManagerMsg::AskRemove(i))),
+                ]
+            }
+            .spacing(4)
+            .width(110);
             list = list.push(card(row![body, buttons].spacing(10).align_y(iced::Center).into()));
         }
         list.into()
@@ -639,13 +648,17 @@ impl App {
         ]
         .spacing(8);
         let fetch = button(text(if m.remote.is_some() { "Fetch the list again" } else { "Get the list from CrossWire" }).size(12)).padding([3, 10]).style(button::secondary);
-        page = page.push(if idle { fetch.on_press(mm(ManagerMsg::FetchList)) } else { fetch });
+        let offline = crate::network::blocked();
+        page = page.push(if idle && !offline { fetch.on_press(mm(ManagerMsg::FetchList)) } else { fetch });
+        if offline {
+            page = page.push(text("Persecution mode is on, so nothing can be downloaded. Add modules from a file or a folder on the Installed page; the mode is turned off in Settings, under Privacy.").size(12));
+        }
         let Some(list) = &m.remote else { return page.into() };
         let mut languages: Vec<String> = list.iter().map(|r| r.language.clone()).filter(|l| !l.is_empty()).collect();
         languages.sort();
         languages.dedup();
         languages.insert(0, ALL_LANGUAGES.into());
-        let mut categories: Vec<String> = list.iter().map(|r| r.category.clone()).collect();
+        let mut categories: Vec<String> = list.iter().filter(|r| is_supported(r)).map(|r| r.category.clone()).collect();
         categories.sort();
         categories.dedup();
         categories.insert(0, ALL_CATEGORIES.into());
@@ -676,20 +689,17 @@ impl App {
             if !r.license.is_empty() {
                 info.push(r.license.clone());
             }
+            // The title has the width it needs; what the module is and whether it is free are on the line below.
+            let status = if r.locked {
+                text("Locked: needs a key").size(11).style(text::danger)
+            } else if r.free {
+                text("Free to download").size(11).style(text::success)
+            } else {
+                text("Not free").size(11).style(text::secondary)
+            };
             let mut body = column![
-                row![
-                    text(format!("{}  {}", r.name, r.description)).size(14),
-                    if r.locked {
-                        text("Locked: needs a key").size(11).style(text::danger)
-                    } else if r.free {
-                        text("Free to download").size(11).style(text::success)
-                    } else {
-                        text("Not free").size(11).style(text::secondary)
-                    },
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-                text(info.join("  \u{00B7}  ")).size(11).style(text::secondary),
+                text(format!("{}  {}", r.name, r.description)).size(14),
+                row![text(info.join("  \u{00B7}  ")).size(11).style(text::secondary), status].spacing(12),
             ]
             .spacing(2)
             .width(Length::Fill);
@@ -697,8 +707,8 @@ impl App {
                 body = body.push(text(format!("The app could not read it yet: {why}")).size(11).style(text::secondary));
             }
             let label = if has { "Download again" } else { "Download" };
-            let download = button(text(label).size(12)).padding([3, 10]).style(button::primary);
-            let download = if idle { download.on_press(mm(ManagerMsg::Download(r.name.clone()))) } else { download };
+            let download = button(container(text(label).size(12)).center_x(Length::Fill)).width(110).padding([3, 10]).style(button::primary);
+            let download = if idle && !offline { download.on_press(mm(ManagerMsg::Download(r.name.clone()))) } else { download };
             page = page.push(card(row![body, download].spacing(10).align_y(iced::Center).into()));
         }
         if found.len() > SHOWN {
@@ -872,6 +882,7 @@ mod tests {
         app.manager.installed = package::list_installed(&[own.path().into(), library.clone()]);
         let _ = app.manager_message(ManagerMsg::AskRemove(0));
         assert!(matches!(app.manager.confirm, Some(Confirm::Remove { foreign: false, .. })));
+        let _ = app.manager_panel(); // the question is on the module's own button, so it is drawn
         let _ = app.manager_message(ManagerMsg::AskRemove(1));
         assert!(matches!(&app.manager.confirm, Some(Confirm::Remove { foreign: true, root, .. }) if *root == library));
         assert!(library.join("mods.d/ours.conf").exists(), "asking removes nothing");
@@ -926,89 +937,46 @@ mod tests {
     }
 }
 
-/// What a devotional is called as a work: its description without the author before it and the
-/// subtitle after it (`C. H. Spurgeon's Morning and Evening: Daily Readings` is `Morning and Evening`).
-pub fn work_title(description: &str) -> String {
-    let main = description.split(':').next().unwrap_or(description).trim();
-    let title = match main.split_once("'s ").or_else(|| main.split_once("\u{2019}s ")) {
-        Some((author, rest)) if author.chars().count() <= 24 && !rest.trim().is_empty() => rest.trim(),
-        _ => main,
-    };
-    if title.is_empty() { description.trim().to_string() } else { title.to_string() }
-}
-
-impl App {
-    /// Make the devotional module `name` a plan in the vault's library (a manifest and a note for
-    /// each day), and show today's. Says what was done.
-    pub fn import_devotional(&mut self, name: &str, description: &str) -> Result<String, String> {
-        let config = self.config_dir().map(|dir| crate::state::Config::load(&dir)).unwrap_or_default();
-        let library = sword::Library::open(&live::module_roots(&config.module_folders));
-        let module = library.modules().find(|m| m.name() == name).ok_or_else(|| format!("{name} is not installed"))?;
-        let devotional = module.devotional().map_err(|e| e.to_string())?;
-        let keys = devotional.keys().map_err(|e| e.to_string())?;
-        let entries: Vec<(String, String)> = keys.into_iter().filter_map(|k| devotional.raw(&k).ok().flatten().map(|raw| (k, raw))).collect();
-        let work = work_title(description);
-        let files = study_core::devotional::plan_files(&work, description, entries);
-        let days = files.len().saturating_sub(1);
-        if days == 0 {
-            return Err(format!("{work} has no days the app can read (only ones kept by month and day)"));
-        }
-        // Importing again replaces the notes of the plan: the library is read-only, so nothing was written in them.
-        for (path, text) in files {
-            self.sh.notes.insert(path, text);
-        }
-        let today = format!("library/{}/{}.md", study_core::devotional::folder_name(&work), chrono::Local::now().format("%m-%d"));
-        if self.sh.notes.contains_key(&today) {
-            self.show_note(today);
-        }
-        Ok(format!("Imported {days} days of {work} as a plan"))
-    }
-}
-
 #[cfg(test)]
 mod library_tests {
     use super::*;
 
     #[test]
-    fn a_work_is_named_by_its_description_without_the_author_and_the_subtitle() {
-        assert_eq!(work_title("C. H. Spurgeon's Morning and Evening: Daily Readings"), "Morning and Evening");
-        assert_eq!(work_title("Streams in the Desert"), "Streams in the Desert");
-        assert_eq!(work_title("Daily Light on the Daily Path: Devotions"), "Daily Light on the Daily Path");
-        assert_eq!(work_title("A very long author name here\u{2019}s Book"), "A very long author name here\u{2019}s Book", "a long first part is not an author");
+    fn a_plan_in_the_library_is_out_of_the_plain_list_of_notes_and_found_by_searching_and_does_not_crowd_the_tags() {
+        let mut app = App::new();
+        let before = app.sh.notes.len();
+        let plan = study_core::starter_plans::starter_plans().remove(1);
+        for (path, text) in plan.to_files() {
+            app.sh.notes.insert(path, text);
+        }
+        assert_eq!(app.sh.notes.len(), before + 366);
+        let plans = app.plan_entries();
+        let found = plans.iter().find(|p| p.plan.name == "M'Cheyne").expect("found as a plan");
+        assert_eq!(found.progress.total, 365);
+        let none = std::collections::BTreeSet::new();
+        assert!(crate::note_tab::groups(&app.sh, "", &none).iter().all(|g| g.key != "library"));
+        let hits = crate::note_tab::groups(&app.sh, "Genesis", &none);
+        assert!(hits.iter().any(|g| g.key == "library" && !g.notes.is_empty()));
+        assert!(app.sh.tag_counts().iter().all(|(tag, _)| tag != "plan-day"));
+        assert!(!app.sh.first_ordinary_note().starts_with("library/"));
     }
 
     #[test]
-    fn a_devotional_is_imported_into_the_library_once_and_what_was_written_in_it_is_left_alone() {
-        let library = sword::Library::open(&live::module_roots(&[]));
-        let Some(description) = library.modules().find(|m| m.name() == "SME").map(|m| m.description().to_string()) else {
-            return eprintln!("skipped: Morning and Evening is not installed");
+    fn daily_devotionals_are_not_offered_from_the_repository() {
+        let one = |name: &str, category: &str| RemoteModule {
+            name: name.into(),
+            description: name.into(),
+            language: "en".into(),
+            version: "1".into(),
+            size: 10,
+            license: String::new(),
+            category: category.into(),
+            locked: false,
+            free: true,
+            unreadable: None,
         };
-        let mut app = App::new();
-        let before = app.sh.notes.len();
-        let made = app.import_devotional("SME", &description).unwrap();
-        assert_eq!(made, "Imported 366 days of Morning and Evening as a plan");
-        assert_eq!(app.sh.notes.len(), before + 367);
-        let path = "library/Morning and Evening/01-01.md";
-        let text = app.sh.notes[path].clone();
-        assert!(text.contains("type: plan-day") && text.contains("## Morning") && text.contains("## Evening"), "{text}");
-        // Today's is shown in the writer.
-        let today = chrono::Local::now().format("library/Morning and Evening/%m-%d.md").to_string();
-        let shown = app.tabs.values().any(|t| matches!(t, crate::Tab::Plan(p) if p.day.is_some() && p.plan.is_some()));
-        assert!(shown, "today's is shown in the plan tab");
-        let _ = today;
-        // Imported again: the plan is replaced, not made twice.
-        let _ = app.import_devotional("SME", &description).unwrap();
-        assert_eq!(app.sh.notes.len(), before + 367);
-        // It is a plan with 366 days, none done.
-        let plans = app.plan_entries();
-        let spurgeon = plans.iter().find(|p| p.plan.name == "Morning and Evening").expect("found as a plan");
-        assert_eq!(spurgeon.progress.total, 366);
-        // It is out of the plain list of notes and found by searching, and does not crowd the tags.
-        let none = std::collections::BTreeSet::new();
-        assert!(crate::note_tab::groups(&app.sh, "", &none).iter().all(|g| g.key != "library"));
-        let found = crate::note_tab::groups(&app.sh, "Israel", &none);
-        assert!(found.iter().any(|g| g.key == "library" && !g.notes.is_empty()));
-        assert!(app.sh.tag_counts().iter().all(|(tag, _)| tag != "plan-day"));
-        assert!(!app.sh.first_ordinary_note().starts_with("library/"));
+        let list = vec![one("SME", "Daily Devotional"), one("ASV", "Biblical Texts")];
+        let shown: Vec<_> = filter_remote(&list, "", "", "", false).iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(shown, ["ASV"]);
     }
 }

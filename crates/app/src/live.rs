@@ -8,7 +8,6 @@ use study_core::ast::Chapter;
 use crate::persist::Persist;
 use std::collections::BTreeMap;
 use std::path::Path;
-use study_core::mock::MockBackend;
 use study_core::{CrossRef, Error, LexiconEntry, ModuleId, ModuleInfo, StudyBackend};
 use sword::{Bible, Kind, Lexicon, Library};
 
@@ -18,6 +17,7 @@ const DEFAULT_MODULE: &str = "LSB";
 struct Open {
     bible: Bible,
     chapters: Vec<(Book, u16)>,
+    versification: scripture::Versification,
 }
 
 /// A Strong's dictionary and which testament's numbers it covers.
@@ -85,7 +85,8 @@ impl LiveBackend {
                     description: m.description().to_string(),
                     has_strongs: m.has_strongs(),
                 });
-                open.insert(m.name().to_string(), Arc::new(Open { bible, chapters }));
+                let versification = m.versification().unwrap_or_default();
+                open.insert(m.name().to_string(), Arc::new(Open { bible, chapters, versification }));
             }
         }
         // The first module is the one the app opens: LSB for now, or `ZOE_MODULE`.
@@ -139,6 +140,10 @@ impl StudyBackend for LiveBackend {
 
     fn available_chapters(&self, module: &ModuleId) -> Vec<(Book, u16)> {
         self.open.get(&module.0).map(|o| o.chapters.clone()).unwrap_or_default()
+    }
+
+    fn versification(&self, module: &ModuleId) -> scripture::Versification {
+        self.open.get(&module.0).map(|o| o.versification).unwrap_or_default()
     }
 
     fn chapter(&self, module: &ModuleId, book: Book, chapter: u16) -> Result<Chapter, Error> {
@@ -283,11 +288,15 @@ pub fn boot() -> Boot {
         }
     }
     let config = crate::state::Config::load(&config_dir);
+    // Before anything else is done: with the mode on, nothing may use the network.
+    crate::network::set_blocked(config.persecution || crate::network::forced_by_environment());
     // The app's own folder for modules is there to be put modules in.
     if sword::path_override().is_none()
         && let Some(own) = sword::own_folder()
     {
-        let _ = std::fs::create_dir_all(own);
+        let _ = std::fs::create_dir_all(&own);
+        // The first run has a Bible to read: the modules that come with the app.
+        crate::bundled::install_first_run(&config_dir, &own, &module_roots(&config.module_folders));
     }
     let mut boot = boot_from(&home, start_vault(&home, config.vault), &module_roots(&config.module_folders), reseed);
     boot.config = Some(config_dir);
@@ -319,25 +328,15 @@ pub fn boot_at(home: &Path, roots: &[PathBuf], reseed: bool) -> Boot {
     boot_from(home, Start::Vault(home.join("vault")), roots, reseed)
 }
 
+/// Shown when the app starts with a vault but no Bible modules.
+const NO_MODULES: &str = "No Bible modules found: install some from Modules in the toolbar";
+
 fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot {
     let backend = LiveBackend::open(roots);
-    if seed_module(&backend).is_none() {
-        let mock = MockBackend;
-        let notes = mock.note_paths().into_iter().filter_map(|p| mock.note_text(&p).map(|t| (p, t))).collect();
-        return Boot {
-            backend: Box::new(mock),
-            notes,
-            persist: None,
-            home: Some(home.to_path_buf()),
-            config: None,
-            vault: None,
-            no_modules: true,
-            onboarding: None,
-            status: "No Bible modules found: add a folder of them in Settings. Showing sample text, nothing is saved".into(),
-        };
-    }
+    let no_modules = seed_module(&backend).is_none();
     let dir = match start {
         Start::Vault(dir) => dir,
+        // Asked for a vault first, whether or not there are modules: the modules come after.
         Start::Ask(why) => {
             return Boot {
                 backend: Box::new(backend),
@@ -346,14 +345,14 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
                 home: Some(home.to_path_buf()),
                 config: None,
                 vault: None,
-                no_modules: false,
+                no_modules,
                 onboarding: Some(why),
                 status: String::new(),
             };
         }
     };
     let samples = if reseed { Samples::Reseed } else { Samples::IfEmpty };
-    match load_vault(&backend, &dir, &index_path(home, &dir), Options { samples, templates: true }) {
+    match load_vault(&backend, &dir, &index_path(home, &dir), Options { samples, templates: true, plans: false }) {
         Ok(loaded) => Boot {
             backend: Box::new(backend),
             notes: loaded.notes,
@@ -361,9 +360,9 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
             home: Some(home.to_path_buf()),
             config: None,
             vault: Some(dir),
-            no_modules: false,
+            no_modules,
             onboarding: None,
-            status: loaded.status,
+            status: if no_modules && loaded.status.is_empty() { NO_MODULES.into() } else { loaded.status },
         },
         Err(e) => Boot {
             backend: Box::new(backend),
@@ -372,7 +371,7 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
             home: None,
             config: None,
             vault: None,
-            no_modules: false,
+            no_modules,
             onboarding: None,
             status: format!("Could not open the vault at {}: {e}; nothing is saved", dir.display()),
         },
@@ -395,6 +394,8 @@ pub struct Options {
     pub samples: Samples,
     /// The starting templates, if the vault has none.
     pub templates: bool,
+    /// The starting reading plans, as notes in the library.
+    pub plans: bool,
 }
 
 /// An opened vault.
@@ -426,6 +427,16 @@ pub fn load_vault(backend: &dyn StudyBackend, dir: &Path, index: &Path, options:
         for (path, text) in study_core::templates::builtin() {
             if vault.write(&path, &text).is_ok() {
                 notes.insert(path, text);
+            }
+        }
+    }
+    // The starting plans are library notes, written once, as the vault is made.
+    if options.plans {
+        for plan in study_core::starter_plans::starter_plans() {
+            for (path, text) in plan.to_files() {
+                if !notes.contains_key(&path) && vault.write(&path, &text).is_ok() {
+                    notes.insert(path, text);
+                }
             }
         }
     }
@@ -616,13 +627,13 @@ mod tests {
     }
 
     #[test]
-    fn with_no_modules_it_falls_back_to_sample_text_and_saves_nothing() {
+    fn with_no_modules_the_vault_still_opens_and_the_tabs_have_nothing_to_read() {
         let home = tempfile::tempdir().unwrap();
         let empty = tempfile::tempdir().unwrap();
         let boot = boot_at(home.path(), &[empty.path().to_path_buf()], false);
-        assert!(boot.persist.is_none());
+        assert!(boot.persist.is_some() && boot.vault.is_some());
         assert!(boot.no_modules && boot.status.contains("No Bible modules found"));
-        assert!(!home.path().join("vault").exists());
+        assert!(boot.backend.modules().is_empty());
     }
 
     #[test]

@@ -101,7 +101,8 @@ impl BibleIndex {
     pub fn search(&self, search: &Search<'_>) -> rusqlite::Result<Vec<VerseHit>> {
         let table = if search.stem { "fts_stem" } else { "fts" };
         let order = if search.by_relevance { format!("bm25({table}), v.id") } else { "v.id".to_string() };
-        let (first, last) = search.books.map_or((0, 65), |(a, z)| (book_no(a), book_no(z)));
+        // Without a narrowing, every book there is: the Apocrypha (after the canon) too.
+        let (first, last) = search.books.map_or((0, Book::all().count() as i64 - 1), |(a, z)| (book_no(a), book_no(z)));
         let sql = format!(
             "SELECT v.book, v.chapter, v.verse, v.text FROM {table} JOIN verses v ON v.id = {table}.rowid
              WHERE {table} MATCH ?1 AND v.book BETWEEN ?2 AND ?3 ORDER BY {order} LIMIT ?4"
@@ -180,6 +181,18 @@ mod tests {
         // The most about the word comes first when asked.
         let search = Search { expression: "\"world\"", stem: false, books: None, by_relevance: true, limit: 10 };
         assert_eq!(index.search(&search).unwrap()[0].verse, 17, "two worlds beat one");
+    }
+
+    #[test]
+    fn a_search_without_a_narrowing_covers_the_apocrypha_too() {
+        let tobit = Book::parse("Tobit").unwrap();
+        let mut index = BibleIndex::open(None).unwrap();
+        index.build("a", [(Book::JOHN, 3, 16, "God so loved".to_string()), (tobit, 1, 1, "The book of the words of Tobit, a godly man".to_string())]).unwrap();
+        let search = Search { expression: "\"tobit\"", stem: false, books: None, by_relevance: false, limit: 10 };
+        let hits = index.search(&search).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].book, hits[0].chapter, hits[0].verse), (tobit, 1, 1));
+        assert_eq!(index.verse(tobit, 1, 1).as_deref(), Some("The book of the words of Tobit, a godly man"));
     }
 
     #[test]

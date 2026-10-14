@@ -87,6 +87,7 @@ impl Setup {
         Options {
             samples: if self.samples && self.scan.notes == 0 { Samples::IfEmpty } else { Samples::Never },
             templates: self.templates && !self.scan.templates,
+            plans: self.templates && self.scan.notes == 0,
         }
     }
 }
@@ -107,6 +108,14 @@ pub enum VaultMsg {
     Retry,
     /// Show the vault's folder in the system's file browser.
     Reveal,
+    /// Show the welcome window again (it was closed before a vault was made).
+    OpenWelcome,
+    /// Ask for the folder of the first-run vault (a system dialog).
+    WelcomeChoose,
+    /// The folder asked for (none: back to the default).
+    WelcomePicked(Option<PathBuf>),
+    /// Make the vault from the welcome window, then open the module manager.
+    WelcomeCreate,
 }
 
 impl App {
@@ -180,9 +189,51 @@ impl App {
                     }
                 }
             }
+            VaultMsg::OpenWelcome => self.open_welcome(),
+            VaultMsg::WelcomeChoose => {
+                let start = self.welcome_target().and_then(|d| d.parent().map(Path::to_path_buf));
+                Task::perform(
+                    async move {
+                        let mut dialog = rfd::AsyncFileDialog::new().set_title("Choose the folder for the vault");
+                        if let Some(start) = start {
+                            dialog = dialog.set_directory(start);
+                        }
+                        dialog.pick_folder().await.map(|handle| handle.path().to_path_buf())
+                    },
+                    |folder| match folder {
+                        Some(folder) => Message::Vault(VaultMsg::WelcomePicked(Some(folder))),
+                        None => Message::Vault(VaultMsg::OpenWelcome),
+                    },
+                )
+            }
+            VaultMsg::WelcomePicked(folder) => {
+                self.welcome_folder = folder;
+                self.welcome_error = None;
+                Task::none()
+            }
+            VaultMsg::WelcomeCreate => {
+                let Some(dir) = self.welcome_target() else { return Task::none() };
+                // A folder that already has notes is left as it is; a new or empty one gets the templates.
+                let has_notes = live::scan(&dir).notes > 0;
+                let options = Options { samples: Samples::Never, templates: !has_notes, plans: !has_notes };
+                match self.switch_vault(dir, options) {
+                    Ok(task) => {
+                        let closed = self.welcome_window.take().map(iced::window::close).unwrap_or_else(Task::none);
+                        self.welcome_folder = None;
+                        self.welcome_error = None;
+                        // Modules come next: the manager is where they are found and installed.
+                        let manager = self.manager_message(crate::module_manager::ManagerMsg::Open);
+                        Task::batch([task, closed, manager])
+                    }
+                    Err(e) => {
+                        self.welcome_error = Some(e);
+                        Task::none()
+                    }
+                }
+            }
             VaultMsg::UseDefault => {
                 let Some(home) = self.home.clone() else { return Task::none() };
-                let options = Options { samples: Samples::IfEmpty, templates: true };
+                let options = Options { samples: Samples::Never, templates: true, plans: true };
                 self.switch_vault(home.join("vault"), options).unwrap_or_else(|e| {
                     self.sh.status = format!("Could not open the vault: {e}");
                     Task::none()
@@ -191,11 +242,14 @@ impl App {
             VaultMsg::Retry => {
                 let Some(Onboarding::Missing(dir)) = self.onboarding.clone() else { return Task::none() };
                 if dir.is_dir() {
-                    let options = Options { samples: Samples::Never, templates: false };
-                    self.switch_vault(dir, options).unwrap_or_else(|e| {
-                        self.sh.status = format!("Could not open the vault: {e}");
-                        Task::none()
-                    })
+                    let options = Options { samples: Samples::Never, templates: false, plans: false };
+                    match self.switch_vault(dir, options) {
+                        Ok(task) => Task::batch([task, self.welcome_window.take().map(iced::window::close).unwrap_or_else(Task::none)]),
+                        Err(e) => {
+                            self.welcome_error = Some(e);
+                            Task::none()
+                        }
+                    }
                 } else {
                     self.sh.toast("Still not there");
                     Task::none()
@@ -252,60 +306,114 @@ impl App {
 
     // ---- views -------------------------------------------------------------------------
 
-    /// The first page: what a vault is, and how to get one. Covers the whole window.
-    pub fn welcome_view(&self, why: &Onboarding) -> Element<'_, Message> {
-        let intro = match why {
-            Onboarding::First => column![
-                text("Welcome to Zoe").size(30),
-                text(
-                    "Your notes, highlights and margin notes are kept in a vault: an ordinary folder of \
-                     Markdown files that you own. You can back it up, sync it, or open it in any other editor."
-                )
-                .size(14)
-                .style(text::secondary),
-            ],
-            Onboarding::Missing(dir) => column![
-                text("Your vault is not there").size(30),
-                text(format!(
-                    "The vault at {} cannot be found. If it is on a drive that is not connected, connect it \
-                     and try again; or choose another.",
-                    tidy(dir)
-                ))
-                .size(14)
-                .style(text::secondary),
-            ],
+    /// The folder the first-run vault is made in: the one picked, else the app's data folder.
+    pub fn welcome_target(&self) -> Option<PathBuf> {
+        self.welcome_folder.clone().or_else(|| self.home.as_ref().map(|home| home.join("vault")))
+    }
+
+    /// Open the window that sets up the vault (a fixed-size accessory of the workspace window,
+    /// like the settings).
+    pub fn open_welcome(&mut self) -> Task<Message> {
+        if let Some(id) = self.welcome_window {
+            return iced::window::gain_focus(id);
         }
-        .spacing(10);
-        let mut choices = column![].spacing(8);
-        if matches!(why, Onboarding::Missing(_)) {
-            choices = choices.push(choice("Try again", "Look for the vault where it was.", Some(Message::Vault(VaultMsg::Retry))));
-        }
-        choices = choices
-            .push(choice(
-                "Create a new vault",
-                "Choose a folder to hold it. It starts with note templates and, if you like, a few sample notes.",
-                Some(Message::Vault(VaultMsg::Choose(Mode::Create))),
-            ))
-            .push(choice(
-                "Open an existing vault",
-                "Use a folder of Markdown notes you already have, such as an Obsidian vault. Your files are not changed.",
-                Some(Message::Vault(VaultMsg::Choose(Mode::Open))),
-            ));
-        let mut page = column![intro, choices].spacing(22).width(420);
-        if let Some(home) = &self.home {
-            page = page.push(
-                button(text(format!("Just use {}", tidy(&home.join("vault")))).size(12))
-                    .padding([2, 0])
-                    .style(button::text)
-                    .on_press(Message::Vault(VaultMsg::UseDefault)),
-            );
-        }
+        let (id, open) = iced::window::open(iced::window::Settings {
+            size: iced::Size::new(520.0, 560.0),
+            resizable: false,
+            minimizable: false,
+            exit_on_close_request: false,
+            ..iced::window::Settings::default()
+        });
+        self.welcome_window = Some(id);
+        let main = self.main;
+        open.then(move |_| crate::native::attach(main, id)).discard()
+    }
+
+    /// What the workspace window shows while the welcome window is closed or open: nothing to do
+    /// there until a vault is chosen.
+    pub fn waiting_view(&self) -> Element<'_, Message> {
+        let page = column![
+            text("Zoe needs a vault to keep your notes in").size(16),
+            button(text("Set up\u{2026}").size(13)).padding([4, 14]).on_press(Message::Vault(VaultMsg::OpenWelcome)),
+        ]
+        .spacing(12)
+        .align_x(iced::Center);
         let background = |theme: &Theme| container::Style {
             background: Some(theme.extended_palette().background.base.color.into()),
             text_color: Some(theme.extended_palette().background.base.text),
             ..container::Style::default()
         };
         opaque(container(page).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill).style(background))
+    }
+
+    /// The first run's window: what a vault is, and where the new one goes. By default it is a
+    /// blank vault (with the note templates) in the app's data folder.
+    pub fn welcome_panel(&self) -> Element<'_, Message> {
+        let faint = |t: String| text(t).size(12).style(text::secondary);
+        let missing = match &self.onboarding {
+            Some(Onboarding::Missing(dir)) => Some(dir.clone()),
+            _ => None,
+        };
+        let intro = match &missing {
+            None => column![
+                text("Welcome to Zoe").size(26),
+                text(
+                    "Your notes, highlights and margin notes are kept in a vault: an ordinary folder of \
+                     Markdown files that you own. You can back it up, sync it, or open it in any other editor."
+                )
+                .size(13)
+                .style(text::secondary),
+            ],
+            Some(dir) => column![
+                text("Your vault is not there").size(26),
+                text(format!(
+                    "The vault at {} cannot be found. If it is on a drive that is not connected, connect it \
+                     and try again; or set up another.",
+                    tidy(dir)
+                ))
+                .size(13)
+                .style(text::secondary),
+            ],
+        }
+        .spacing(8);
+        let target = self.welcome_target();
+        let shown = target.as_deref().map(tidy).unwrap_or_else(|| "No folder to keep it in".into());
+        let found = target.as_deref().map(live::scan);
+        let mut place = column![
+            text("Your vault will be created in").size(12).style(text::secondary),
+            text(shown).size(14),
+        ]
+        .spacing(3);
+        match found {
+            Some(scan) if scan.notes > 0 => {
+                place = place.push(faint(format!("That folder already has {}: they are used as they are.", notes_of(&scan))));
+            }
+            _ => place = place.push(faint("A blank vault, with note templates (Prayer list, Topic, Daily, Blank) to edit.".into())),
+        }
+        let mut buttons = row![
+            button(text("Choose another folder\u{2026}").size(12))
+                .padding([4, 10])
+                .style(button::secondary)
+                .on_press(Message::Vault(VaultMsg::WelcomeChoose)),
+        ]
+        .spacing(8);
+        if self.welcome_folder.is_some() {
+            buttons = buttons.push(button(text("Use the default").size(12)).padding([4, 10]).style(button::text).on_press(Message::Vault(VaultMsg::WelcomePicked(None))));
+        }
+        let mut actions = row![space::horizontal()].spacing(8);
+        if let Some(dir) = &missing {
+            actions = actions.push(button(text("Try again").size(13)).padding([5, 14]).style(button::secondary).on_press_maybe(dir.is_dir().then_some(Message::Vault(VaultMsg::Retry))));
+        }
+        actions = actions.push(button(text("Create vault").size(13)).padding([5, 14]).on_press_maybe(target.is_some().then_some(Message::Vault(VaultMsg::WelcomeCreate))));
+        let mut page = column![intro, place, buttons, self.persecution_switch()].spacing(20);
+        if let Some(dir) = &missing {
+            page = page.push(faint(format!("It was at {}.", tidy(dir))));
+        }
+        if let Some(error) = self.welcome_error.as_ref() {
+            page = page.push(text(format!("Could not use this folder: {error}")).size(12).style(text::danger));
+        }
+        let page = column![container(page).height(Length::Fill), actions].spacing(12);
+        container(page).padding(28).width(Length::Fill).height(Length::Fill).into()
     }
 
     /// The card that confirms a folder, over a dimmed window.
@@ -443,30 +551,6 @@ impl App {
         .spacing(8)
         .into()
     }
-}
-
-/// A big button of the welcome page.
-fn choice<'a>(title: &'static str, about: &'static str, on: Option<Message>) -> Element<'a, Message> {
-    let faint = |theme: &Theme| text::Style { color: Some(iced::Color { a: 0.7, ..theme.extended_palette().background.base.text }) };
-    button(column![text(title).size(17), text(about).size(13).style(faint)].spacing(4))
-        .width(Length::Fill)
-        .padding([12, 18])
-        .style(|theme: &Theme, status| {
-            let palette = theme.extended_palette();
-            let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            button::Style {
-                background: Some(if lit { palette.background.strong.color } else { palette.background.weak.color }.into()),
-                text_color: palette.background.base.text,
-                border: iced::Border {
-                    color: iced::Color { a: if lit { 0.9 } else { 0.5 }, ..palette.background.strong.color },
-                    width: 1.0,
-                    radius: 8.0.into(),
-                },
-                ..button::Style::default()
-            }
-        })
-        .on_press_maybe(on)
-        .into()
 }
 
 fn notes_of(scan: &Scan) -> String {
@@ -620,11 +704,11 @@ mod tests {
     fn what_was_being_edited_is_saved_to_the_old_vault_before_the_switch() {
         let (mut app, _home) = app_with_home();
         let old = tempfile::tempdir().unwrap();
-        let loaded = live::load_vault(&study_core::mock::MockBackend, old.path(), &old.path().join(".ix"), Options { samples: Samples::Never, templates: false }).unwrap();
+        let loaded = live::load_vault(&study_core::mock::MockBackend, old.path(), &old.path().join(".ix"), Options { samples: Samples::Never, templates: false, plans: false }).unwrap();
         app.sh.replace_vault(old.path().into(), loaded.notes, loaded.persist);
         app.sh.notes.insert("Unsaved.md".into(), "words".into());
         let new = tempfile::tempdir().unwrap();
-        let _ = app.switch_vault(new.path().into(), Options { samples: Samples::Never, templates: false }).unwrap();
+        let _ = app.switch_vault(new.path().into(), Options { samples: Samples::Never, templates: false, plans: false }).unwrap();
         assert_eq!(std::fs::read_to_string(old.path().join("Unsaved.md")).unwrap(), "words");
         assert!(!app.sh.notes.contains_key("Unsaved.md") && !new.path().join("Unsaved.md").exists());
     }
@@ -655,6 +739,54 @@ mod tests {
     }
 
     #[test]
+    fn the_first_run_makes_a_blank_vault_with_templates_in_the_data_folder_and_opens_the_module_manager() {
+        let (mut app, home) = app_with_home();
+        app.onboarding = Some(Onboarding::First);
+        let _ = app.open_welcome();
+        assert!(app.welcome_window.is_some());
+        assert_eq!(app.welcome_target(), Some(home.path().join("vault")));
+        let _ = app.vault_message(VaultMsg::WelcomeCreate);
+        assert!(app.onboarding.is_none() && app.welcome_window.is_none());
+        assert!(home.path().join("vault/templates").is_dir());
+        assert!(!app.sh.notes.keys().any(|p| !p.starts_with("templates/") && !p.starts_with("library/")), "blank: only the templates and the starting plans");
+        let plans = study_core::plan::find_plans(&app.sh.notes);
+        for name in ["M'Cheyne", "Bible in a year", "Chronological"] {
+            assert!(plans.iter().any(|p| p.name == name && p.days.len() == 365 && p.problems.is_empty()), "{name} is in the library");
+        }
+        assert!(app.manager_window.is_some(), "the module manager follows");
+    }
+
+    #[test]
+    fn the_first_run_vault_can_be_made_in_a_folder_picked() {
+        let (mut app, home) = app_with_home();
+        let folder = tempfile::tempdir().unwrap();
+        app.onboarding = Some(Onboarding::First);
+        let _ = app.vault_message(VaultMsg::WelcomePicked(Some(folder.path().into())));
+        let _ = app.vault_message(VaultMsg::WelcomeCreate);
+        assert_eq!(app.sh.vault.as_deref(), Some(folder.path()));
+        assert!(folder.path().join("templates").is_dir() && !home.path().join("vault").exists());
+    }
+
+    #[test]
+    fn with_no_modules_the_tabs_say_so_and_links_to_verses_open_nothing() {
+        let empty = tempfile::tempdir().unwrap();
+        let mut app = App::build(Box::new(crate::live::LiveBackend::open(&[empty.path().into()])), Default::default(), None);
+        app.home = Some(tempfile::tempdir().unwrap().keep());
+        app.no_modules = true;
+        let vault = tempfile::tempdir().unwrap();
+        let _ = app.switch_vault(vault.path().into(), Options { samples: Samples::Never, templates: true, plans: true }).unwrap();
+        assert!(app.tabs.values().all(|t| !matches!(t, crate::Tab::Bible(_))), "no Bible tab with nothing to read");
+        let blank = app.tabs.iter().find(|(_, t)| matches!(t, crate::Tab::Blank(_))).map(|(&id, _)| id).expect("a new tab");
+        let _ = app.view();
+        let _ = app.blank_view(blank);
+        let before = app.tabs.len();
+        let range = scripture::RefRange::parse("John 3:16").unwrap();
+        let _ = app.open_verse(blank, range, crate::Dest::Here);
+        assert_eq!(app.tabs.len(), before, "a link to a verse opens nothing");
+        assert!(app.sh.toast.is_some() || !app.sh.status.is_empty());
+    }
+
+    #[test]
     fn choosing_a_folder_closes_the_settings_window_that_would_cover_the_card() {
         let (mut app, home) = app_with_home();
         let _ = app.update(Message::OpenSettings);
@@ -667,7 +799,7 @@ mod tests {
     fn the_default_vault_can_be_opened_from_the_settings_and_is_then_in_use() {
         let (mut app, home) = app_with_home();
         let other = tempfile::tempdir().unwrap();
-        let none = Options { samples: Samples::Never, templates: false };
+        let none = Options { samples: Samples::Never, templates: false, plans: false };
         let _ = app.switch_vault(other.path().into(), none).unwrap();
         assert_ne!(app.sh.vault.as_deref(), Some(home.path().join("vault").as_path()));
         let _ = app.vault_message(VaultMsg::UseDefault);
@@ -709,7 +841,7 @@ mod pen_tests {
         let mut app = App::new();
         app.home = Some(home.path().to_path_buf());
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let none = Options { samples: Samples::Never, templates: false };
+        let none = Options { samples: Samples::Never, templates: false, plans: false };
         let _ = app.switch_vault(a.path().into(), none).unwrap();
         assert_eq!(app.sh.settings.pens, crate::state::default_pens(), "a vault with no pens gets the starting ones");
         let mut settings = app.sh.settings.clone();
@@ -746,7 +878,7 @@ mod rename_tests {
         let (old, config, data) = (base.path().join("old"), base.path().join("config/zoe"), base.path().join("data/zoe"));
         let elsewhere = base.path().join("Notes");
         std::fs::create_dir_all(old.join("vault")).unwrap();
-        Config { vault: Some(old.join("vault")), module_folders: vec![old.join("mods"), elsewhere.clone()] }.save(&old).unwrap();
+        Config { vault: Some(old.join("vault")), module_folders: vec![old.join("mods"), elsewhere.clone()], persecution: false }.save(&old).unwrap();
         assert!(vault::migrate_home(&old, &config, &data));
         Config::moved(&config, &old, &data);
         let moved = Config::load(&config);

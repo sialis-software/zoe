@@ -1970,6 +1970,7 @@ impl BibleTab {
                 // it under that selection.
                 reader::chapter_view(chapter, &self.view_options(sh), self.floating(sh), self.cards(sh), reader_message)
             }
+            Err(_) if sh.backend.modules().iter().all(|m| m.id != self.module) => text("This module is not installed. Add modules in Modules, or pick another above.").style(text::secondary).into(),
             Err(e) => text(e.clone()).into(),
         };
         let bold = Font { weight: font::Weight::Bold, ..sh.settings.text_font() };

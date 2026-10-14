@@ -262,6 +262,9 @@ pub struct Config {
     /// Folders of SWORD modules the person added, searched before the usual places.
     #[serde(default)]
     pub module_folders: Vec<PathBuf>,
+    /// Persecution mode: nothing uses the network (see `network.rs`).
+    #[serde(default)]
+    pub persecution: bool,
 }
 
 impl Config {

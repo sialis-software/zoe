@@ -1245,10 +1245,23 @@ impl<L> State<L> {
         Some(Pos { block: b, offset })
     }
 
+    /// Whether `p` is on the text of its visual line, not in the space after the last word of
+    /// it (where the paragraph's hit-testing still answers with that last word).
+    fn over_text(&self, p: Point) -> bool {
+        let Some(l) = self.laid.iter().find(|l| p.y >= l.y && p.y < l.y + l.h) else { return false };
+        let (x, y) = (p.x - l.x, p.y - l.y);
+        let Some(run) = l.para.buffer().layout_runs().find(|r| y >= r.line_top && y < r.line_top + r.line_height) else { return false };
+        let (start, end) = run.glyphs.iter().fold((f32::MAX, f32::MIN), |(lo, hi), g| (lo.min(g.x), hi.max(g.x + g.w)));
+        x >= start && x < end
+    }
+
     /// The character under `p` (not the nearest caret position, which can be the next
     /// character along). `None` past the end of a line.
     fn glyph_pos_at(&self, p: Point) -> Option<Pos> {
         let b = self.laid.iter().position(|l| p.y >= l.y && p.y < l.y + l.h)?;
+        if !self.over_text(p) {
+            return None;
+        }
         let l = &self.laid[b];
         let cursor = l.para.buffer().hit(p.x - l.x, p.y - l.y)?;
         let line = l.para.buffer().lines.get(cursor.line)?;
@@ -1276,6 +1289,9 @@ impl<L> State<L> {
     /// (block, span) of the span under `p` if it has a link.
     fn link_at<M>(&self, widget: &ReaderText<'_, L, M>, p: Point) -> Option<(usize, usize)> {
         let b = self.laid.iter().position(|l| p.y >= l.y && p.y < l.y + l.h)?;
+        if !self.over_text(p) {
+            return None;
+        }
         let l = &self.laid[b];
         let span = l.para.hit_span(Point::new(p.x - l.x, p.y - l.y))?;
         let clickable = widget.blocks[b].spans.get(span)?.link.is_some() || widget.blocks[b].meta[span].number;
@@ -2179,6 +2195,8 @@ where
 
                 state.selection = None;
                 match count {
+                    // (Past the end of a line there is no word to select.)
+                    2 if !state.over_text(p) => {}
                     2 => {
                         let (s, e) = word_bounds(&self.blocks[pos.block].text(), pos.offset);
                         state.selection = (s < e).then_some((

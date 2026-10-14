@@ -1,7 +1,9 @@
-//! KJV versification: verses per chapter for the 66 books, in canon order.
-//! Derived from a SWORD module's own index, so it matches what the module files contain.
+//! KJV versification: verses per chapter for the 66 books, in canon order, and then (for the KJVA
+//! versification, which has the Apocrypha after Malachi in the Old Testament's file) the 14 books of
+//! the Apocrypha in the order the module stores them. Derived from a SWORD module's own index (KJV and
+//! KJVA), so it matches what the module files contain.
 
-pub const VERSES: [&[u8]; 66] = [
+pub const VERSES: [&[u8]; 80] = [
     &[31, 25, 24, 26, 32, 22, 24, 22, 29, 32, 32, 20, 18, 24, 21, 16, 27, 33, 38, 18, 34, 24, 20, 67, 34, 35, 46, 22, 35, 43, 55, 32, 20, 31, 29, 43, 36, 30, 23, 23, 57, 38, 34, 34, 28, 34, 31, 22, 33, 26], // Genesis
     &[22, 25, 22, 31, 23, 30, 25, 32, 35, 29, 10, 51, 22, 31, 27, 36, 16, 27, 25, 26, 36, 31, 33, 18, 40, 37, 21, 43, 46, 38, 18, 35, 23, 35, 35, 38, 29, 31, 43, 38], // Exodus
     &[17, 16, 17, 35, 19, 30, 38, 36, 24, 20, 47, 8, 59, 57, 33, 34, 16, 30, 37, 27, 24, 33, 44, 23, 55, 46, 34], // Leviticus
@@ -68,4 +70,19 @@ pub const VERSES: [&[u8]; 66] = [
     &[14], // III John
     &[25], // Jude
     &[20, 29, 22, 11, 14, 17, 17, 13, 21, 11, 19, 17, 18, 20, 8, 21, 18, 24, 21, 15, 27, 21], // Revelation of John
+    // The Apocrypha (KJVA), after Revelation here and after Malachi in the module's Old Testament file.
+    &[58, 30, 24, 63, 73, 34, 15, 96, 55], // I Esdras
+    &[40, 48, 36, 52, 56, 59, 70, 63, 47, 59, 46, 51, 58, 48, 63, 78], // II Esdras
+    &[22, 14, 17, 21, 22, 17, 18, 21, 6, 12, 19, 22, 18, 15], // Tobit
+    &[16, 28, 10, 15, 24, 21, 32, 36, 14, 23, 23, 20, 20, 19, 13, 25], // Judith
+    &[1, 1, 1, 1, 1, 1, 1, 1, 1, 13, 12, 6, 18, 19, 16, 24], // Additions to Esther
+    &[16, 24, 19, 20, 23, 25, 30, 21, 18, 21, 26, 27, 19, 31, 19, 29, 21, 25, 22], // Wisdom of Solomon
+    &[30, 18, 31, 31, 15, 37, 36, 19, 18, 31, 34, 18, 26, 27, 20, 30, 32, 33, 30, 32, 28, 27, 28, 34, 26, 29, 30, 26, 28, 25, 31, 24, 31, 26, 20, 26, 31, 34, 35, 30, 24, 25, 33, 22, 26, 20, 25, 25, 16, 29, 30], // Sirach (Ecclesiasticus)
+    &[22, 35, 37, 37, 9, 73], // Baruch
+    &[68], // Prayer of Azariah
+    &[64], // Susanna
+    &[42], // Bel and the Dragon
+    &[1], // Prayer of Manasseh
+    &[64, 70, 60, 61, 68, 63, 50, 32, 73, 89, 74, 53, 53, 49, 41, 24], // I Maccabees
+    &[36, 32, 40, 50, 27, 31, 42, 36, 29, 38, 38, 45, 26, 46, 39], // II Maccabees
 ];

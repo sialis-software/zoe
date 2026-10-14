@@ -257,7 +257,7 @@ footnotes or Strong's markers) are put in an SQLite full-text index in the cache
 (`bible-<module>.sqlite`) the first time the module is searched, which takes about half a second,
 and again only if the installed module changes. The query language: words (all must be in the
 verse), `"a phrase"`, `a OR b`, `-left`, `pre*`, a Strong's number (`G26`, `H430`, found through the
-module's tagged words), and `in:John`, `in:NT`, `in:Gen-Deut` for where. The results follow the typing (searched when it pauses for a moment; Enter searches at once). Options: match case, other
+module's tagged words), and `in:John`, `in:NT`, `in:AP` (the Apocrypha), `in:Gen-Deut` for where. The results follow the typing (searched when it pauses for a moment; Enter searches at once). Options: match case, other
 forms of a word (porter stemming), best matches first (else canon order). Results list each verse with
 its matched words marked and a count per book that narrows the list; a click shows the verse in the
 reader with just those words selected (and the usual modifier keys choose where it opens). A new tab

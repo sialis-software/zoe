@@ -28,3 +28,9 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Release builds, as the packages are made: smaller and faster, at the cost of a slower build.
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

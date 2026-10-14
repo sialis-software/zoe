@@ -471,6 +471,8 @@ impl Shared {
         if pin.as_ref().is_some_and(|m| !m.eq_ignore_ascii_case(&abbreviation)) {
             return None;
         }
+        // The passage is named in the KJV's numbering: it is shown in the module's.
+        let range = &self.backend.versification(module).map_from_kjv(*range);
         let chapter = self.backend.chapter(module, range.book, range.chapter).ok()?;
         let body = chapter.plain_text(range);
         (!body.is_empty()).then(|| EmbedContent { title: format!("{range} · {abbreviation}"), body })
@@ -738,7 +740,7 @@ impl Shared {
 /// The note that records which days of the plans were completed.
 pub const PLAN_LOG: &str = "Plan log.md";
 
-/// Whether a note is part of the library (an imported plan or devotional): kept as it was imported, to be read
+/// Whether a note is part of the library (an imported plan): kept as it was imported, to be read
 /// and linked to, not written in.
 pub fn is_library(path: &str) -> bool {
     path.starts_with("library/")

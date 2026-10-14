@@ -57,7 +57,9 @@ impl App {
                 b: Box::new(Layout::Pane { id: 2 }),
             },
             panes: vec![
-                PaneSave { id: 1, tabs: vec![bible], active: Some(0) },
+                // With no Bible modules there is nothing for a Bible tab to read: a new tab, whose
+                // page says where to get some.
+                PaneSave { id: 1, tabs: vec![if self.sh.backend.modules().is_empty() { TabSave::Blank } else { bible }], active: Some(0) },
                 PaneSave { id: 2, tabs: vec![note], active: Some(0) },
             ],
             focus: 1,

@@ -3,9 +3,14 @@
 //! `Shared` notes, marks and backend. This file lays the tabs out in panes and carries out
 //! what one tab asks of another (a note's link shows a verse in a Bible tab).
 
+// A Windows release is a window program: without this it opens a console beside the window.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
+mod about;
 mod backlinks_tab;
 mod bible_search;
 mod bible_tab;
+mod bundled;
 mod commentary_tab;
 mod dict_tab;
 mod drag;
@@ -19,6 +24,7 @@ mod module_repo;
 mod link_area;
 mod live_editor;
 mod native;
+mod network;
 mod note_tab;
 mod opening;
 mod palette;
@@ -82,7 +88,7 @@ enum Tab {
     Commentary(Box<CommentaryTab>),
     /// The notes that link to a passage.
     Backlinks(Box<BacklinksTab>),
-    /// The plans, reading plans and devotionals, read a day at a time.
+    /// The plans (reading plans), read a day at a time.
     Plan(Box<PlanTab>),
 }
 
@@ -101,10 +107,20 @@ enum SettingsTab {
     Vault,
     Modules,
     Reading,
+    Privacy,
+    About,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] = [SettingsTab::Appearance, SettingsTab::Pens, SettingsTab::Vault, SettingsTab::Modules, SettingsTab::Reading];
+    const ALL: [SettingsTab; 7] = [
+        SettingsTab::Appearance,
+        SettingsTab::Pens,
+        SettingsTab::Vault,
+        SettingsTab::Modules,
+        SettingsTab::Reading,
+        SettingsTab::Privacy,
+        SettingsTab::About,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -113,6 +129,8 @@ impl SettingsTab {
             SettingsTab::Vault => "Vault",
             SettingsTab::Modules => "Modules",
             SettingsTab::Reading => "Reading",
+            SettingsTab::Privacy => "Privacy",
+            SettingsTab::About => "About",
         }
     }
 }
@@ -236,6 +254,11 @@ struct App {
     /// The window with the workspace, and the settings window while it is open.
     main: iced::window::Id,
     settings_window: Option<iced::window::Id>,
+    /// The window that sets up the vault on a first run, and the folder picked for it (none: the
+    /// app's own data folder).
+    welcome_window: Option<iced::window::Id>,
+    welcome_folder: Option<std::path::PathBuf>,
+    welcome_error: Option<String>,
     /// The module manager's window while it is open, and what it shows.
     manager_window: Option<iced::window::Id>,
     manager: module_manager::Manager,
@@ -259,7 +282,7 @@ struct App {
     home: Option<std::path::PathBuf>,
     /// Where the person's choices are kept, when that is not the data folder.
     config: Option<std::path::PathBuf>,
-    /// Set while there is no vault: the welcome page covers the window.
+    /// Set while there is no vault: the welcome window asks for one.
     onboarding: Option<live::Onboarding>,
     /// No SWORD module was found at start-up: sample text stands in, and no session is kept.
     no_modules: bool,
@@ -333,6 +356,8 @@ enum Message {
     ResetSettings,
     /// Which page of the settings window shows.
     SettingsTab(SettingsTab),
+    /// Turn persecution mode on or off (`network.rs`).
+    SetPersecution(bool),
     SetReadingAuto(bool),
     SetReadingSeconds(u32),
     SetReadingDaily(bool),
@@ -434,6 +459,9 @@ impl App {
         });
         app.main = main;
         let mut task = open.then(native::install_menu).discard();
+        if app.onboarding.is_some() {
+            task = Task::batch([task, app.open_welcome()]);
+        }
         if let Some(home) = boot.home {
             let store = Store::split(boot.config.clone().unwrap_or_else(|| home.clone()), home.clone());
             let session = store.session();
@@ -474,6 +502,9 @@ impl App {
             pressed: None,
             main: iced::window::Id::unique(),
             settings_window: None,
+            welcome_window: None,
+            welcome_folder: None,
+            welcome_error: None,
             manager_window: None,
             manager: module_manager::Manager::new(),
             plans_window: None,
@@ -1427,6 +1458,10 @@ impl App {
                 self.note_reading(std::time::Instant::now());
                 Task::none()
             }
+            Message::SetPersecution(on) => {
+                self.set_persecution(on);
+                Task::none()
+            }
             Message::SettingsTab(tab) => {
                 self.settings_tab = tab;
                 self.pen_editing = None;
@@ -1497,7 +1532,7 @@ impl App {
                 // A fixed-size accessory of the workspace window: it cannot be zoomed, full
                 // screened or minimized by itself (see `native::attach` for the rest).
                 let (id, open) = iced::window::open(iced::window::Settings {
-                    size: iced::Size::new(520.0, 600.0),
+                    size: iced::Size::new(660.0, 600.0),
                     resizable: false,
                     minimizable: false,
                     exit_on_close_request: false,
@@ -1581,6 +1616,9 @@ impl App {
                 if self.settings_window == Some(id) {
                     self.settings_window = None;
                 }
+                if self.welcome_window == Some(id) {
+                    self.welcome_window = None;
+                }
                 if self.manager_window == Some(id) {
                     self.manager_window = None;
                 }
@@ -1626,6 +1664,8 @@ impl App {
     fn show_verse_in(&mut self, id: TabId, range: scripture::RefRange) -> Task<Message> {
         let Some(Tab::Bible(tab)) = self.tabs.get_mut(&id) else { return Task::none() };
         let before = (tab.book, tab.chapter_no);
+        // The passage of a link is named in the KJV's numbering: the module shows it in its own.
+        let range = self.sh.backend.versification(&tab.module).map_from_kjv(range);
         tab.show_in_reader(&mut self.sh, range);
         if before == (tab.book, tab.chapter_no) {
             Task::none()
@@ -1734,11 +1774,16 @@ impl App {
     fn new_tab_for(&mut self, spec: &Spec) -> Option<Tab> {
         match spec {
             Spec::Verse { range, .. } => {
+                if self.sh.backend.modules().is_empty() {
+                    self.sh.status = "No Bible modules installed: add some in Modules".into();
+                    return None;
+                }
                 let near = self.reference_bible_id();
                 let module = near.and_then(|n| self.bible_tab(n)).map(|t| t.module.clone()).unwrap_or_else(|| self.first_module());
                 let id = self.take_id();
                 let mut tab = BibleTab::started(id, &self.sh, module, near.and_then(|n| self.bible_tab(n)));
-                tab.show_in_reader(&mut self.sh, *range);
+                let range = self.sh.backend.versification(&tab.module).map_from_kjv(*range);
+                tab.show_in_reader(&mut self.sh, range);
                 Some(Tab::Bible(Box::new(tab)))
             }
             // An address is for another program, not a tab.
@@ -1830,6 +1875,10 @@ impl App {
 
     /// Open an address in the browser (or the mail program), and say if that was not possible.
     fn open_web(&mut self, url: &str) {
+        if network::blocked() {
+            self.sh.toast("Persecution mode is on: links are not opened");
+            return;
+        }
         if !native::open_external(url) {
             self.sh.toast(format!("Could not open {url}"));
         }
@@ -1914,6 +1963,10 @@ impl App {
     }
 
     fn open_verse(&mut self, from: TabId, range: scripture::RefRange, dest: Dest) -> Task<Message> {
+        if self.sh.backend.modules().is_empty() {
+            self.sh.toast("No Bible modules installed: add some in Modules");
+            return Task::none();
+        }
         // The Bible tab the link belongs to: the one it was followed in, or the one a note works with.
         let natural = if matches!(self.tabs.get(&from), Some(Tab::Bible(_))) { from } else { self.bible_for_showing() };
         if dest == Dest::Here {
@@ -2046,6 +2099,8 @@ impl App {
     fn window_title(&self, window: iced::window::Id) -> String {
         if Some(window) == self.settings_window {
             "Settings".into()
+        } else if Some(window) == self.welcome_window {
+            "Welcome to Zoe".into()
         } else if Some(window) == self.manager_window {
             "Manage modules".into()
         } else if Some(window) == self.plans_window {
@@ -2058,6 +2113,8 @@ impl App {
     fn window_view(&self, window: iced::window::Id) -> Element<'_, Message> {
         if Some(window) == self.settings_window {
             self.settings_panel()
+        } else if Some(window) == self.welcome_window {
+            self.welcome_panel()
         } else if Some(window) == self.manager_window {
             self.manager_panel()
         } else if Some(window) == self.plans_window {
@@ -2161,8 +2218,8 @@ impl App {
         if self.naming {
             layers.push(self.name_layout_view());
         }
-        if let Some(why) = &self.onboarding {
-            layers.push(self.welcome_view(why));
+        if self.onboarding.is_some() {
+            layers.push(self.waiting_view());
         }
         if let Some(setup) = &self.setup {
             layers.push(self.setup_view(setup));
@@ -2248,6 +2305,8 @@ impl App {
             SettingsTab::Vault => section("Vault", self.vault_settings()),
             SettingsTab::Modules => section("Bible modules", self.modules_settings()),
             SettingsTab::Reading => section("Reading log", self.reading_settings()),
+            SettingsTab::Privacy => section("Privacy", self.privacy_settings()),
+            SettingsTab::About => self.about_page(),
         };
         column![
             container(strip).padding([10, 14]),
@@ -2691,16 +2750,29 @@ impl App {
         };
         let has_bible = !self.sh.backend.modules().is_empty();
         let has_dictionary = !self.sh.backend.dictionaries().is_empty();
+        let no_bible: Element<'_, Message> = if has_bible {
+            space::vertical().height(0).into()
+        } else {
+            column![
+                text("No Bible modules are installed yet, so the Bible, dictionaries and search are not available.").size(13).style(text::secondary),
+                button(text("Get modules\u{2026}").size(13)).padding([4, 12]).on_press(Message::Manager(module_manager::ManagerMsg::Open)),
+            ]
+            .spacing(8)
+            .align_x(iced::Center)
+            .width(320)
+            .into()
+        };
         container(
             column![
                 text("New tab").size(22),
                 text("What would you like to open?").size(14).style(text::secondary),
+                no_bible,
                 column![
                     kind("Bible", "Read a text, with its notes in the margin.", Choice::Bible, has_bible),
                     kind("Dictionary", "Look up a Strong's number or a word.", Choice::Dict, has_dictionary),
                     kind("Commentary", "Read a commentary, or write your own.", Choice::Commentary, true),
                     kind("Search", "Find words in the Bible.", Choice::Search, has_bible),
-                    kind("Plans", "Follow a reading plan or a devotional.", Choice::Plans, true),
+                    kind("Plans", "Follow a reading plan.", Choice::Plans, true),
                     kind("Notes", "Write and read your notes.", Choice::Note, true),
                 ]
                 .spacing(8),
@@ -3287,6 +3359,52 @@ mod tests {
         assert_eq!(app.bible().module, other.id);
         assert_eq!(word_marks(&app), 0, "word marks were made in ASV, and stay there");
         assert!(app.bible().chapter.is_ok());
+    }
+
+    #[test]
+    fn a_bible_with_the_apocrypha_shows_them_after_the_canon_and_a_bible_without_does_not() {
+        let home = tempfile::tempdir().unwrap();
+        let Some(mut app) = live_app(home.path()) else { return eprintln!("skipped: no modules") };
+        let modules = app.sh.backend.modules();
+        let Some(kjva) = modules.iter().find(|m| m.abbreviation == "KJVA").cloned() else { return eprintln!("skipped: KJVA is not installed") };
+        let chapters = app.sh.backend.available_chapters(&kjva.id);
+        let tobit = Book::parse("Tobit").unwrap();
+        // The canon first and as it was, then the Apocrypha, in the order of the books.
+        let revelation = chapters.iter().position(|c| *c == (Book::parse("Revelation").unwrap(), 22)).expect("Revelation 22");
+        assert!(chapters[..=revelation].iter().all(|(b, _)| !b.is_apocrypha()) && chapters[revelation + 1..].iter().all(|(b, _)| b.is_apocrypha()));
+        assert!(chapters.contains(&(tobit, 1)));
+        let _ = app.update(app.b(BibleMsg::PickModule(ModuleChoice(kjva.id.clone(), kjva.abbreviation.clone()))));
+        let _ = app.update(app.b(BibleMsg::PickBook(crate::bible_tab::BookChoice(tobit))));
+        assert_eq!((app.bible().book, app.bible().chapter_no), (tobit, 1));
+        let verses = app.bible().chapter.as_ref().expect("Tobit 1 reads").canonical_verses();
+        assert!(verses[&1].contains("The book of the words of Tobit"), "{:?}", verses.get(&1));
+        // A link in a note to the Apocrypha is a link to a verse like any other.
+        assert_eq!(scripture::RefRange::parse("Tobit 1:1").map(|r| r.book), Some(tobit));
+        // Other Bibles do not have them, and do not offer them.
+        if let Some(plain) = modules.iter().find(|m| m.abbreviation != "KJVA") {
+            assert!(app.sh.backend.available_chapters(&plain.id).iter().all(|(b, _)| !b.is_apocrypha()), "{}", plain.abbreviation);
+        }
+    }
+
+    #[test]
+    fn a_link_into_an_nrsv_module_is_shown_in_its_numbering() {
+        let home = tempfile::tempdir().unwrap();
+        let Some(mut app) = live_app(home.path()) else { return eprintln!("skipped: no modules") };
+        let Some(nrsv) = app.sh.backend.modules().into_iter().find(|m| app.sh.backend.versification(&m.id) == scripture::Versification::Nrsv) else {
+            return eprintln!("skipped: no module in the NRSV versification is installed");
+        };
+        let _ = app.update(app.b(BibleMsg::PickModule(ModuleChoice(nrsv.id.clone(), nrsv.abbreviation.clone()))));
+        let reader = app.bid();
+        // 3 John 14 is one verse of the KJV's, and the NRSV's 14 and 15.
+        let _ = app.show_verse_in(reader, scripture::RefRange::parse("3 John 1:14").unwrap());
+        assert_eq!((app.bible().book, app.bible().chapter_no), (Book::from_osis("3John").unwrap(), 1));
+        assert_eq!(app.bible().select_request.map(|(_, a, z)| (a, z)), Some((14, 15)));
+        // Other passages are as they were named.
+        let _ = app.show_verse_in(reader, scripture::RefRange::parse("John 3:16").unwrap());
+        assert_eq!(app.bible().select_request.map(|(_, a, z)| (a, z)), Some((16, 16)));
+        // And an embed asks the module for the same.
+        let embed = app.sh.embed_for(&nrsv.id, &study_core::markdown::LinkTarget::Verse { range: scripture::RefRange::parse("3 John 1:14").unwrap(), module: None });
+        assert!(embed.is_some_and(|e| e.title.contains("3 John 1:14-15")));
     }
 
     /// An app with the seeded sample marks removed.
@@ -4743,6 +4861,22 @@ mod tests {
         h.move_to(700.0, 700.0);
         h.press();
         h.release();
+        // (A double-click past the end of a short line selects nothing: find a line with text at x=100.)
+        let y = (0..40)
+            .map(|i| y + i as f32 * 4.0)
+            .find(|&y| {
+                h.move_to(100.0, y);
+                h.press();
+                h.release();
+                h.press();
+                h.release();
+                let hit = h.app.bible().text_selection.is_some();
+                h.move_to(700.0, 700.0);
+                h.press();
+                h.release();
+                hit
+            })
+            .expect("a line with text at x=100");
         h.move_to(100.0, y);
         h.press();
         h.release();
@@ -6110,7 +6244,6 @@ mod tests {
             let _ = h.app.sh.log_reading(m, 3, &chrono::Local::now());
             if which == "window" {
                 h.app.plans_window = Some(iced::window::Id::unique());
-                h.app.plans.devotionals = vec![("SME".into(), "C. H. Spurgeon's Morning and Evening: Daily Readings".into())];
             }
             h.size = if which == "window" { Size::new(620.0, 660.0) } else { Size::new(900.0, 640.0) };
             let first = match which.as_str() {
@@ -6224,7 +6357,7 @@ mod tests {
             } else {
                 h.app.home = Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/zoe"));
                 let _ = h.app.update(Message::OpenSettings);
-                h.size = Size::new(520.0, 600.0);
+                h.size = Size::new(660.0, 600.0);
                 if let Ok(tab) = std::env::var("SNAP_TAB") {
                     h.app.settings_tab = match tab.as_str() {
                         "pens" => SettingsTab::Pens,

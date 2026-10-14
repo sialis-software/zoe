@@ -35,6 +35,7 @@ pub struct Scope {
 impl Scope {
     pub const OLD: &'static str = "OT";
     pub const NEW: &'static str = "NT";
+    pub const APOCRYPHA: &'static str = "AP";
 
     pub fn old() -> Scope {
         Scope { first: Book::GENESIS, last: Book::from_osis("Mal").expect("Malachi") }
@@ -44,12 +45,19 @@ impl Scope {
         Scope { first: Book::from_osis("Matt").expect("Matthew"), last: Book::from_osis("Rev").expect("Revelation") }
     }
 
+    /// The Apocrypha: the books after the canon.
+    pub fn apocrypha() -> Scope {
+        Scope { first: Book::apocrypha().next().expect("an Apocrypha"), last: Book::apocrypha().last().expect("an Apocrypha") }
+    }
+
     /// How the scope is written in a query (`in:` is not part of it).
     pub fn word(&self) -> String {
         if *self == Scope::old() {
             Scope::OLD.into()
         } else if *self == Scope::new_testament() {
             Scope::NEW.into()
+        } else if *self == Scope::apocrypha() {
+            Scope::APOCRYPHA.into()
         } else if self.first == self.last {
             self.first.osis().into()
         } else {
@@ -133,6 +141,9 @@ fn scope_of(word: &str) -> Result<Scope, String> {
     }
     if word.eq_ignore_ascii_case(Scope::NEW) {
         return Ok(Scope::new_testament());
+    }
+    if word.eq_ignore_ascii_case(Scope::APOCRYPHA) {
+        return Ok(Scope::apocrypha());
     }
     let book = |name: &str| Book::parse(name).ok_or_else(|| format!("\u{201c}{name}\u{201d} is not a book"));
     match word.split_once('-') {
@@ -363,6 +374,10 @@ mod tests {
         assert_eq!(q.scope, Some(Scope { first: Book::JOHN, last: Book::JOHN }));
         assert_eq!(Query::parse("in:NT").scope, Some(Scope::new_testament()));
         assert_eq!(Query::parse("in:ot x").scope, Some(Scope::old()));
+        assert_eq!(Query::parse("in:AP wisdom").scope, Some(Scope::apocrypha()));
+        assert_eq!(Scope::apocrypha().word(), "AP");
+        assert!(Scope::apocrypha().contains(Book::parse("Tobit").unwrap()) && !Scope::apocrypha().contains(Book::JOHN));
+        assert!(!Scope::new_testament().contains(Book::parse("Tobit").unwrap()), "the New Testament ends at Revelation");
         let range = Query::parse("x in:Gen-Deut").scope.unwrap();
         assert_eq!((range.first.osis(), range.last.osis()), ("Gen", "Deut"));
         assert!(range.contains(Book::from_osis("Exod").unwrap()) && !range.contains(Book::JOHN));

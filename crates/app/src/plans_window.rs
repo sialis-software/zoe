@@ -1,7 +1,6 @@
 //! The plans: how far each has got, and what is done to them (import, start, mark a day done,
 //! remove). They are read in the plan tab (`plan_tab`); this is the window, opened from the top bar,
-//! where they are imported and managed. Every plan
-//! is the same thing here, whether it came as a reading plan or as a devotional: a folder of notes
+//! where they are imported and managed. Every plan is a folder of notes
 //! under `library/`, a note for each day, with optional passages to read and optional text to read (see
 //! `study_core::plan` and docs/08, docs/09). They are read-only notes that can be linked to like any.
 //!
@@ -10,7 +9,7 @@
 //! nothing is behind. Marking a day done from here records it there and also logs its chapters in the
 //! reading log.
 
-use crate::{App, Message, live, native};
+use crate::{App, Message, native};
 use chrono::NaiveDate;
 use iced::widget::{button, column, container, progress_bar, row, rule, scrollable, space, text};
 use iced::{Element, Length, Task, Theme};
@@ -41,8 +40,6 @@ pub enum PlansMsg {
     Open,
     /// Read this plan (its key) in the plan tab.
     Show(String),
-    /// Make a plan of an installed devotional (its module's name and description).
-    ImportDevotional(String, String),
     /// Ask for a file to import.
     Import,
     Imported(Option<Imported>),
@@ -60,8 +57,6 @@ pub enum PlansMsg {
 
 #[derive(Default)]
 pub struct Plans {
-    /// The devotionals installed, as (module, description), to offer as plans.
-    pub devotionals: Vec<(String, String)>,
     pub confirm_remove: Option<String>,
 }
 
@@ -129,6 +124,22 @@ fn pm(message: PlansMsg) -> Message {
     Message::Plans(message)
 }
 
+/// The Remove button of a plan. Pressed once it asks, in its own place, and the second press removes
+/// the plan's notes from the vault (with Cancel beside it to go back).
+pub fn remove_button<M: Clone + 'static>(key: String, asking: bool, wrap: impl Fn(PlansMsg) -> M) -> Element<'static, M> {
+    if asking {
+        row![
+            button(text("Cancel").size(12)).padding([3, 10]).style(button::text).on_press(wrap(PlansMsg::No)),
+            button(text("Delete its notes?").size(12)).padding([3, 10]).style(button::danger).on_press(wrap(PlansMsg::Remove)),
+        ]
+        .spacing(6)
+        .align_y(iced::Center)
+        .into()
+    } else {
+        button(text("Remove").size(12)).padding([3, 10]).style(button::secondary).on_press(wrap(PlansMsg::AskRemove(key))).into()
+    }
+}
+
 pub fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
@@ -177,20 +188,9 @@ fn chapters_of(day: &DayRef) -> Vec<RefRange> {
 }
 
 impl App {
-    /// The devotionals that are installed and can be read, as (module, description).
-    fn installed_devotionals(&self) -> Vec<(String, String)> {
-        let config = self.config_dir().map(|dir| crate::state::Config::load(&dir)).unwrap_or_default();
-        sword::package::list_installed(&live::module_roots(&config.module_folders))
-            .into_iter()
-            .filter(|m| m.kind == sword::Kind::Devotional && m.is_readable())
-            .map(|m| (m.name, m.description))
-            .collect()
-    }
-
     pub fn plans_message(&mut self, message: PlansMsg) -> Task<Message> {
         match message {
             PlansMsg::Open => {
-                self.plans.devotionals = self.installed_devotionals();
                 if let Some(id) = self.plans_window {
                     return iced::window::gain_focus(id);
                 }
@@ -209,12 +209,6 @@ impl App {
             PlansMsg::Show(key) => {
                 self.show_plans(Some((key, None)));
                 iced::window::gain_focus(self.main)
-            }
-            PlansMsg::ImportDevotional(name, description) => {
-                match self.import_devotional(&name, &description) {
-                    Ok(done) | Err(done) => self.sh.toast(done),
-                }
-                Task::none()
             }
             PlansMsg::Import => Task::perform(
                 async {
@@ -376,52 +370,21 @@ impl App {
 impl App {
     pub fn plans_panel(&self) -> Element<'static, Message> {
         let plans = self.plan_entries();
-        let mut page = column![
+        let page = column![
             container(row![text("Plans").size(16), space::horizontal(), button(text("Import\u{2026}").size(13)).padding([3, 12]).style(button::secondary).on_press(pm(PlansMsg::Import))].align_y(iced::Center))
                 .padding([12, 16]),
             rule::horizontal(1)
         ];
-        if let Some(key) = &self.plans.confirm_remove {
-            let name = plans.iter().find(|p| &p.key() == key).map_or(key.clone(), |p| p.plan.name.clone());
-            page = page.push(
-                container(
-                    row![
-                        text(format!("Remove \u{201c}{name}\u{201d}? Its notes are deleted from your vault.")).size(13).width(Length::Fill),
-                        button(text("Cancel").size(12)).padding([3, 10]).style(button::secondary).on_press(pm(PlansMsg::No)),
-                        button(text("Remove").size(12)).padding([3, 10]).style(button::danger).on_press(pm(PlansMsg::Remove)),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Center),
-                )
-                .padding([8, 16]),
-            );
-        }
         let mut body = column![].spacing(12);
         if plans.is_empty() {
             body = body.push(
-                text("No plans yet. Import a markdown plan, a CSV of day and readings, or an iCalendar file, or make a plan of an installed devotional below. See docs/09-reading-plans.md.")
+                text("No plans yet. Import a markdown plan, a CSV of day and readings, or an iCalendar file. See docs/09-reading-plans.md.")
                     .size(12)
                     .style(text::secondary),
             );
         }
         for p in &plans {
             body = body.push(self.plan_card(p));
-        }
-        body = body.push(text("Devotionals installed").size(14));
-        if self.plans.devotionals.is_empty() {
-            body = body.push(text("None. Download one in the module manager (Spurgeon\u{2019}s Morning and Evening is one).").size(12).style(text::secondary));
-        }
-        for (name, description) in &self.plans.devotionals {
-            let made = plans.iter().any(|p| p.plan.name == crate::module_manager::work_title(description));
-            let label = if made { "Import again" } else { "Make a plan" };
-            body = body.push(
-                row![
-                    text(description.clone()).size(13).width(Length::Fill),
-                    button(text(label).size(12)).padding([3, 10]).style(button::secondary).on_press(pm(PlansMsg::ImportDevotional(name.clone(), description.clone()))),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
-            );
         }
         page.push(scrollable(container(body).padding(16).width(Length::Fill)).height(Length::Fill)).into()
     }
@@ -442,7 +405,7 @@ impl App {
             let b = button(text(label).size(12)).padding([3, 10]);
             buttons = buttons.push(if p.plan.is_started() { b.style(button::secondary) } else { b }.on_press(pm(PlansMsg::Start(p.key()))));
         }
-        buttons = buttons.push(button(text("Remove").size(12)).padding([3, 10]).style(button::secondary).on_press(pm(PlansMsg::AskRemove(p.key()))));
+        buttons = buttons.push(remove_button(p.key(), self.plans.confirm_remove.as_ref() == Some(&p.key()), pm));
         let mut card = column![text(p.plan.name.clone()).size(15), text(info).size(12).style(text::secondary)].spacing(4);
         if p.progress.total > 0 && p.plan.is_started() {
             card = card.push(container(progress_bar(0.0..=p.progress.total as f32, p.progress.days_done as f32)).height(6));

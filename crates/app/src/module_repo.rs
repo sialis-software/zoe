@@ -33,6 +33,9 @@ pub struct Http;
 
 impl Fetcher for Http {
     fn get(&self, url: &str, out: &mut dyn Write, progress: &mut dyn FnMut(u64, Option<u64>), cancel: &AtomicBool) -> Result<(), String> {
+        if crate::network::blocked() {
+            return Err(crate::network::WHY.into());
+        }
         let config = ureq::Agent::config_builder()
             .timeout_resolve(Some(Duration::from_secs(15)))
             .timeout_connect(Some(Duration::from_secs(15)))
@@ -50,6 +53,9 @@ impl Fetcher for Http {
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled".into());
+            }
+            if crate::network::blocked() {
+                return Err(crate::network::WHY.into());
             }
             let n = reader.read(&mut buffer).map_err(|e| format!("The download broke off: {e}"))?;
             if n == 0 {

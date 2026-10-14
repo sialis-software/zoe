@@ -12,13 +12,13 @@ mod osis;
 pub mod package;
 mod ztext;
 
-pub use ztext::{chapter_count, verse_count};
+pub use ztext::{chapter_count, verse_count, verse_count_in};
 
 pub use conf::Conf;
 pub use entry::{Entry, parse_entry};
 pub use lexicon::Lexicon;
 
-use scripture::Book;
+use scripture::{Book, Versification};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use study_core::ast::Chapter;
@@ -87,7 +87,8 @@ pub fn own_folder() -> Option<PathBuf> {
 pub enum Kind {
     Bible,
     Lexicon,
-    /// A daily devotional (`Feature=DailyDevotion`), kept like a dictionary keyed by day.
+    /// A daily devotional (`Feature=DailyDevotion`). Only recognised: it is stored like a dictionary and
+    /// would be taken for one, but the app does not read devotionals.
     Devotional,
     Commentary,
     Other,
@@ -114,7 +115,7 @@ impl Module {
     }
 
     pub fn kind(&self) -> Kind {
-        // A devotional is stored as a dictionary, so it is told apart before the driver is looked at.
+        // A devotional is stored as a dictionary, so it is told apart (to be left alone) before the driver is looked at.
         if self.conf.all("Feature").any(|f| f == "DailyDevotion") {
             return Kind::Devotional;
         }
@@ -147,19 +148,23 @@ impl Module {
         if block != "BOOK" && block != "CHAPTER" && block != "VERSE" {
             return Err(Error::Unsupported(format!("{block} blocks")));
         }
-        let versification = self.conf.get("Versification").unwrap_or("KJV");
-        if versification != "KJV" {
-            return Err(Error::Unsupported(format!("{} uses the {versification} versification", self.name())));
-        }
+        let versification = self.versification()?;
         if !matches!(self.conf.get("SourceType"), Some("OSIS")) {
             return Err(Error::Unsupported(format!("{} markup in {}", self.conf.get("SourceType").unwrap_or("unknown"), self.name())));
         }
         let dir = self.conf.data_dir(&self.root).ok_or_else(|| Error::Unsupported("no DataPath".into()))?;
-        Ok(Bible { zt: ztext::ZText::open(dir, driver == "zText4") })
+        Ok(Bible { zt: ztext::ZText::open(dir, driver == "zText4", versification) })
     }
 }
 
 impl Module {
+    /// How the module numbers its chapters and verses, or why that is not read: the KJV's, the KJV's with the
+    /// Apocrypha (`KJVA`) and SWORD's NRSV are.
+    pub fn versification(&self) -> Result<Versification, Error> {
+        let name = self.conf.get("Versification").unwrap_or("KJV");
+        Versification::from_name(name).ok_or_else(|| Error::Unsupported(format!("{} uses the {name} versification", self.name())))
+    }
+
     /// Open as a commentary (verse by verse, stored as a Bible is), or say why we cannot.
     pub fn commentary(&self) -> Result<Commentary, Error> {
         let driver = self.conf.get("ModDrv").unwrap_or("");
@@ -173,14 +178,11 @@ impl Module {
         if compression != "ZIP" {
             return Err(Error::Unsupported(format!("{compression} compression in {}", self.name())));
         }
-        let versification = self.conf.get("Versification").unwrap_or("KJV");
-        if versification != "KJV" {
-            return Err(Error::Unsupported(format!("{} uses the {versification} versification", self.name())));
-        }
+        let versification = self.versification()?;
         let dir = self.conf.data_dir(&self.root).ok_or_else(|| Error::Unsupported("no DataPath".into()))?;
         // The files are `.czv` for some commentaries and `.bzv` (as a Bible's) for others.
         let kind = if dir.join("nt.czv").is_file() || dir.join("ot.czv").is_file() { 'c' } else { 'b' };
-        Ok(Commentary { zt: ztext::ZText::open_as(dir, driver == "zCom4", kind) })
+        Ok(Commentary { zt: ztext::ZText::open_as(dir, driver == "zCom4", kind, versification) })
     }
 }
 
@@ -203,15 +205,6 @@ impl Commentary {
 impl Module {
     /// Open as a dictionary, or say why we cannot.
     pub fn lexicon(&self) -> Result<Lexicon, Error> {
-        self.open_lexicon()
-    }
-
-    /// Open as a daily devotional (entries keyed by day), or say why we cannot.
-    pub fn devotional(&self) -> Result<Devotional, Error> {
-        self.open_lexicon().map(|lexicon| Devotional { lexicon })
-    }
-
-    fn open_lexicon(&self) -> Result<Lexicon, Error> {
         let driver = self.conf.get("ModDrv").unwrap_or("");
         let compressed = match driver {
             "zLD" => true,
@@ -227,23 +220,6 @@ impl Module {
         let stem = self.conf.data_dir(&self.root).ok_or_else(|| Error::Unsupported("no DataPath".into()))?;
         let stem = PathBuf::from(stem.to_string_lossy().trim_end_matches('/'));
         Ok(Lexicon::open(stem, compressed))
-    }
-}
-
-/// A daily devotional: one entry for each day, keyed like `01.01` for January 1.
-pub struct Devotional {
-    lexicon: Lexicon,
-}
-
-impl Devotional {
-    /// Every key, in order.
-    pub fn keys(&self) -> std::io::Result<Vec<String>> {
-        self.lexicon.key_list()
-    }
-
-    /// The raw marked-up entry for a key, or `None` if there is none.
-    pub fn raw(&self, key: &str) -> std::io::Result<Option<String>> {
-        self.lexicon.entry(key)
     }
 }
 
@@ -263,7 +239,7 @@ impl Bible {
 
     /// The chapter's text, converted to the shared AST. Empty verses are skipped.
     pub fn chapter(&self, book: Book, chapter: u16) -> Result<Chapter, Error> {
-        let verses = ztext::verse_count(book, chapter);
+        let verses = self.zt.verse_count(book, chapter);
         if verses == 0 || !self.has_book(book) {
             return Err(Error::Unsupported(format!("{book} {chapter} is not in this module")));
         }
@@ -346,25 +322,4 @@ mod tests {
         assert_eq!(module("[S]\nModDrv=zLD\nFeature=GreekDef\n").kind(), Kind::Lexicon);
     }
 
-    #[test]
-    fn a_devotional_opens_with_the_checks_a_lexicon_has() {
-        assert!(matches!(module("[D]\nModDrv=zText\nFeature=DailyDevotion\n").devotional(), Err(Error::Unsupported(_))));
-        assert!(matches!(module("[D]\nModDrv=zLD\nCipherKey=\nFeature=DailyDevotion\n").devotional(), Err(Error::Locked(_))));
-        assert!(matches!(module("[D]\nModDrv=zLD\nCompressType=LZSS\nDataPath=./d/d\n").devotional(), Err(Error::Unsupported(_))));
-        assert!(module("[D]\nModDrv=zLD\nCompressType=ZIP\nDataPath=./d/d\n").devotional().is_ok());
-    }
-
-    #[test]
-    fn the_installed_morning_and_evening_reads_by_day() {
-        let lib = Library::discover();
-        let Some(sme) = lib.get("SME") else { return };
-        assert_eq!(sme.kind(), Kind::Devotional);
-        let d = sme.devotional().unwrap();
-        let keys = d.keys().unwrap();
-        assert_eq!(keys.len(), 366);
-        assert_eq!((keys[0].as_str(), keys[365].as_str()), ("01.01", "12.31"));
-        let raw = d.raw("01.01").unwrap().unwrap();
-        assert!(raw.contains("Morning, January 1"), "{raw}");
-        assert_eq!(d.raw("13.40").unwrap(), None);
-    }
 }

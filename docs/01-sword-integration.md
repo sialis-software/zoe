@@ -49,7 +49,7 @@ decoding:
 |---|---|---|---|
 | Bible | zText, RawText (+4 variants) | verse (versification-dependent) | Highest priority. Most modules in the wild are zText. |
 | Commentary | zCom, RawCom, RawFiles, HREFCom | verse | Same verse indexing as Bibles; entries often cover ranges. |
-| Lexicon / dictionary / daily devotional | zLD, RawLD | string key (case-insensitive by default) | Strong's lookups; devotionals keyed `MM.DD`. |
+| Lexicon / dictionary / daily devotional | zLD, RawLD | string key (case-insensitive by default) | Strong's lookups. (Daily devotionals, keyed `MM.DD`, are recognised but not read.) |
 | General book | RawGenBook | **tree** key (`/Chapter/Section`) | `.bdt/.idx/.dat` family; hierarchical TOC. |
 
 ### Bible / commentary binary layout (zText family) **[verify]**
@@ -92,6 +92,30 @@ Requirements:
   `Ps.51.1` shows the right text in a Bible with different numbering.
 - Rule: **notes store references in one reference versification (KJV)** and map at
   display time. See 02.
+
+**What is supported now:** `KJV`, `KJVA` and `NRSV` (`scripture::Versification`, `sword::Module::versification()`). KJVA is the KJV with the Apocrypha: 14 more books (1 and 2 Esdras, Tobit,
+Judith, Additions to Esther, Wisdom, Sirach, Baruch, Prayer of Azariah, Susanna, Bel and the Dragon, Prayer of Manasseh,
+1 and 2 Maccabees) stored in the Old Testament's file *after Malachi*, in that order, so the 66 canonical books are where
+they always were. `scripture::Book` has all 80 (the canon first: `Book::canon()`, then `Book::apocrypha()`), so a book's
+position, and with it an index ordinal, does not change; `sword::canon_data::VERSES` has the verse counts of all 80,
+derived from the KJVA module's own index (its 30,028 slots are accounted for exactly). A module may have only some of the
+14 (the headings and the books it lacks are empty entries): `ZText::has_book` is true for an Apocrypha book when any of its
+slots has text, and every list of chapters (the book picker, next and previous, search) comes from what the module has. Search
+has `in:AP`. Every other versification (NRSVA, Catholic, Vulgate, LXX, Synodal, Luther and so on) is still unsupported and the
+module is listed as unreadable, with the reason.
+
+**NRSV** (in SWORD's sense) is the KJV's numbering but for two places, found by reading the chapter and verse structure out of three
+NRSV modules (NHEB, Geneva 1599, EMTV: all agree, and their indexes are 2 slots longer in the New Testament): 3 John 1 has 15 verses
+(the KJV's 14) and Revelation 12 has 18 (17). The reader's slot arithmetic takes the versification of the module
+(`ztext::counts`), so what follows those verses is not shifted. A translation may leave the extra verses empty (NHEB and EMTV number
+their text as the KJV does). Passages in notes are named in the KJV's numbering (docs/02) and are mapped into the module's to be shown
+(`Versification::map_from_kjv`, used when a link opens in a Bible tab and when a passage is embedded): only 3 John 1:14, which is
+14-15 in the NRSV, is mapped. Not mapped: the other way round (an NRSV reference named in a note), and KJV Revelation 13:1, whose first
+clause is the NRSV's 12:18; marks made in a KJV-numbered module are anchored by verse and word, and stay in the module they were made in.
+A module with only part of the Bible (a New Testament with empty Old Testament files) is read as having only that part
+(`ZText::has_book` asks whether a book has any text).
+The Additions to Esther are stored with chapters 1-9 as one-verse placeholders (the module's own layout), so its chapters
+1-9 read as "…".
 
 ## 5. Text markup → rendering
 

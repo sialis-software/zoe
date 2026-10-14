@@ -1,8 +1,8 @@
-//! Plans: reading plans and devotionals under one standard (docs/08, docs/09).
+//! Plans: reading plans under one standard (docs/08, docs/09).
 //!
 //! A plan is a folder in the library, `library/<Plan name>/`, with a manifest note named like the
 //! folder and one note for each day. Both parts of a day are optional: passages to read (the
-//! `readings` property, and `[[links]]` under `## Reading`) and text of its own (a devotional).
+//! `readings` property, and `[[links]]` under `## Reading`) and text of its own.
 //!
 //! ```text
 //! library/Gospels in 30 days/Gospels in 30 days.md   type: plan, name, kind, start, description
@@ -33,7 +33,6 @@
 //! (a day of the year, repeating). Chapter ranges are expanded to one passage per chapter, and a
 //! verse range across chapters is split by chapter, so that progress can be counted in chapters.
 
-use crate::devotional::{folder_name, scalar};
 use crate::frontmatter::{self, Frontmatter, Value};
 use chrono::{Datelike, Days, NaiveDate};
 use scripture::{Book, RefRange};
@@ -44,10 +43,12 @@ use std::collections::{BTreeMap, HashMap};
 pub const OPEN_END: u16 = 999;
 
 /// The number of chapters of each book, in canon order.
-const CHAPTERS: [u16; 66] = [
+const CHAPTERS: [u16; 80] = [
     50, 40, 27, 36, 34, 24, 21, 4, 31, 24, 22, 25, 29, 36, 10, 13, 10, 42, 150, 31, 12, 8, 66, 52, 5, 48, 12, 14,
     3, 9, 1, 4, 7, 3, 3, 3, 2, 14, 4, 28, 16, 24, 21, 28, 16, 16, 13, 6, 6, 4, 4, 5, 3, 6, 4, 3, 1, 13, 5, 5, 3,
     5, 1, 1, 1, 22,
+    // The Apocrypha, in the order of `Book::apocrypha()`.
+    9, 16, 14, 16, 16, 19, 51, 6, 1, 1, 1, 1, 16, 15,
 ];
 
 const MONTHS: [&str; 12] =
@@ -393,11 +394,6 @@ pub(crate) fn day_front(plan: &str, key: DayKey, title: Option<&str>, readings: 
     out
 }
 
-/// Whether `reading` is a passage the plan reader can read.
-pub(crate) fn is_reading(reading: &str) -> bool {
-    parse_item(reading).is_some()
-}
-
 // ---- finding plans in the vault ----
 
 /// The text of a property as one string; a list is its items joined by `; `.
@@ -448,9 +444,25 @@ fn read_day(path: &str, front: &Frontmatter, problems: &mut Vec<String>) -> Opti
     Some(Day { key, title: front.title.clone().filter(|t| !t.trim().is_empty()), passages, note: Some(path.to_string()) })
 }
 
+/// A plan's name as a folder name: without what a file name cannot hold.
+pub fn folder_name(work: &str) -> String {
+    let cleaned: String = work.chars().filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control()).collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    cleaned.trim_matches('.').trim().to_string()
+}
+
+/// A value for frontmatter, quoted when it would not read back as it is.
+pub(crate) fn scalar(value: &str) -> String {
+    let plain = !value.is_empty()
+        && !value.starts_with(['"', '\'', '[', '{', '#', '&', '*', '!', '|', '>', '%', '@', '`', ' '])
+        && !value.contains(": ")
+        && !value.contains(" #")
+        && !value.ends_with(' ');
+    if plain { value.to_string() } else { format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")) }
+}
+
 /// Every plan in `notes` (path to text): each manifest (`type: plan`) with the day notes of its
-/// folder (`type: plan-day`, or a devotional's `type: devotional`), sorted by day; a folder of
-/// devotional days with no manifest; and a plan written as one note (`type: reading-plan`). Sorted by
+/// folder (`type: plan-day`), sorted by day; and a plan written as one note (`type: reading-plan`). Sorted by
 /// name. What cannot be read is left out and named in the plan's `problems`.
 pub fn find_plans(notes: &BTreeMap<String, String>) -> Vec<Plan> {
     let mut manifests: Vec<(&str, &str, Frontmatter)> = Vec::new();
@@ -464,7 +476,7 @@ pub fn find_plans(notes: &BTreeMap<String, String>) -> Vec<Plan> {
         match front.kind.as_deref().map(str::to_ascii_lowercase).as_deref() {
             Some("plan") => manifests.push((path, text, front)),
             Some("reading-plan") => singles.push((path, text)),
-            Some("plan-day" | "devotional") => day_notes.entry(parent(path)).or_default().push((path, text, front)),
+            Some("plan-day") => day_notes.entry(parent(path)).or_default().push((path, text, front)),
             _ => {}
         }
     }
@@ -498,25 +510,6 @@ pub fn find_plans(notes: &BTreeMap<String, String>) -> Vec<Plan> {
         if let Some(word) = declared.filter(|w| Kind::parse(w).is_none()) {
             plan.problems.push(format!("{path}: kind: {word:?} is not sequential, dated or calendar"));
         }
-        plans.push(plan);
-    }
-    // Devotional days in a folder with no manifest are a calendar plan of their own.
-    let has_manifest: Vec<String> = plans.iter().filter_map(|p| p.folder.clone()).collect();
-    for (folder, found) in &day_notes {
-        let orphans: Vec<_> = found.iter().filter(|(_, _, f)| f.kind.as_deref().is_some_and(|k| k.eq_ignore_ascii_case("devotional"))).collect();
-        if folder.is_empty() || orphans.is_empty() || has_manifest.iter().any(|f| f == folder) {
-            continue;
-        }
-        let name = orphans.iter().find_map(|(_, _, f)| prop_text(f, "work").or_else(|| prop_text(f, "plan"))).unwrap_or_else(|| folder.rsplit('/').next().unwrap_or(folder).to_string());
-        let mut plan = new_plan(&name);
-        plan.kind = Kind::Calendar;
-        plan.folder = Some(folder.to_string());
-        let mut problems = Vec::new();
-        for (path, _, front) in orphans {
-            plan.days.extend(read_day(path, front, &mut problems));
-        }
-        plan.problems = problems;
-        plan.days.sort_by_key(|d| d.key);
         plans.push(plan);
     }
     for (path, text) in singles {
@@ -1062,8 +1055,10 @@ mod tests {
 
     #[test]
     fn the_chapter_table_has_every_book_and_the_known_counts() {
-        assert_eq!(CHAPTERS.iter().map(|c| u32::from(*c)).sum::<u32>(), 1189);
-        for (book, count) in [("Genesis", 50), ("Psalms", 150), ("Revelation", 22), ("Obadiah", 1), ("Jude", 1), ("Isaiah", 66)] {
+        assert_eq!(CHAPTERS[..66].iter().map(|c| u32::from(*c)).sum::<u32>(), 1189, "the canon");
+        assert_eq!(CHAPTERS[66..].iter().map(|c| u32::from(*c)).sum::<u32>(), 182, "the Apocrypha");
+        assert_eq!(CHAPTERS.len(), Book::all().count());
+        for (book, count) in [("Genesis", 50), ("Psalms", 150), ("Revelation", 22), ("Obadiah", 1), ("Jude", 1), ("Isaiah", 66), ("Tobit", 14), ("Sirach", 51), ("2 Maccabees", 15)] {
             assert_eq!(chapter_count(Book::parse(book).unwrap()), count, "{book}");
         }
     }
@@ -1362,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_written_as_one_note_and_old_devotional_days_are_still_found() {
+    fn a_plan_written_as_one_note_is_found_and_notes_of_the_old_devotional_kind_are_not_plans() {
         let mut notes = BTreeMap::new();
         notes.insert("library/Plans/Gospels.md".to_string(), SEQUENTIAL.to_string());
         notes.insert("Notes/random.md".to_string(), "---\ntype: prayer\n---\n# x\n".to_string());
@@ -1370,20 +1365,10 @@ mod tests {
             notes.insert(format!("library/Old/{md}.md"), format!("---\ntype: devotional\nwork: Old Book\ndate: {md}\ntags: [devotional]\n---\n# Day\n\n## Morning\n\n> *q* \u{2014} [[{text}]]\n"));
         }
         let found = find_plans(&notes);
-        assert_eq!(found.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Gospels in 30 days", "Old Book"]);
+        assert_eq!(found.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Gospels in 30 days"], "devotionals are not read");
         let single = &found[0];
         assert_eq!((single.folder.clone(), single.manifest.as_deref(), single.kind), (None, Some("library/Plans/Gospels.md"), Kind::Sequential));
         assert!(single.days.iter().all(|d| d.note.is_none()));
-        let old = &found[1];
-        assert_eq!((old.kind, old.folder.as_deref(), old.manifest.clone()), (Kind::Calendar, Some("library/Old"), None));
-        assert_eq!(old.days.iter().map(|d| d.key).collect::<Vec<_>>(), [DayKey::MonthDay(1, 1), DayKey::MonthDay(1, 2)]);
-        assert_eq!(old.days[0].note.as_deref(), Some("library/Old/01-01.md"));
-        assert!(old.days[0].passages.is_empty(), "no readings property, no readings");
-        // With a manifest in its folder, the same notes are that plan's days.
-        notes.insert("library/Old/Old.md".to_string(), "---\ntype: plan\nname: Old Book\nkind: calendar\n---\n# Old Book\n\nThe description.\n".to_string());
-        let found = find_plans(&notes);
-        assert_eq!(found.len(), 2);
-        assert_eq!((found[1].days.len(), found[1].description.as_str()), (2, "The description."));
     }
 
     fn done(paths: &[(&str, &str)]) -> HashMap<String, String> {

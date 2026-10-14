@@ -1,4 +1,4 @@
-//! The plan tab: the plans (reading plans and devotionals alike, see docs/08 and docs/09), each a
+//! The plan tab: the plans (see docs/08 and docs/09), each a
 //! note a day, read here and not written in. It shows how far each has got, one day at a time with
 //! the means to go to the day before or after, or to today. A plan has no pace: days are done or not. Importing,
 //! starting and removing plans is done in the plans window (`plans_window`).
@@ -149,26 +149,11 @@ impl PlanTab {
                 .push(arrow("\u{203a}", at + 1 < e.plan.days.len(), PlanMsg::Next))
                 .push(button(text("Today").size(13)).padding([3, 10]).style(button::secondary).on_press_maybe(e.progress.today.map(|_| PlanMsg::Today)));
         }
-        let mut page = column![container(bar).padding([8, 16]), rule::horizontal(1)];
-        if let Some(key) = confirm_remove {
-            let name = entries.iter().find(|p| &p.key() == key).map_or(key.clone(), |p| p.plan.name.clone());
-            page = page.push(
-                container(
-                    row![
-                        text(format!("Remove \u{201c}{name}\u{201d}? Its notes are deleted from your vault.")).size(13).width(Length::Fill),
-                        button(text("Cancel").size(12)).padding([3, 10]).style(button::secondary).on_press(PlanMsg::App(PlansMsg::No)),
-                        button(text("Remove").size(12)).padding([3, 10]).style(button::danger).on_press(PlanMsg::App(PlansMsg::Remove)),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Center),
-                )
-                .padding([8, 16]),
-            );
-        }
+        let page = column![container(bar).padding([8, 16]), rule::horizontal(1)];
         let body: Element<'a, PlanMsg> = {
             match (selected, self.day) {
                 (Some(e), Some(i)) if i < e.plan.days.len() => self.day_view(sh, e, i, today),
-                (Some(e), _) => scrollable(container(self.overview(e, today)).padding(24).width(Length::Fill)).height(Length::Fill).into(),
+                (Some(e), _) => scrollable(container(self.overview(e, today, confirm_remove)).padding(24).width(Length::Fill)).height(Length::Fill).into(),
                 (None, _) => scrollable(container(self.plan_list(entries)).padding(24).width(Length::Fill)).id(self.scroll_id()).height(Length::Fill).into(),
             }
         };
@@ -179,7 +164,7 @@ impl PlanTab {
         if entries.is_empty() {
             return column![
                 text("No plans yet").size(15),
-                text("Import one (a markdown plan, a CSV of day and readings, or an iCalendar file), or import a devotional from the module manager. See docs/09-reading-plans.md.")
+                text("Import one (a markdown plan, a CSV of day and readings, or an iCalendar file). See docs/09-reading-plans.md.")
                     .size(12)
                     .style(text::secondary),
             ]
@@ -225,12 +210,12 @@ impl PlanTab {
     }
 
     /// A plan with no day shown: how far, and its days to pick from.
-    fn overview<'a>(&'a self, e: &'a Entry, today: NaiveDate) -> Element<'a, PlanMsg> {
+    fn overview<'a>(&'a self, e: &'a Entry, today: NaiveDate, confirm_remove: Option<&String>) -> Element<'a, PlanMsg> {
         let mut page = column![text(e.plan.name.clone()).size(20)].spacing(10);
         if !e.plan.description.trim().is_empty() {
             page = page.push(text(e.plan.description.clone()).size(12).style(text::secondary));
         }
-        page = page.push(self.plan_actions(e));
+        page = page.push(self.plan_actions(e, confirm_remove));
         if e.plan.is_started() {
             page = page.push(progress_line(e));
         }
@@ -243,7 +228,7 @@ impl PlanTab {
     }
 
     /// Start, Open note, Remove.
-    fn plan_actions<'a>(&self, e: &'a Entry) -> Element<'a, PlanMsg> {
+    fn plan_actions<'a>(&self, e: &'a Entry, confirm_remove: Option<&String>) -> Element<'a, PlanMsg> {
         let mut actions = row![].spacing(8);
         if e.plan.kind == Kind::Sequential && e.plan.manifest.is_some() {
             let label = if e.plan.is_started() { "Start over today" } else { "Start today" };
@@ -251,7 +236,7 @@ impl PlanTab {
             actions = actions.push(if e.plan.is_started() { b.style(button::secondary) } else { b }.on_press(PlanMsg::App(PlansMsg::Start(e.key()))));
         }
         actions = actions.push(space::horizontal());
-        actions = actions.push(button(text("Remove").size(12)).padding([3, 10]).style(button::secondary).on_press(PlanMsg::App(PlansMsg::AskRemove(e.key()))));
+        actions = actions.push(crate::plans_window::remove_button(e.key(), confirm_remove == Some(&e.key()), PlanMsg::App));
         actions.into()
     }
 

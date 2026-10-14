@@ -1,10 +1,9 @@
 # 09 - Plans
 
-Reading plans and devotionals are one thing: a **plan**. A plan has a note for each day (named by an absolute date or by a
+A reading **plan**. A plan has a note for each day (named by an absolute date or by a
 number relative to when the plan was started), a completion log, optional passages to read each day, and optional text to
-read each day (a devotional). A plan is not edited, but its notes are linked to like any note, and every plan appears on the
-plan screen and tracks progress. The code is `crates/core/src/plan.rs` (plans), `plan_log.rs` (the completion log) and
-`devotional.rs` (devotionals as plans).
+read each day. A plan is not edited, but its notes are linked to like any note, and every plan appears on the
+plan screen and tracks progress. The code is `crates/core/src/plan.rs` (plans) and `plan_log.rs` (the completion log).
 
 ## The standard
 
@@ -67,8 +66,8 @@ tags: [plan-day]
   name alone for the whole book). It can also be written as a list over lines. A passage that cannot be read is left out and
   named in the plan's `problems`, with the note it was in; the rest is read.
 - `## Reading` holds one `- [[Matthew 1]]` link for each chapter when the day has passages, so that they can be followed.
-- Whatever else the day has follows: a devotional's `## Morning` and `## Evening`, a key verse in a blockquote, and so on.
-  Both the passages and the text are optional: a reading-only day has no text, a devotional day may have no passages (docs/08).
+- Whatever else the day has follows: headings, a key verse in a blockquote, and so on.
+  Both the passages and the text are optional: a reading-only day has no text, and a day of text may have no passages (docs/08).
 - A chapter range (`Genesis 1-3`) is read as one passage for each chapter, and a verse range across chapters
   (`John 3:16-4:3`) is split by chapter, so that progress can be counted in chapters. Written back, the pieces are joined again.
 - Book names go through `Book::parse`: `Gen`, `Genesis`, `1 Cor`, `Psalm` and `Psalms` all work. Text after a spaced dash is a note
@@ -95,8 +94,6 @@ These are still read:
   optional `start`. It is found by `find_plans` as a plan with no folder and no day notes (`Plan::folder` is `None`), and is the
   form `Plan::parse` and `Plan::render` work in, for authoring and for the importers. A heading may carry a title after a dash
   or colon (`## Day 3 — Creation`). Other headings are not days.
-- Day notes written by earlier devotional imports, `type: devotional` with `date: MM-DD` and `work:`, with no manifest. A folder
-  of them is a calendar plan named by `work`. Inside a folder that has a manifest they are that plan's days.
 
 ## The completion log
 
@@ -127,12 +124,10 @@ The **baseline** is the plan's `start` (sequential, so a plan not started has no
 ## Finding and writing plans
 
 - `find_plans(&notes)` takes the vault's notes (path to text) and returns every plan, sorted by name: each manifest with the day
-  notes of its folder, sorted by day (each `Day` has its note's path in `note`), the legacy forms above, and in `problems` what
+  notes of its folder, sorted by day (each `Day` has its note's path in `note`), a plan written as one note, and in `problems` what
   could not be read.
 - `Plan::to_files()` is the plan as its manifest and a note for each day, as `(path, text)` for the app to write. `Plan::from_files`
   reads them back (`find_plans` on them).
-- `devotional::plan_files(work, description, entries)` is a devotional (the OSIS entries of a SWORD module) as a calendar plan's
-  files.
 
 ## Importers
 
@@ -158,10 +153,38 @@ Readings an importer cannot read are left out of the plan; they are in its `prob
 
 The **Plans** button in the top bar opens a window for managing plans: each plan with its size and progress and *Open*
 (read it in the plan tab), *Start today* (a numbered plan) and *Remove* (asks first); *Import…* for a markdown plan, a CSV,
-an iCalendar file or the experimental SWORD lines; and the installed devotionals, each with *Make a plan* (see docs/08).
+or an iCalendar file or the experimental SWORD lines.
 
 Plans are read in the plan tab (also *Plans* in a new tab): the list of plans with how far each has got, then one day at
 a time, its note read-only, with ‹ › for the day before and after, *Today* and
 *Mark as done*. Each reading of the day (a chapter) has a box to tick as it is done; ticking one records it in the plan log
 (`- [[library/Plan/Day 001#Genesis 1|label]]`, which is not a completion) and in the reading log, the last one ticked completes the
 day, and unticking any takes the completion back. A link to a note in `library/` opens in this tab at that day.
+
+## The plans a new vault starts with
+
+A vault made by the first-run window (and any empty folder opened as a new vault) gets the plans in
+`crates/core/src/starter_plans.rs`, written once into `library/` like an imported plan (`Options::plans`):
+
+- **Bible in a year**: Genesis to Revelation in order, a numbered plan of 365 days, from `crates/core/data/canonical.csv`. Whole chapters
+  only, each day ending near an even share of the verses read so far (28 to 176 verses a day; Psalm 119 is a day on its own). Made by
+  `cargo run -p sword --example canonical_plan > crates/core/data/canonical.csv`, which also reports the spread.
+- **M'Cheyne**: Robert Murray M'Cheyne's 1842 calendar (public domain), a calendar plan with four readings a day, from
+  `crates/core/data/mcheyne.csv` (columns: date, two family readings, two private ones). February 29 has no reading. The file was
+  made from a published transcription, checked against the plan's own rules: every chapter of the Old Testament once, the New
+  Testament and the Psalms twice, each column reading on in order, and day 1 and day 365 as printed. The test
+  `mcheyne_has_a_day_for_each_date_and_reads_every_chapter_as_often_as_it_should_be` keeps it so.
+- **Chronological**: the whole Bible in a chronological order, a numbered plan of 365 days, from `crates/core/data/chronological.csv`.
+  The order is that of a list of 77 passages (book and chapter range, with a phase and a note for each) compiled by the project owner
+  from their own research and released by them into the public domain (the file itself states neither; this is the owner's word, and
+  the plan's source says so). Its order is kept exactly (Job after
+  Genesis, Psalms and Proverbs among the kings, the Gospels side by side, the letters set among Acts). The chapters were cut into days
+  by `cargo run -q -p sword --example chronological_plan -- chronological_bible.csv > crates/core/data/chronological.csv`, whole
+  chapters only, each day ending near an even share of the verses (7 to 176 a day, mean 85; Psalm 119 is a day and Psalm 120 follows
+  alone). Checks: every book name parses; all 1,189 chapters of the Bible are read, none twice and none missing; the day numbers and
+  the order are tested in `the_chronological_plan_reads_every_chapter_once_in_the_order_of_the_source_in_365_days`. The two
+  Ezekiel and Daniel passages and the Matthew/Luke birth narratives are split in the source and kept split ("Song of Solomon" and the
+  other names needed no change).
+
+CrossWire's daily devotionals (`Feature=DailyDevotion`) are not supported: an earlier version could make them into plans (and still-existing
+notes of `type: devotional` from it are ordinary notes now, not plans); they are no longer offered from the repository or read.

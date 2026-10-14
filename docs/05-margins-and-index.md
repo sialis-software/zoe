@@ -328,7 +328,39 @@ so the Dock and menu bar use the name and the icon (the artwork in `crates/app/a
 rounded square, made by `scripts/make-icon.swift`, whose 1024 px result is also kept as `zoe-rounded.png`); run outside a bundle the app sets its own Dock icon,
 and on other systems the window's icon, from that rounded picture.
 
+### Packaging
+
+`scripts/package.sh [macos|windows|linux|all]` makes the packages with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager)
+(config: `Packager.toml`; `cargo install cargo-packager cargo-xwin --locked`), from a Mac. They land in `target/dist`, unsigned:
+
+- macOS: `Zoe.app` and a `.dmg`, for this Mac's architecture.
+- Windows: an NSIS installer for x64, cross-built with `cargo xwin` (needs brew's `llvm@21`, `lld@21` and `makensis`).
+  The icon and name are written into the .exe by `crates/app/build.rs`, and a release build has no console window.
+- Linux: a `.deb` and an AppImage, built in a `rust:1-bookworm` Docker container (`LINUX_PLATFORM=linux/amd64` for x86_64, slowly, by emulation).
+
+The Berean Standard Bible and both Strong's dictionaries are compiled into the program (`crates/app/assets/modules`, `src/bundled.rs`) and
+installed into the app's own module folder once, on the first run, when no Bible is found anywhere; about 9 MB of the program's size.
+
+The icon files in `packaging/icons` (PNGs and `zoe.ico`) are made from the rounded artwork by `scripts/make-icons.sh` and kept in git.
+`scripts/bundle-macos.sh` is the older, hand-made macOS bundle (it can make a universal binary with `UNIVERSAL=1`); `scripts/package-linux.sh`
+and `scripts/package-windows.ps1` (Inno Setup) are the same for the other systems, to be run on them.
+Only the macOS, Windows installer and Linux packages' building has been tried; none has been run on Windows or Linux.
+
 The program file is `Zoe` (a `[[bin]]` in `crates/app/Cargo.toml`; `cargo run -p zoe` still runs it), so that
 the Dock shows the capital outside a bundle. The mark in the header bar is `crates/app/assets/app/zoe.svg`,
 the artwork traced to a path (the original, which draws the letter as text in a font the viewer must have,
 is kept as `zoe-source.svg`), drawn in the color of the text.
+
+### Persecution mode, and About
+
+**Persecution mode** (`network.rs`) turns off everything that could use the network: the module manager's list and downloads
+(`module_repo::Http::get`, the app's only network client, refuses) and the opening of web and mail links (`native::open_external`, the
+only way an address is handed to another program). Both ask `network::blocked()`, so no new code path can forget to. The choice is
+`persecution` in `config.json`, read first thing at start-up, and `ZOE_PERSECUTION=1` forces it on. It is a switch in the first-run window
+and in the settings under Privacy; the module manager says why its download buttons are off, and modules can still be added from files.
+The app never checks for updates or sends anything about the person, with or without the mode.
+
+**About** is the last page of the settings (all systems: `about.rs`) with the credits for what comes with the app and the list of
+libraries it is built from and their licences (`assets/third-party.txt`, made by `scripts/third-party.sh`; re-run it when dependencies
+change). On a Mac the application menu's About item shows the system's panel with the same credits, the version and the picture.
+The libraries' licence *texts* are not included yet, only the names and licences.

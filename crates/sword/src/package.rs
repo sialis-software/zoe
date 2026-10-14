@@ -181,7 +181,7 @@ pub fn readability(module: &Module) -> Result<(), String> {
         Kind::Bible => module.bible().map(|_| ()),
         Kind::Commentary => module.commentary().map(|_| ()),
         Kind::Lexicon => module.lexicon().map(|_| ()),
-        Kind::Devotional => module.devotional().map(|_| ()),
+        Kind::Devotional => return Err(format!("{} is a daily devotional, which this app does not read", module.name())),
         Kind::Other if module.is_locked() => return Err(format!("{} is locked and needs a key", module.name())),
         Kind::Other => {
             return Err(match module.conf.get("ModDrv") {

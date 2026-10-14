@@ -275,7 +275,7 @@ impl SearchTab {
             line("faith -works", "leave a word out"),
             line("beg*", "words that begin so"),
             line("G26", "a Strong's number (H430 for Hebrew)"),
-            line("love in:John", "only that book (in:NT, in:Gen-Deut)"),
+            line("love in:John", "only that book (in:NT, in:AP, in:Gen-Deut)"),
         ]
         .spacing(6)
         .into()

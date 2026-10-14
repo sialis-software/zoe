@@ -1,0 +1,32 @@
+# Packages for every platform with `cargo packager --release` (cargo install cargo-packager --locked).
+# Formats are picked per platform; the packages land in target/dist. Nothing is signed.
+name = "zoe"
+product-name = "Zoe"
+identifier = "app.zoe.Zoe"
+version = "0.1.0"
+description = "Bible study with SWORD modules and Markdown notes"
+authors = ["Zoe"]
+category = "Education"
+out-dir = "target/dist"
+# The program is built first (scripts/package.sh does both): the target decides where it is.
+icons = [
+    "packaging/icons/zoe-32.png",
+    "packaging/icons/zoe-128.png",
+    "packaging/icons/zoe-256.png",
+    "packaging/icons/zoe-512.png",
+    "packaging/icons/zoe.ico",
+]
+
+[[binaries]]
+path = "Zoe"
+main = true
+
+[macos]
+minimum-system-version = "11.0"
+
+[nsis]
+installer-icon = "packaging/icons/zoe.ico"
+installer-mode = "both"
+
+[deb]
+depends = ["libc6", "libxkbcommon0", "libvulkan1 | libgl1"]
