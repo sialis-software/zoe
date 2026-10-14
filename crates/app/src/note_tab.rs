@@ -14,7 +14,7 @@ use iced::widget::{
     text_input,
 };
 use iced::{Element, Length, Task, Theme};
-use md_editor::{Action as EditAction, Document};
+use md_editor::{Action as EditAction, Document, Vim, VimKey, VimMode};
 use std::collections::BTreeSet;
 use std::fmt;
 use study_core::ModuleId;
@@ -58,6 +58,8 @@ impl fmt::Display for NoteChoice {
 #[derive(Debug, Clone)]
 pub enum NoteMsg {
     Action(EditAction),
+    /// A key the Vim bindings take (see `Settings::vim_mode`).
+    Vim(VimKey),
     /// Open the link under the editor cursor, or one clicked in the text.
     OpenLink(LinkTarget),
     /// A right click on a link in the text, at this point of the window.
@@ -67,6 +69,10 @@ pub enum NoteMsg {
     PickNote(NoteChoice),
     /// Back or forward along the notes this tab has shown.
     Back,
+    /// Put a link to this note on the clipboard.
+    CopyLink,
+    /// The text was scrolled this far.
+    Scrolled(f32),
     Forward,
     /// Ask whether to delete the open note (the trash button).
     AskDelete,
@@ -337,6 +343,8 @@ pub struct NoteTab {
     /// The notes this tab has shown.
     pub history: History<String>,
     pub doc: Document,
+    /// The Vim state; only used while `Settings::vim_mode` is on.
+    pub vim: Vim,
     pub picker: Option<Picker>,
     /// The confirmation to delete the open margin note is showing.
     pub confirm_delete: bool,
@@ -354,6 +362,8 @@ pub struct NoteTab {
     pub menu_open: bool,
     /// The full properties editor is open.
     pub props_open: bool,
+    /// How far down the text is scrolled, to put back when the tab is shown again.
+    pub scroll: f32,
     /// Whether a margin note's colors to choose from are showing.
     pub mark_colors: bool,
     /// What a value box shows while what is typed is not (yet) a value of its type: a number
@@ -380,6 +390,20 @@ pub fn file_stem(path: &str) -> String {
 
 /// How a note is named in the selector and the tab: its file name, or for a margin note what
 /// it is anchored to.
+/// A link to the note at `path` as it is written in another note: by its name when no other note
+/// has that name, else by its path, and with the name a person would call it when that is not what
+/// is written (`[[margins/John/03/16-note-s1|John 3:16 · note]]`).
+pub fn link_to(sh: &Shared, path: &str) -> String {
+    let no_ext = path.trim_end_matches(".md");
+    let stem = no_ext.rsplit('/').next().unwrap_or(no_ext);
+    let same = |p: &String| p.trim_end_matches(".md").rsplit('/').next().is_some_and(|s| s.eq_ignore_ascii_case(stem));
+    let unique = sh.notes.keys().filter(|p| same(p)).count() <= 1;
+    let target = if unique && sh.mark_index_of(path).is_none() { stem } else { no_ext };
+    // The brackets and the bar are what the link is made of: a name has none of its own.
+    let label = label_of(sh, path).replace(['[', ']', '|'], " ");
+    if label == target { format!("[[{target}]]") } else { format!("[[{target}|{label}]]") }
+}
+
 pub fn label_of(sh: &Shared, path: &str) -> String {
     if let Some(mark) = sh.mark_index_of(path).and_then(|i| sh.marks.get(i)) {
         let kind = match (mark.body.trim().is_empty(), mark.style) {
@@ -476,6 +500,7 @@ impl NoteTab {
             history: History::new(path.clone()),
             path,
             doc,
+            vim: Vim::new(),
             picker: None,
             confirm_delete: false,
             choosing: false,
@@ -485,6 +510,7 @@ impl NoteTab {
             renaming: None,
             menu_open: false,
             props_open: false,
+            scroll: 0.0,
             mark_colors: false,
             drafts: BTreeMap::new(),
             new_key: String::new(),
@@ -529,6 +555,7 @@ impl NoteTab {
     fn show(&mut self, sh: &mut Shared, path: String) {
         let text = sh.notes.get(&path).cloned().unwrap_or_default();
         self.doc = start_of_note(&text);
+        self.scroll = 0.0;
         self.path = path;
         self.picker = None;
         self.renaming = None;
@@ -550,7 +577,26 @@ impl NoteTab {
 
     /// Reload the document from the shared text (it changed behind the tab).
     pub fn reload(&mut self, sh: &Shared) {
-        self.doc = start_of_note(sh.notes.get(&self.path).map_or("", String::as_str));
+        let new = sh.notes.get(&self.path).map_or("", String::as_str);
+        let old = self.doc.source().to_string();
+        if old == new {
+            return;
+        }
+        let head = self.doc.selection().head;
+        self.doc = start_of_note(new);
+        // The caret stays where it was in the words that did not change: before what was changed
+        // as it was, after it as far on as the change moved things.
+        let prefix = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+        let suffix = old.bytes().rev().zip(new.bytes().rev()).take_while(|(a, b)| a == b).count().min(old.len() - prefix).min(new.len() - prefix);
+        let at = if head <= prefix {
+            head
+        } else if head >= old.len() - suffix {
+            head + new.len() - old.len()
+        } else {
+            prefix
+        };
+        let at = (0..=at.min(new.len())).rev().find(|&i| new.is_char_boundary(i)).unwrap_or(0);
+        self.doc.perform(EditAction::SetCaret { offset: at.max(self.doc.front_end()), extend: false });
     }
 
     /// Change the note's properties: the frontmatter block is rewritten in the app's order, as
@@ -602,6 +648,19 @@ impl NoteTab {
                     self.drafts.clear();
                 }
                 if self.doc.perform(action) {
+                    sh.notes.insert(self.path.clone(), self.doc.source().to_string());
+                    let path = self.path.clone();
+                    sh.sync_mark(&path);
+                }
+                // A click or a drag moved the caret: Vim follows it (a selection is Visual mode).
+                if sh.settings.vim_mode {
+                    self.vim.sync(&mut self.doc);
+                }
+            }
+            NoteMsg::Vim(key) => {
+                let out = self.vim.key(&mut self.doc, key);
+                if out.changed {
+                    self.drafts.clear();
                     sh.notes.insert(self.path.clone(), self.doc.source().to_string());
                     let path = self.path.clone();
                     sh.sync_mark(&path);
@@ -746,7 +805,14 @@ impl NoteTab {
             NoteMsg::AddProperties => self.change_properties(sh, |f| {
                 f.created.get_or_insert_with(frontmatter::now);
             }),
+            NoteMsg::CopyLink => {
+                self.menu_open = false;
+                let link = link_to(sh, &self.path);
+                sh.toast(format!("Copied {link}"));
+                task = iced::clipboard::write(link);
+            }
             NoteMsg::ToggleProps => self.props_open = !self.props_open,
+            NoteMsg::Scrolled(y) => self.scroll = y,
             NoteMsg::SetKind(KindChoice(kind)) => self.change_properties(sh, |f| f.kind = kind),
             NoteMsg::PropEdit(i, typed) => {
                 let kind = frontmatter::parse(self.doc.source()).front.props.get(i).and_then(|p| p.value.prop_type());
@@ -896,25 +962,36 @@ impl NoteTab {
             let mut pane = column![container(header).padding([8, 16]), rule::horizontal(1)].spacing(0);
 
             // The note's properties, shown and edited here rather than as raw lines in the text.
-            pane = pane.push(self.properties(sh));
+            // A margin note starts with the passage it is on, above its properties.
+        if let Some(mark) = self.open_mark_index(sh).and_then(|i| sh.marks.get(i)) {
+            pane = pane.push(self.passage_block(sh, mark, reference));
+        }
+        pane = pane.push(self.properties(sh));
 
             let module = reference.map(|b| b.module.clone()).or_else(|| sh.backend.modules().first().map(|m| m.id.clone()));
             let module = module.unwrap_or(ModuleId(String::new()));
             let embed_module = module.clone();
-            let editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
+            let mut editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
                 .id(self.editor_id())
                 .on_action(NoteMsg::Action)
                 .follow_links(true)
                 .on_link(NoteMsg::OpenLink)
                 .on_link_menu(NoteMsg::LinkMenu)
                 .on_link_drag(NoteMsg::LinkDrag)
+                .on_scroll(NoteMsg::Scrolled)
                 .embed(move |target| sh.embed_for(&embed_module, target))
                 .placeholder("Write here…")
                 .size(sh.settings.notes_size)
                 .font(sh.settings.text_font())
                 .padding(16)
                 .height(Length::Fill);
+            if sh.settings.vim_mode {
+                editor = editor.vim(&self.vim, NoteMsg::Vim);
+            }
             pane = pane.push(editor);
+            if sh.settings.vim_mode {
+                pane = pane.push(self.vim_status());
+            }
             pane.into()
         };
 
@@ -953,6 +1030,21 @@ impl NoteTab {
         stack![pane, behind, front].into()
     }
 
+    /// The mode line under the text: "-- NORMAL --", and the command being typed.
+    fn vim_status<'a>(&self) -> Element<'a, NoteMsg> {
+        let mode = match self.vim.mode() {
+            VimMode::Normal => "-- NORMAL --",
+            VimMode::Insert => "-- INSERT --",
+            VimMode::Visual => "-- VISUAL --",
+            VimMode::VisualLine => "-- VISUAL LINE --",
+        };
+        container(row![text(mode).size(12), space::horizontal(), text(self.vim.pending().to_string()).size(12)])
+            .padding([2, 16])
+            .width(Length::Fill)
+            .style(|theme: &Theme| container::Style { text_color: Some(theme.palette().text.scale_alpha(0.6)), ..container::Style::default() })
+            .into()
+    }
+
     /// What can be done: start a new note, rename this one (not a margin note, which is named by
     /// its passage), delete it.
     fn menu_panel<'a>(&self, sh: &Shared) -> Element<'a, NoteMsg> {
@@ -964,12 +1056,13 @@ impl NoteTab {
                 .on_press(msg)
         };
         let mut items = column![item(crate::icons::Icon::Plus, "New note\u{2026}", NoteMsg::NewNote)].spacing(2);
+        items = items.push(item(crate::icons::Icon::Link, "Copy link", NoteMsg::CopyLink));
         if self.open_mark_index(sh).is_none() {
             items = items.push(item(crate::icons::Icon::Backlinks, "Backlinks", NoteMsg::OpenBacklinks));
             items = items.push(item(crate::icons::Icon::Pencil, "Rename", NoteMsg::StartRename));
         }
         items = items.push(item(crate::icons::Icon::Trash, "Delete", NoteMsg::AskDelete));
-        container(items).padding(6).width(160).style(crate::popup_style).into()
+        container(items).padding(6).width(170).style(crate::popup_style).into()
     }
 
     /// The layers of a dialog over the note: one that dims what is behind (nothing else can be
@@ -1088,7 +1181,61 @@ impl NoteTab {
         out.into()
     }
 
-    /// A margin note's mark: the verse it is on (a link), and what can be changed about it: how
+    /// The passage a margin note is on, as the Bible has it, with the words that were marked in the
+    /// mark's color: the reference at its head is a link to it, as any `[[John 3:16]]` is (right
+    /// click for where to open it, pull it away to carry it).
+    fn passage_block<'a>(&'a self, sh: &'a Shared, mark: &'a study_core::margin::Mark, reference: Option<&BibleTab>) -> Element<'a, NoteMsg> {
+        use iced::widget::{rich_text, span};
+        let module = (!mark.module.is_empty())
+            .then(|| sh.backend.modules().into_iter().find(|m| m.abbreviation == mark.module).map(|m| m.id))
+            .flatten()
+            .or_else(|| reference.map(|b| b.module.clone()))
+            .or_else(|| sh.backend.modules().first().map(|m| m.id.clone()));
+        let target = LinkTarget::Verse { range: mark.anchor, module: None };
+        let found = module.as_ref().and_then(|m| sh.embed_for(m, &target));
+        let title = found.as_ref().map_or_else(|| mark.anchor.to_string(), |e| e.title.clone());
+        let reference_link = button(text(title).size(13))
+            .padding(0)
+            .style(|theme: &Theme, status| {
+                let link = crate::palette::Palette::for_theme(theme).link;
+                let shown = if matches!(status, button::Status::Hovered) { iced::Color { a: 0.8, ..link } } else { link };
+                button::Style { text_color: shown, ..button::Style::default() }
+            })
+            .on_press(NoteMsg::OpenLink(target.clone()));
+        let (for_menu, for_pull) = (target.clone(), target);
+        let reference_link = crate::link_area::link_area(
+            reference_link,
+            move |at| NoteMsg::LinkMenu(for_menu.clone(), at),
+            move |at| NoteMsg::LinkDrag(for_pull.clone(), at),
+        );
+        let size = sh.settings.notes_size * 0.95;
+        let mut block = column![reference_link].spacing(6);
+        if let Some(found) = found {
+            let font = sh.settings.text_font();
+            let marked = crate::bible_tab::hex_color(&mark.color, if sh.is_dark() { 0.4 } else { 0.5 }).unwrap_or(iced::Color::TRANSPARENT);
+            let mut spans: Vec<iced::widget::text::Span<'a, ()>> = Vec::new();
+            match (!mark.quote.is_empty()).then(|| found.body.find(&mark.quote)).flatten() {
+                Some(at) => {
+                    let end = at + mark.quote.len();
+                    spans.push(span(found.body[..at].to_string()).font(font));
+                    spans.push(span(found.body[at..end].to_string()).font(font).background(marked).padding(1));
+                    spans.push(span(found.body[end..].to_string()).font(font));
+                }
+                None => spans.push(span(found.body).font(font)),
+            }
+            block = block.push(rich_text(spans).size(size));
+        }
+        container(block)
+            .padding([10, 16])
+            .width(Length::Fill)
+            .style(|theme: &Theme| container::Style {
+                background: Some(theme.extended_palette().background.weak.color.into()),
+                ..container::Style::default()
+            })
+            .into()
+    }
+
+    /// A margin note's mark: what can be changed about it: how
     /// it marks the text, its color and its tags. Where it is (the passage and the words) is not
     /// changed here.
     fn mark_summary<'a>(&'a self, sh: &'a Shared, mark: &'a study_core::margin::Mark) -> Element<'a, NoteMsg> {
@@ -1099,25 +1246,7 @@ impl NoteTab {
         if !mark.created.is_empty() {
             bits.push(format!("created {}", frontmatter::display(&mark.created)));
         }
-        // The verse the note is on is a link to it, as any `[[John 3:16]]` is.
-        let target = LinkTarget::Verse { range: mark.anchor, module: (!mark.module.is_empty()).then(|| mark.module.clone()) };
-        let verse = button(text(mark.anchor.to_string()).size(12))
-            .padding(0)
-            .style(|theme: &Theme, status| {
-                let link = crate::palette::Palette::for_theme(theme).link;
-                let shown = if matches!(status, button::Status::Hovered) { iced::Color { a: 0.8, ..link } } else { link };
-                button::Style { text_color: shown, ..button::Style::default() }
-            })
-            .on_press(NoteMsg::OpenLink(target.clone()));
-        // With what a link in the text has: a right click for where to open it, and pulling it away.
-        let (for_menu, for_pull) = (target.clone(), target);
-        let verse = crate::link_area::link_area(
-            verse,
-            move |at| NoteMsg::LinkMenu(for_menu.clone(), at),
-            move |at| NoteMsg::LinkDrag(for_pull.clone(), at),
-        );
-        let about = row![verse, text(if bits.is_empty() { String::new() } else { format!("  \u{00B7}  {}", bits.join("  \u{00B7}  ")) }).size(12).style(text::secondary)]
-            .align_y(iced::Center);
+        let about = text(bits.join("  \u{00B7}  ")).size(12).style(text::secondary);
 
         // How it marks the text, and its color.
         let style_button = |label: &'static str, style: MarkStyle| {

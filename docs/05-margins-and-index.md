@@ -215,8 +215,7 @@ Module index: `verse_text(ord, text)` + FTS5, `word_lemma(ord, strongs, morph)`.
 The app now runs on a real vault and real modules (crates `vault`, `sword`).
 
 - **Vault**: any folder of markdown files, chosen by the user. The choice is kept in
-  `<home>/config.json` (`<home>` is `$ZOE_HOME`, else `~/Library/Application Support/zoe`
-  on macOS); with none saved, an earlier version's `<home>/vault` is used. Every edit is written
+  `config.json` in the config folder (see Names below); with none saved, an earlier version's `vault` folder in the data folder is used. Every edit is written
   through to its file (atomic write-then-rename) after each update; deleting or renaming a mark
   removes the old file. Marks load from `margins/` on start.
 - **Choosing a vault** (`vault_setup.rs`). On a first run, or when the saved folder is not there
@@ -227,12 +226,12 @@ The app now runs on a real vault and real modules (crates `vault`, `sword`).
   (note count, Obsidian or ours) and offers to add sample notes (only to a folder with no notes)
   and the starting templates (only where there are none). Switching saves what is open, loads
   the new notes, remembers the choice and opens the default layout; the old vault is untouched.
-- **Index per vault**: `<home>/cache/index-<hash of the vault path>.sqlite` (the default vault
+- **Index per vault**: `cache/index-<hash of the vault path>.sqlite` in the data folder (the default vault
   keeps `index.sqlite`), so nothing but notes is ever written into a vault.
 - **Seed data**: an empty vault is seeded with four linked notes and nine marks anchored in
   ASV's real text (a quote a module words differently is skipped). `zoe --reseed`
   restores the samples without touching other files.
-- **Index**: SQLite in `<home>/cache/` (outside the vault, per §6): `files`,
+- **Index**: SQLite in the data folder's `cache/` (outside the vault, per §6): `files`,
   `links` (verse/embed/note/sword links plus each mark's anchor, as book/chapter/verse
   ranges), and an FTS5 table. It syncs incrementally by content hash on start and per save,
   and a test deletes and rebuilds it. The UI does not read it yet: `annotated_verses` and
@@ -303,12 +302,27 @@ design so nothing built now rules it out.
 - Does deleting a series document remove membership, or leave dangling links that the app
   offers to repair?
 
+### Config and data
+
+What the person chose and what the app makes are kept apart, in the places the XDG convention names
+(on macOS and Linux alike; `%APPDATA%\zoe` and `%LOCALAPPDATA%\zoe` on Windows):
+
+- **Config**, `$XDG_CONFIG_HOME/zoe` (`~/.config/zoe`): `config.json` (the vault and the module folders
+  chosen), `settings.json` (look and feel, text sizes, font) and `layouts.json` (saved layouts).
+- **Data**, `$XDG_DATA_HOME/zoe` (`~/.local/share/zoe`): `session.json` (what was open at shutdown),
+  `cache/` (the search indexes, which can be deleted) and `vault/` (the vault made when none was chosen).
+- **Modules** are not the app's: `$XDG_CONFIG_HOME/sword` (`~/.config/sword`), shared with other SWORD programs.
+
+`ZOE_CONFIG_HOME` and `ZOE_DATA_HOME` change the first two, and `ZOE_HOME` puts both under one folder
+(`config/` and `data/` in it). On the first start after this change, the one folder that held everything
+(`~/Library/Application Support/zoe`, or `bible-study` before the rename, or `~/.local/share/bible-study`)
+is split up: its files go to where they belong and the vault and module folders chosen in `config.json`
+are followed to their new places.
+
 ### Names
 
-The app is called Zoe. Its data folder is `zoe` (earlier `bible-study`: on the first start after the
-rename the old folder is moved to the new name and the vault and module folders chosen in
-`config.json` are followed along), the hidden folder in a vault is `.zoe` (earlier `.bible-study`,
-moved the same way), and the environment variables are `ZOE_HOME`, `ZOE_SWORD_PATH` and `ZOE_MODULE`
+The app is called Zoe. The hidden folder in a vault is `.zoe` (earlier `.bible-study`, moved when the vault is opened), and the environment variables are `ZOE_HOME`, `ZOE_CONFIG_HOME`,
+`ZOE_DATA_HOME`, `ZOE_SWORD_PATH` and `ZOE_MODULE`
 (the old `BIBLE_STUDY_*` names still work). On a Mac, `scripts/bundle-macos.sh` makes `target/Zoe.app`
 so the Dock and menu bar use the name and the icon (the artwork in `crates/app/assets/app/zoe.png` on a
 rounded square, made by `scripts/make-icon.swift`, whose 1024 px result is also kept as `zoe-rounded.png`); run outside a bundle the app sets its own Dock icon,

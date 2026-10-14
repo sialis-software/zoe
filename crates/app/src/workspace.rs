@@ -185,7 +185,7 @@ impl App {
             TabSave::Commentary { module, book, chapter } => {
                 let module = ModuleId(module.clone());
                 let book = Book::from_osis(book)?;
-                self.sh.backend.commentaries().iter().any(|c| c.id == module).then(|| {
+                (module.0 == crate::commentary_tab::MINE || self.sh.backend.commentaries().iter().any(|c| c.id == module)).then(|| {
                     let id = self.take_id();
                     Tab::Commentary(Box::new(crate::commentary_tab::CommentaryTab::new(id, &self.sh, module, book, (*chapter).max(1), None)))
                 })

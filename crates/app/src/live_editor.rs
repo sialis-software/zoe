@@ -22,7 +22,7 @@ use iced::advanced::{Clipboard, InputMethod, Renderer as _, Shell, Widget, clipb
 use iced::{
     Color, Element, Event, Font, Length, Padding, Pixels, Point, Rectangle, Size, Theme, alignment, font, keyboard,
 };
-use md_editor::{Action, Deco, Document, Motion, Rendered, Reveal, Role, Wrap, render};
+use md_editor::{Action, Deco, Document, Motion, Rendered, Reveal, Role, Vim, VimKey, VimMode, Wrap, render};
 use std::borrow::Cow;
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -98,8 +98,23 @@ pub struct LiveEditor<'a, Message> {
     /// A text that is read, selected and copied but not changed: nothing is revealed as raw
     /// source and there is no caret to see.
     reading: bool,
+    /// Told where it is scrolled to when that changes.
+    on_scroll: Option<Box<dyn Fn(f32) -> Message + 'a>>,
     /// What copying makes of the selected source text (the clipboard gets the result).
     copy_as: Option<fn(&str) -> String>,
+    /// Vim key bindings: what the modal state looks like, and where its keys go.
+    vim: Option<VimView>,
+    on_vim_key: Option<Box<dyn Fn(VimKey) -> Message + 'a>>,
+}
+
+/// What the widget needs to know of the Vim state to route keys and draw its cursor.
+#[derive(Clone, Copy)]
+struct VimView {
+    mode: VimMode,
+    /// Where the block cursor goes (none in Insert mode).
+    cursor: Option<usize>,
+    /// Escape means something to Vim; otherwise it lets go of the keyboard as usual.
+    wants_escape: bool,
 }
 
 pub fn live_editor<'a, Message>(doc: &'a Document, pal: Palette) -> LiveEditor<'a, Message> {
@@ -132,7 +147,10 @@ fn editor<'a, Message>(doc: Cow<'a, Document>, pal: Palette, read_only: bool) ->
         on_link_drag: None,
         embed: None,
         reading: false,
+        on_scroll: None,
         copy_as: None,
+        vim: None,
+        on_vim_key: None,
     }
 }
 
@@ -143,6 +161,22 @@ impl<'a, Message> LiveEditor<'a, Message> {
     /// caret. The owner drops the actions that would change the text.
     pub fn reading(mut self, reading: bool) -> Self {
         self.reading = reading;
+        self
+    }
+
+    /// Be told how far down the text is scrolled, whenever that changes (so that it can be put
+    /// back with `operation::scroll_to` when the editor is rebuilt, as when its tab is shown again).
+    /// Route keys through Vim bindings: `vim` is the state to draw (a block cursor in Normal and
+    /// Visual mode) and `on_key` gets the keys it takes. In Insert mode ordinary typing still
+    /// goes to the editor, so auto-pairing and input methods work as always.
+    pub fn vim(mut self, vim: &Vim, on_key: impl Fn(VimKey) -> Message + 'a) -> Self {
+        self.vim = Some(VimView { mode: vim.mode(), cursor: vim.block_cursor(&self.doc), wants_escape: vim.wants_escape() });
+        self.on_vim_key = Some(Box::new(on_key));
+        self
+    }
+
+    pub fn on_scroll(mut self, f: impl Fn(f32) -> Message + 'a) -> Self {
+        self.on_scroll = Some(Box::new(f));
         self
     }
 
@@ -239,11 +273,78 @@ impl<'a, Message> LiveEditor<'a, Message> {
         self.size.0 * LINE
     }
 
+    /// What a key press means to Vim, if Vim bindings are on.
+    fn vim_route(&self, key: &keyboard::Key, mods: keyboard::Modifiers, text: Option<&str>) -> VimRoute {
+        use keyboard::Key;
+        use keyboard::key::Named;
+        let Some(vim) = self.vim else { return VimRoute::Pass };
+        if self.read_only || self.reading {
+            return VimRoute::Pass;
+        }
+        let insert = vim.mode == VimMode::Insert;
+        let letter = match key.as_ref() {
+            Key::Character(c) if mods.control() => c.chars().next().map(|c| c.to_ascii_lowercase()),
+            _ => None,
+        };
+        let escape = matches!(key.as_ref(), Key::Named(Named::Escape)) || letter == Some('[');
+        if insert {
+            return if escape { VimRoute::Key(VimKey::Escape) } else { VimRoute::Pass };
+        }
+        if escape {
+            return if vim.wants_escape { VimRoute::Key(VimKey::Escape) } else { VimRoute::Pass };
+        }
+        // Control-r, -d and -u are Vim's; on other systems Control is the shortcut key, which
+        // the editor would otherwise take. Everything else with the shortcut key is the editor's.
+        if let Some(c @ ('r' | 'd' | 'u')) = letter {
+            return VimRoute::Key(VimKey::Ctrl(c));
+        }
+        if mods.command() {
+            return VimRoute::Pass;
+        }
+        if mods.alt() || mods.control() {
+            return VimRoute::Swallow;
+        }
+        let key = match key.as_ref() {
+            Key::Named(Named::Enter) => VimKey::Enter,
+            Key::Named(Named::Backspace) => VimKey::Backspace,
+            Key::Named(Named::Delete) => VimKey::Delete,
+            Key::Named(Named::Tab) => VimKey::Tab,
+            Key::Named(Named::ArrowLeft) => VimKey::Left,
+            Key::Named(Named::ArrowRight) => VimKey::Right,
+            Key::Named(Named::ArrowUp) => VimKey::Up,
+            Key::Named(Named::ArrowDown) => VimKey::Down,
+            Key::Named(Named::Home) => VimKey::Home,
+            Key::Named(Named::End) => VimKey::End,
+            Key::Named(Named::PageUp) => VimKey::Ctrl('u'),
+            Key::Named(Named::PageDown) => VimKey::Ctrl('d'),
+            Key::Named(Named::Space) => VimKey::Char(' '),
+            Key::Character(c) => {
+                let typed = text.filter(|t| !t.is_empty()).unwrap_or(c);
+                match typed.chars().next().filter(|c| !c.is_control()) {
+                    Some(c) => VimKey::Char(c),
+                    None => return VimRoute::Swallow,
+                }
+            }
+            _ => return VimRoute::Pass,
+        };
+        VimRoute::Key(key)
+    }
+
     fn emit(&self, shell: &mut Shell<'_, Message>, action: Action) {
         if let Some(f) = &self.on_action {
             shell.publish(f(action));
         }
     }
+}
+
+/// What to do with a key press when Vim bindings are on.
+enum VimRoute {
+    /// Not Vim's: handle it as usual.
+    Pass,
+    /// Vim's.
+    Key(VimKey),
+    /// Nobody's, and it must not be typed into the note.
+    Swallow,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -310,10 +411,30 @@ struct Click {
     count: u8,
 }
 
+impl iced::advanced::widget::operation::Scrollable for State {
+    fn snap_to(&mut self, offset: iced::widget::operation::RelativeOffset<Option<f32>>) {
+        if let Some(y) = offset.y {
+            self.scroll = y * (self.content_h - self.view_h).max(0.0);
+        }
+    }
+
+    fn scroll_to(&mut self, offset: iced::widget::operation::AbsoluteOffset<Option<f32>>) {
+        if let Some(y) = offset.y {
+            self.scroll = y.max(0.0);
+        }
+    }
+
+    fn scroll_by(&mut self, offset: iced::widget::operation::AbsoluteOffset, _bounds: Rectangle, _content_bounds: Rectangle) {
+        self.scroll = (self.scroll + offset.y).max(0.0);
+    }
+}
+
 #[derive(Default)]
 struct State {
     focused: bool,
     scroll: f32,
+    /// The scroll last told to `on_scroll`.
+    reported_scroll: f32,
     view_h: f32,
     content_h: f32,
     laid: Vec<Laid>,
@@ -654,7 +775,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
 
         // Keep the caret in view when it moves (typing, arrows), but leave the scroll alone
         // when something else (the wheel) moved the view.
-        let head = self.doc.selection().head;
+        let head = self.vim.and_then(|v| v.cursor).unwrap_or(self.doc.selection().head);
         if !self.read_only && state.last_head != Some(head) {
             state.last_head = Some(head);
             state.touch();
@@ -841,10 +962,28 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
                 && state.caret_visible()
                 && revealed.is_some()
                 && sel.is_empty()
+                && self.vim.is_none_or(|v| v.cursor.is_none())
                 && let Some(rect) = self.caret_rect(state, sel.head)
             {
                 let at = Point::new(origin.x + rect.x, origin.y + rect.y);
                 quad(renderer, Rectangle::new(at, Size::new(1.5, rect.height)), text_color, 0.0);
+            }
+
+            // Vim's block cursor, over the character it is on (a space's width at the end of a line).
+            if !self.read_only
+                && !self.reading
+                && state.focused
+                && let Some(cursor) = self.vim.and_then(|v| v.cursor)
+                && let Some(rect) = self.caret_rect(state, cursor)
+            {
+                let src = self.doc.source();
+                let next = src[cursor..].chars().next().filter(|&c| c != '\n').map(|c| cursor + c.len_utf8());
+                let width = next
+                    .and_then(|n| self.caret_rect(state, n))
+                    .filter(|r| (r.y - rect.y).abs() < 1.0 && r.x > rect.x)
+                    .map_or(self.size.0 * 0.6, |r| r.x - rect.x);
+                let at = Point::new(origin.x + rect.x, origin.y + rect.y);
+                quad(renderer, Rectangle::new(at, Size::new(width, rect.height)), Color { a: 0.45, ..text_color }, 0.0);
             }
 
             // A slim scrollbar when there is more than fits.
@@ -877,6 +1016,13 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
     ) {
         let state = tree.state.downcast_mut::<State>();
         let bounds = layout.bounds();
+
+        if let Some(f) = &self.on_scroll
+            && (state.scroll - state.reported_scroll).abs() > 0.5
+        {
+            state.reported_scroll = state.scroll;
+            shell.publish(f(state.scroll));
+        }
 
         if let Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
             state.modifiers = *m;
@@ -1145,6 +1291,22 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
             }
 
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, text, .. }) if state.focused => {
+                match self.vim_route(key, *modifiers, text.as_deref()) {
+                    VimRoute::Key(k) => {
+                        state.touch();
+                        state.goal_x = None;
+                        shell.capture_event();
+                        if let Some(f) = &self.on_vim_key {
+                            shell.publish(f(k));
+                        }
+                        return;
+                    }
+                    VimRoute::Swallow => {
+                        shell.capture_event();
+                        return;
+                    }
+                    VimRoute::Pass => {}
+                }
                 if let Some(action) = self.key_action(state, clipboard, key, *modifiers, text.as_deref()) {
                     state.touch();
                     shell.capture_event();
@@ -1195,7 +1357,13 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
             return;
         }
         let state = tree.state.downcast_mut::<State>();
-        operation.focusable(self.id.as_ref(), layout.bounds(), state);
+        let bounds = layout.bounds();
+        let content = Rectangle::new(bounds.position(), Size::new(bounds.width, state.content_h.max(bounds.height)));
+        // Within its own scope, so that what the scrollable stands for does not reach the widgets after it.
+        operation.traverse(&mut |operation| {
+            operation.scrollable(self.id.as_ref(), bounds, content, iced::Vector::ZERO, state);
+            operation.focusable(self.id.as_ref(), bounds, state);
+        });
     }
 }
 

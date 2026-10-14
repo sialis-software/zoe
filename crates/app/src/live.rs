@@ -222,6 +222,8 @@ pub struct Boot {
     pub persist: Option<Persist>,
     /// The data folder, when there is a real one: settings and the session live in it.
     pub home: Option<PathBuf>,
+    /// Where what the person chose is kept (`home` when there is no other).
+    pub config: Option<PathBuf>,
     /// The folder of the vault in use.
     pub vault: Option<PathBuf>,
     /// No SWORD module was found, so the sample text stands in and nothing is kept.
@@ -272,19 +274,24 @@ pub fn index_path(home: &Path, dir: &Path) -> PathBuf {
 /// Start with the user's modules and vault. `--reseed` restores the sample notes and marks.
 pub fn boot() -> Boot {
     let reseed = std::env::args().any(|a| a == "--reseed");
-    let home = vault::data_home();
-    // Data kept under the app's earlier name comes along.
-    if let Some(old) = vault::migrate_data_home(&home) {
-        crate::state::Config::moved(&home, &old);
+    let (config_dir, home) = (vault::config_home(), vault::data_home());
+    // Files kept in one folder, as before config and data were apart, are put where they belong.
+    for old in vault::old_homes() {
+        if vault::migrate_home(&old, &config_dir, &home) {
+            crate::state::Config::moved(&config_dir, &old, &home);
+            break;
+        }
     }
-    let config = crate::state::Config::load(&home);
+    let config = crate::state::Config::load(&config_dir);
     // The app's own folder for modules is there to be put modules in.
     if sword::path_override().is_none()
-        && let Some(own) = sword::default_roots().into_iter().find(|r| r.ends_with(".config/sword"))
+        && let Some(own) = sword::own_folder()
     {
         let _ = std::fs::create_dir_all(own);
     }
-    boot_from(&home, start_vault(&home, config.vault), &module_roots(&config.module_folders), reseed)
+    let mut boot = boot_from(&home, start_vault(&home, config.vault), &module_roots(&config.module_folders), reseed);
+    boot.config = Some(config_dir);
+    boot
 }
 
 /// Where to look for modules: the folders the person added, then the usual places (or only
@@ -322,6 +329,7 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
             notes,
             persist: None,
             home: Some(home.to_path_buf()),
+            config: None,
             vault: None,
             no_modules: true,
             onboarding: None,
@@ -336,6 +344,7 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
                 notes: BTreeMap::new(),
                 persist: None,
                 home: Some(home.to_path_buf()),
+                config: None,
                 vault: None,
                 no_modules: false,
                 onboarding: Some(why),
@@ -350,6 +359,7 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
             notes: loaded.notes,
             persist: Some(loaded.persist),
             home: Some(home.to_path_buf()),
+            config: None,
             vault: Some(dir),
             no_modules: false,
             onboarding: None,
@@ -360,6 +370,7 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
             notes: BTreeMap::new(),
             persist: None,
             home: None,
+            config: None,
             vault: None,
             no_modules: false,
             onboarding: None,

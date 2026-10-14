@@ -591,6 +591,7 @@ pub struct ReaderText<'a, L, Message> {
     reveal: Option<(u64, u16)>,
     select: Option<(u64, u16, u16)>,
     select_words: Option<(u64, CanonSlice)>,
+    restore: Option<Vec<CanonSlice>>,
     marks: Vec<MarkDraw>,
     on_selection: Option<Box<dyn Fn(TextSelection) -> Message + 'a>>,
     clear_token: u64,
@@ -626,6 +627,7 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
             reveal: None,
             select: None,
             select_words: None,
+            restore: None,
             marks: Vec::new(),
             on_selection: None,
             clear_token: 0,
@@ -677,6 +679,13 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
     /// with the number of pixels to scroll (negative = up).
     pub fn on_scroll(mut self, f: impl Fn(f32) -> Message + 'a) -> Self {
         self.on_scroll = Some(Box::new(f));
+        self
+    }
+
+    /// What was selected when the widget was last made (it is made again whenever its tab is shown
+    /// again): put back the first time the widget is drawn, if nothing is selected yet.
+    pub fn restore_selection(mut self, slices: Option<Vec<CanonSlice>>) -> Self {
+        self.restore = slices;
         self
     }
 
@@ -870,6 +879,10 @@ impl<L: Clone + 'static, Message> ReaderText<'_, L, Message> {
         self.toolbar.as_ref()?;
         let node = state.toolbar_node.as_ref()?;
         if state.drag.is_some() {
+            return None;
+        }
+        // What is held under a selection is offered while the reader is the one being used.
+        if self.toolbar_kind == FloatKind::UnderSelection && !state.focused {
             return None;
         }
         let (first, last) = match self.toolbar_kind {
@@ -1134,6 +1147,10 @@ struct State<L> {
     /// Last `select_verses` token handled.
     selected_token: Option<u64>,
     selected_words: Option<u64>,
+    /// Whether the selection of an earlier life of the widget has been put back.
+    restored: bool,
+    /// Whether a card left open from an earlier life of the widget has been looked for.
+    stale_checked: bool,
     /// Whether the last click landed in this widget; keyboard shortcuts apply only then,
     /// so Cmd+C in the writer does not copy the reader's selection.
     focused: bool,
@@ -1142,6 +1159,8 @@ struct State<L> {
     toolbar_node: Option<layout::Node>,
     /// Line (widget-local) under which an `UnderClick` element is shown.
     click_anchor: Option<Rectangle>,
+    /// The link (block, span) whose card is floating, so pressing it again leaves the card be.
+    click_link: Option<(usize, usize)>,
     /// Widget state of each card element, kept by card key.
     card_trees: BTreeMap<u64, Tree>,
     /// Where each card (in `cards` order) ended up.
@@ -1181,10 +1200,13 @@ impl<L> State<L> {
             revealed: None,
             selected_token: None,
             selected_words: None,
+            restored: false,
+            stale_checked: false,
             focused: false,
             cleared: 0,
             toolbar_node: None,
             click_anchor: None,
+            click_link: None,
             card_trees: BTreeMap::new(),
             cards: Vec::new(),
             hover_marks: Vec::new(),
@@ -1989,8 +2011,13 @@ where
                         ..
                     })
                 );
-                if escape || matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_))) {
+                // Pressing the very link the card came from is not a press elsewhere: it stays.
+                let on_its_link = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)))
+                    && state.click_link.is_some()
+                    && cursor.position().is_some_and(|p| state.link_at(self, Point::new(p.x - bounds.x, p.y - bounds.y)) == state.click_link);
+                if !on_its_link && (escape || matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)))) {
                     state.click_anchor = None;
+                    state.click_link = None;
                     if let Some(f) = &self.on_marks {
                         shell.publish(f(Vec::new()));
                     }
@@ -2123,12 +2150,12 @@ where
                     shell.publish(f());
                 }
                 let (Some(p), true) = (local, inside) else {
-                    if state.selection.take().is_some() {
-                        shell.request_redraw();
-                    }
-                    state.anchor = None;
+                    // A press elsewhere leaves the selection where it is, to come back to (its toolbar
+                    // is put away until the reader is pressed again): it is the reader's place held.
                     state.focused = false;
-                    self.publish_selection(state, shell);
+                    // (A press can only come with the last one's release long over: a drag still held is a
+                    // release that was missed, which would hide the toolbar for good.)
+                    state.drag = None;
                     return;
                 };
                 state.focused = true;
@@ -2269,8 +2296,14 @@ where
                         } else if let Some(link) = self.blocks[on.0].spans[on.1].link.clone()
                             && let Some(f) = &self.on_link
                         {
+                            // Its card is already floating there: nothing to do.
+                            if self.toolbar_kind == FloatKind::UnderClick && self.toolbar.is_some() && state.click_link == Some(on) {
+                                shell.request_redraw();
+                                return;
+                            }
                             // A card for this link floats under the line when there is no margin.
                             state.click_anchor = local.and_then(|p| state.line_at(p));
+                            state.click_link = Some(on);
                             let at = link_slice(&state.pieces, &self.blocks[on.0], on.0, on.1);
                             let marks = local
                                 .and_then(|p| state.glyph_pos_at(p))
@@ -2291,6 +2324,7 @@ where
                         .map(|pos| marks_at(&state.pieces, &self.marks, pos))
                         .unwrap_or_default();
                     if !hits.is_empty() {
+                        state.click_link = None;
                         state.click_anchor = state.line_at(p);
                         shell.publish(f(hits));
                     }
@@ -2309,6 +2343,7 @@ where
                     && state.selected_token != Some(token)
                 {
                     state.selected_token = Some(token);
+                    state.focused = true;
                     let ends = (verse_selection(&self.blocks, first), verse_selection(&self.blocks, last));
                     if let (Some(a), Some(z)) = ends {
                         let (a, z) = (ordered(a), ordered(z));
@@ -2317,10 +2352,36 @@ where
                         shell.request_redraw();
                     }
                 }
+                // A card is floating under a click the widget knows nothing of (it was made again after
+                // its tab was away): it is a stale one, which would hide the selection's toolbar for good.
+                if !state.stale_checked {
+                    state.stale_checked = true;
+                    if self.toolbar_kind == FloatKind::UnderClick
+                        && self.toolbar.is_some()
+                        && state.click_anchor.is_none()
+                        && let Some(f) = &self.on_marks
+                    {
+                        shell.publish(f(Vec::new()));
+                    }
+                }
+                if !state.restored {
+                    state.restored = true;
+                    if state.selection.is_none()
+                        && let Some(slices) = &self.restore
+                        && let (Some(first), Some(last)) = (slices.first(), slices.last())
+                        && let (Some(&(fb, fs, _)), Some(&(lb, _, le))) = (block_ranges(&state.pieces, *first).first(), block_ranges(&state.pieces, *last).last())
+                    {
+                        let (a, z) = (Pos { block: fb, offset: fs }, Pos { block: lb, offset: le });
+                        state.selection = Some((a, z));
+                        state.anchor = Some(a);
+                        shell.request_redraw();
+                    }
+                }
                 if let Some((token, slice)) = self.select_words
                     && state.selected_words != Some(token)
                 {
                     state.selected_words = Some(token);
+                    state.focused = true;
                     let ranges = block_ranges(&state.pieces, slice);
                     if let (Some(&(fb, fs, _)), Some(&(lb, _, le))) = (ranges.first(), ranges.last()) {
                         let (a, z) = (Pos { block: fb, offset: fs }, Pos { block: lb, offset: le });

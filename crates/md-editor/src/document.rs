@@ -477,9 +477,58 @@ impl Document {
         if text.is_empty() {
             return;
         }
+        // A bracket or quote typed comes with its partner, a partner typed over its twin steps past
+        // it, and a selection is wrapped.
+        let mut chars = text.chars();
+        if typing && let (Some(c), None) = (chars.next(), chars.next()) && self.auto_close(c) {
+            return;
+        }
         let range = self.selection.range();
         let group = (typing && !text.contains('\n')).then_some(Group::Typing);
         self.replace(range, text, group);
+    }
+
+    /// What typing `c` does when it opens or closes a pair (see [`Document::insert`]); whether it was
+    /// that, and so done.
+    fn auto_close(&mut self, c: char) -> bool {
+        let sel = self.selection;
+        let (head, range) = (sel.head, sel.range());
+        // Typing the closing half of a pair right before it steps over it.
+        if matches!(c, ')' | ']' | '}' | '"' | '`') && sel.is_empty() && self.source[head..].starts_with(c) {
+            self.set_head(head + c.len_utf8(), false);
+            return true;
+        }
+        let Some(close) = pair_for(c) else { return false };
+        let quote = c == close;
+        if !sel.is_empty() {
+            // A selection is put inside the pair and stays selected.
+            let inner = self.source[range.clone()].to_string();
+            self.replace(range.clone(), &format!("{c}{inner}{close}"), None);
+            let at = Selection { anchor: range.start + c.len_utf8(), head: range.start + c.len_utf8() + inner.len() };
+            self.set_selection_after(at);
+            return true;
+        }
+        // Only where nothing follows that the pair would be put in front of, and (for quotes) where a
+        // word is not ending: `don't` has no pair, and neither has the quote that closes a phrase.
+        let next = self.source[head..].chars().next();
+        let prev = self.source[..head].chars().next_back();
+        if next.is_some_and(|n| n.is_alphanumeric() || n == c) || (quote && prev.is_some_and(|p| p.is_alphanumeric() || p == c)) {
+            return false;
+        }
+        self.replace(range, &format!("{c}{close}"), None);
+        let inside = head + c.len_utf8();
+        self.set_selection_after(Selection { anchor: inside, head: inside });
+        true
+    }
+
+    /// Make the selection what the last edit leaves behind, in the history as well (so that going
+    /// forward again puts it there).
+    fn set_selection_after(&mut self, selection: Selection) {
+        self.selection = selection;
+        if let Some(last) = self.undo.last_mut() {
+            last.after = selection;
+        }
+        self.group = None;
     }
 
     fn backspace(&mut self) {
@@ -498,6 +547,12 @@ impl Document {
             return self.replace(prefix, "", None);
         }
         let from = prev_boundary(&self.source, sel.head);
+        // Between the halves of a pair that was just made, both go.
+        let between = self.source[from..sel.head].chars().next().and_then(pair_for).is_some_and(|close| self.source[sel.head..].starts_with(close));
+        if between {
+            let to = sel.head + self.source[sel.head..].chars().next().map_or(0, char::len_utf8);
+            return self.replace(from..to, "", None);
+        }
         self.replace(from..sel.head, "", Some(Group::DeleteBack));
     }
 
@@ -707,7 +762,19 @@ pub fn next_boundary(s: &str, i: usize) -> usize {
     s[i..].graphemes(true).next().map_or(i, |g| i + g.len())
 }
 
-pub fn word_left(s: &str, i: usize) -> usize {
+/// The closing half of the pair that `c` opens, if it does.
+fn pair_for(c: char) -> Option<char> {
+    match c {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '`' => Some('`'),
+        _ => None,
+    }
+}
+
+fn word_left(s: &str, i: usize) -> usize {
     let mut chars = s[..i].char_indices().rev().peekable();
     while chars.next_if(|&(_, c)| word_class(c) == 0 && c != '\n').is_some() {}
     let Some(&(_, first)) = chars.peek() else { return 0 };
@@ -1215,5 +1282,75 @@ mod tests {
         let mut free = Document::new(NOTE);
         free.perform(Action::SetCaret { offset: 2, extend: false });
         assert_eq!(free.selection().head, 2);
+    }
+
+    fn typed(d: &mut Document, text: &str) {
+        for c in text.chars() {
+            d.perform(Action::Insert(c.to_string()));
+        }
+    }
+
+    #[test]
+    fn a_bracket_or_quote_typed_comes_with_its_partner_and_typing_the_partner_steps_over_it() {
+        let mut d = Document::new("");
+        typed(&mut d, "a (b [c {d \"e `f");
+        assert_eq!(d.source(), "a (b [c {d \"e `f`\"}])", "each opener has its closer, nested");
+    }
+
+    #[test]
+    fn pairs_close_where_it_makes_sense_and_otherwise_leave_the_typing_alone() {
+        let mut d = Document::new("");
+        typed(&mut d, "see (word)");
+        assert_eq!(d.source(), "see (word)", "typing the closer steps over the one that came with the opener");
+        assert_eq!(d.selection().head, d.source().len());
+        // A wiki link: the second bracket goes inside the first pair.
+        let mut d = Document::new("");
+        typed(&mut d, "[[John 3:16]]");
+        assert_eq!(d.source(), "[[John 3:16]]");
+        // A word's apostrophe and the quote that ends a phrase are not pairs.
+        let mut d = Document::new("");
+        typed(&mut d, "don't say \"hi\" now");
+        assert_eq!(d.source(), "don't say \"hi\" now");
+        // Before a word, there is no pair.
+        let mut d = Document::new("word");
+        d.perform(Action::SetCaret { offset: 0, extend: false });
+        typed(&mut d, "(");
+        assert_eq!(d.source(), "(word");
+    }
+
+    #[test]
+    fn a_selection_is_wrapped_by_a_pair_and_stays_selected_and_backspace_takes_both_halves_of_an_empty_pair() {
+        let mut d = Document::new("hello world");
+        d.perform(Action::Select(6..11));
+        typed(&mut d, "(");
+        assert_eq!(d.source(), "hello (world)");
+        assert_eq!(d.selected_text().as_deref(), Some("world"));
+        typed(&mut d, "\"");
+        assert_eq!(d.source(), "hello (\"world\")");
+        let mut d = Document::new("");
+        typed(&mut d, "[");
+        assert_eq!(d.source(), "[]");
+        d.perform(Action::Backspace);
+        assert_eq!(d.source(), "", "both halves");
+        // Backspace after a word typed inside the pair removes only the letter.
+        typed(&mut d, "(ab");
+        d.perform(Action::Backspace);
+        assert_eq!(d.source(), "(a)");
+    }
+
+    #[test]
+    fn making_a_pair_is_one_step_to_undo_and_pasting_makes_none() {
+        let mut d = Document::new("x ");
+        d.perform(Action::SetCaret { offset: 2, extend: false });
+        typed(&mut d, "(");
+        assert_eq!(d.source(), "x ()");
+        d.perform(Action::Undo);
+        assert_eq!(d.source(), "x ");
+        d.perform(Action::Redo);
+        assert_eq!(d.source(), "x ()");
+        assert_eq!(d.selection().head, 3, "the caret is between");
+        let mut p = Document::new("");
+        p.perform(Action::Paste("(".into()));
+        assert_eq!(p.source(), "(");
     }
 }

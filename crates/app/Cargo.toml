@@ -22,10 +22,13 @@ raw-window-handle = "0.6"
 png = "0.18.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 rfd = "0.17.2"
+# The one network client: used only when the person asks to download a module (module_repo.rs).
+ureq = "3"
 
 [dev-dependencies]
 iced_test = "0.14"
 tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21.2"

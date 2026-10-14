@@ -7,6 +7,6 @@ mod index;
 mod seed;
 
 pub use bible_index::{BibleIndex, Search, VerseHit};
-pub use files::{OLD_DATA_FOLDER, Vault, data_home, migrate_data_home};
+pub use files::{Vault, config_home, data_home, migrate_home, old_homes};
 pub use index::{Hit, Index, Stats};
 pub use seed::{SeedMark, seed_vault, seed_notes};

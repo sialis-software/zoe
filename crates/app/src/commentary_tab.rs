@@ -13,6 +13,7 @@ use scripture::{Book, RefRange};
 use std::fmt;
 use study_core::ModuleId;
 use study_core::commentary::Paragraph;
+use study_core::own_commentary;
 use study_core::markdown::LinkTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +36,12 @@ pub enum CommentaryMsg {
     Action(Action),
     /// A link in the text was followed.
     Link(LinkTarget),
+    /// The text was scrolled this far.
+    Scrolled(f32),
+    /// What is typed in the box that names a passage to write on (the person's own commentary).
+    Passage(String),
+    /// Add a section for that passage to the commentary, and write in it.
+    Begin,
 }
 
 pub struct CommentaryTab {
@@ -47,11 +54,22 @@ pub struct CommentaryTab {
     /// The chapter's notes as markdown, shown by the reader's own text widget so that it can be
     /// selected and copied like any text. It is never changed.
     pub doc: Document,
+    /// How far down the text is scrolled, to put back when the tab is shown again.
+    pub scroll: f32,
+    /// The passage typed to add a section for, in the person's own commentary.
+    pub passage: String,
 }
 
+/// The commentary that is the person's own: their notes on passages, shown by chapter like any.
+pub const MINE: &str = "zoe:mine";
+
 impl CommentaryTab {
+    pub fn is_mine(&self) -> bool {
+        self.module.0 == MINE
+    }
+
     pub fn new(id: TabId, sh: &Shared, module: ModuleId, book: Book, chapter: u16, verse: Option<u16>) -> Self {
-        let mut tab = CommentaryTab { id, module, book, chapter: chapter.max(1), verse, doc: Document::new("") };
+        let mut tab = CommentaryTab { id, module, book, chapter: chapter.max(1), verse, doc: Document::new(""), scroll: 0.0, passage: String::new() };
         tab.rebuild(sh);
         tab
     }
@@ -61,7 +79,11 @@ impl CommentaryTab {
     }
 
     pub fn title(&self, sh: &Shared) -> String {
-        let name = sh.backend.commentaries().into_iter().find(|c| c.id == self.module).map_or_else(|| self.module.0.clone(), |c| c.abbreviation);
+        let name = if self.is_mine() {
+            "My commentary".to_string()
+        } else {
+            sh.backend.commentaries().into_iter().find(|c| c.id == self.module).map_or_else(|| self.module.0.clone(), |c| c.abbreviation)
+        };
         format!("{name} \u{00B7} {} {}", self.book, self.chapter)
     }
 
@@ -106,6 +128,10 @@ impl CommentaryTab {
             }
             // Showing a verse in the reader is for the workspace to do.
             CommentaryMsg::Link(_) => {}
+            CommentaryMsg::Scrolled(y) => self.scroll = y,
+            CommentaryMsg::Passage(text) => self.passage = text,
+            // Starting a note is for the workspace to do (it makes the note and shows it).
+            CommentaryMsg::Begin => {}
         }
     }
 
@@ -143,6 +169,16 @@ impl CommentaryTab {
     /// verse asked for, else the top).
     fn rebuild(&mut self, sh: &Shared) {
         let before = self.doc.selection().head;
+        self.scroll = 0.0;
+        if self.passage.is_empty() {
+            self.passage = format!("{} {}", self.book, self.chapter);
+        }
+        if self.is_mine() {
+            let source = self.own_source(sh);
+            self.doc = Document::new(&source);
+            self.doc.perform(Action::SetCaret { offset: if before == 0 { 1.min(source.len()) } else { 0 }, extend: false });
+            return;
+        }
         let mut source = String::new();
         let mut caret = None;
         let notes = self.notes(sh);
@@ -173,7 +209,8 @@ impl CommentaryTab {
     }
 
     pub fn view<'a>(&'a self, sh: &'a Shared) -> Element<'a, CommentaryMsg> {
-        let commentaries: Vec<CommentaryChoice> = sh.backend.commentaries().into_iter().map(|c| CommentaryChoice(c.id, c.abbreviation)).collect();
+        let mut commentaries: Vec<CommentaryChoice> = sh.backend.commentaries().into_iter().map(|c| CommentaryChoice(c.id, c.abbreviation)).collect();
+        commentaries.push(CommentaryChoice(ModuleId(MINE.into()), "My commentary".into()));
         let current = commentaries.iter().find(|c| c.0 == self.module).cloned();
         let books: Vec<BookChoice> = Book::all().map(BookChoice).collect();
         let chapters: Vec<u16> = (1..=sword::chapter_count(self.book)).collect();
@@ -201,11 +238,52 @@ impl CommentaryTab {
             .follow_links(true)
             .on_action(CommentaryMsg::Action)
             .on_link(CommentaryMsg::Link)
+            .on_scroll(CommentaryMsg::Scrolled)
             .size(sh.settings.notes_size)
             .font(sh.settings.text_font())
             .padding(24)
             .height(Length::Fill);
-        column![container(bar).padding([8, 16]), rule::horizontal(1), text].into()
+        let mut page = column![container(bar).padding([8, 16]), rule::horizontal(1), text];
+        if self.is_mine() {
+            page = page.push(rule::horizontal(1)).push(self.composer());
+        }
+        page.into()
+    }
+
+    /// The box for beginning a note of one's own: a passage to write on, and what the note will ask.
+    fn composer(&self) -> Element<'_, CommentaryMsg> {
+        use iced::widget::{text, text_input};
+        let valid = RefRange::parse(&self.passage).is_some();
+        container(
+            column![
+                row![
+                    text_input("A chapter or verses, such as John 3:16-21", &self.passage)
+                        .on_input(CommentaryMsg::Passage)
+                        .on_submit(CommentaryMsg::Begin)
+                        .size(14)
+                        .padding([4, 10]),
+                    button(text("Add section").size(14)).padding([4, 14]).on_press_maybe(valid.then_some(CommentaryMsg::Begin)),
+                ]
+                .spacing(10)
+                .align_y(iced::Center),
+            ]
+            .spacing(8),
+        )
+        // Clear of the pane's own buttons in its corner.
+        .padding(iced::Padding { top: 10.0, right: 124.0, bottom: 10.0, left: 16.0 })
+        .into()
+    }
+
+    /// The person's notes on this chapter as markdown: their commentary on the book, the chapter's
+    /// part of it, each heading a link to its passage and to the place in the note to write.
+    fn own_source(&self, sh: &Shared) -> String {
+        let path = own_commentary::path(self.book);
+        let edit = |s: &own_commentary::Section| format!("[[{}#{}|Edit]]", path.trim_end_matches(".md"), s.range);
+        let source = sh.notes.get(&path).map(|text| own_commentary::chapter_source(text, self.book, self.chapter, edit)).unwrap_or_default();
+        if source.is_empty() {
+            return String::new();
+        }
+        source
     }
 }
 

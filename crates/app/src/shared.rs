@@ -202,6 +202,50 @@ impl Shared {
         index.and_then(|index| index.get(&name).cloned()).unwrap_or_default()
     }
 
+    /// Add a chapter that was read to the reading log, and to today's note when there is one. The
+    /// log is made the first time.
+    pub fn log_reading(&mut self, book: Book, chapter: u16, now: &chrono::DateTime<chrono::Local>) -> bool {
+        let link = format!("[[{} {}]]", book.name(), chapter);
+        let log = self.notes.get(READING_LOG).cloned().unwrap_or_else(|| study_core::reading_log::new_log("Reading log", &frontmatter::now()));
+        let added = study_core::reading_log::add_entry(&log, &link, now);
+        let logged = added.is_some();
+        if let Some(text) = added {
+            self.rewrite_note(READING_LOG, text);
+        }
+        if self.settings.reading_log_daily {
+            let today = templates::todays_note(&self.templates(), now, |p| self.notes.contains_key(p));
+            if let Some(path) = today
+                && let Some(text) = self.notes.get(&path).and_then(|t| study_core::reading_log::add_to_day(t, &link))
+            {
+                self.rewrite_note(&path, text);
+            }
+        }
+        logged
+    }
+
+    /// A new mark is a bookmark: with the setting on, today's note (when there is one) gets a link to
+    /// the mark's note under its `## Bookmarks` (which is added at the end if it has none, as Reading is),
+    /// called by the passage.
+    pub fn bookmark_in_daily(&mut self, index: usize) {
+        if !self.settings.bookmarks_daily {
+            return;
+        }
+        let Some(mark) = self.marks.get(index) else { return };
+        // The note itself, called by its passage (and kept pointing at it should its file be renamed).
+        let item = format!("[[{}|{}]]", mark.path().trim_end_matches(".md"), mark.anchor);
+        let now = chrono::Local::now();
+        let Some(path) = templates::todays_note(&self.templates(), &now, |p| self.notes.contains_key(p)) else { return };
+        if let Some(text) = self.notes.get(&path).and_then(|t| study_core::reading_log::add_bullet(t, "Bookmarks", &item, true)) {
+            self.rewrite_note(&path, text);
+        }
+    }
+
+    /// Give the note at `path` this text, and tell the tabs showing it.
+    fn rewrite_note(&mut self, path: &str, text: String) {
+        self.notes.insert(path.to_string(), text);
+        self.events.push(Event::NoteRewritten { old: path.to_string(), new: path.to_string() });
+    }
+
     /// Show `text` for a moment.
     pub fn toast(&mut self, text: impl Into<String>) {
         self.toast = Some(Toast { text: text.into(), until: std::time::Instant::now() + TOAST_FOR });
@@ -495,19 +539,23 @@ impl Shared {
         });
         let text = if frontmatter::parse(&text).range.is_some() { frontmatter::apply(&text, &edit) } else { text };
         self.notes.insert(new.clone(), text);
-        // Links to it, wherever they are.
+        self.relink(old, &new);
+        self.events.push(Event::NoteRewritten { old: old.to_string(), new: new.clone() });
+        Ok(new)
+    }
+
+    /// The note at `old` is now at `new`: the links to it, wherever they are, are made to point there.
+    fn relink(&mut self, old: &str, new: &str) {
         let changed: Vec<(String, String)> = self
             .notes
             .iter()
-            .filter_map(|(path, body)| markdown::rename_note_links(body, old, &new).map(|b| (path.clone(), b)))
+            .filter_map(|(path, body)| markdown::rename_note_links(body, old, new).map(|b| (path.clone(), b)))
             .collect();
         for (path, body) in changed {
             self.notes.insert(path.clone(), body);
             self.sync_mark(&path);
             self.events.push(Event::NoteRewritten { old: path.clone(), new: path });
         }
-        self.events.push(Event::NoteRewritten { old: old.to_string(), new: new.clone() });
-        Ok(new)
     }
 
     /// Detach mark `index` from the text. It stops being drawn; its note stays, as an
@@ -558,6 +606,9 @@ impl Shared {
             self.notes.remove(&old);
         }
         self.notes.insert(path.clone(), markdown);
+        if path != old {
+            self.relink(&old, &path);
+        }
         self.events.push(Event::NoteRewritten { old, new: path });
     }
 
@@ -576,6 +627,9 @@ impl Shared {
             self.notes.remove(&old);
         }
         self.notes.insert(path.clone(), markdown);
+        if path != old {
+            self.relink(&old, &path);
+        }
         self.events.push(Event::NoteRewritten { old, new: path });
     }
 
@@ -609,6 +663,9 @@ impl Shared {
         }
     }
 }
+
+/// The note chapters read are added to.
+pub const READING_LOG: &str = "Reading log.md";
 
 /// The hidden folder in a vault where the app keeps what is not a note, and its earlier name.
 const PENS_FOLDER: &str = ".zoe";

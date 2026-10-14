@@ -10,7 +10,7 @@
 use crate::live::{self, Onboarding, Options, Samples, Scan};
 use crate::state::Config;
 use crate::{App, Message, popup_style};
-use iced::widget::{button, checkbox, column, container, opaque, row, space, stack, text, text_input};
+use iced::widget::{button, checkbox, column, container, opaque, row, rule, space, stack, text, text_input};
 use iced::{Element, Length, Task, Theme};
 use std::path::{Path, PathBuf};
 
@@ -232,9 +232,10 @@ impl App {
         }
         self.sh.save();
         let loaded = live::load_vault(self.sh.backend.as_ref(), &dir, &live::index_path(&home, &dir), options)?;
-        let mut config = Config::load(&home);
+        let config_dir = self.config_dir().unwrap_or_else(|| home.clone());
+        let mut config = Config::load(&config_dir);
         config.vault = Some(dir.clone());
-        if let Err(e) = config.save(&home) {
+        if let Err(e) = config.save(&config_dir) {
             self.sh.status = format!("Could not remember the vault: {e}");
         }
         self.sh.replace_vault(dir.clone(), loaded.notes, loaded.persist);
@@ -405,6 +406,24 @@ impl App {
     /// The Vault section of the settings.
     pub fn vault_settings(&self) -> Element<'_, Message> {
         let shown = self.sh.vault.as_deref().map(tidy).unwrap_or_else(|| "None".into());
+        // The vault the app keeps in its own data folder, for when none is wanted elsewhere.
+        let default_vault = self.home.as_ref().map(|home| home.join("vault"));
+        let default_row: Element<'_, Message> = match default_vault {
+            Some(dir) => {
+                let current = self.sh.vault.as_deref() == Some(dir.as_path());
+                row![
+                    column![text("Default vault").size(13), text(tidy(&dir)).size(11).style(text::secondary)].spacing(2).width(Length::Fill),
+                    button(text(if current { "In use" } else { "Open" }).size(12))
+                        .padding([3, 10])
+                        .style(button::secondary)
+                        .on_press_maybe((!current).then_some(Message::Vault(VaultMsg::UseDefault))),
+                ]
+                .spacing(8)
+                .align_y(iced::Center)
+                .into()
+            }
+            None => space::vertical().height(0).into(),
+        };
         let buttons = row![
             button(text("Open\u{2026}").size(12)).padding([3, 10]).style(button::secondary).on_press(Message::Vault(VaultMsg::Choose(Mode::Open))),
             button(text("Create new\u{2026}").size(12)).padding([3, 10]).style(button::secondary).on_press(Message::Vault(VaultMsg::Choose(Mode::Create))),
@@ -418,8 +437,10 @@ impl App {
             text(shown).size(14),
             text("The folder of Markdown files with your notes, highlights and templates.").size(11).style(text::secondary),
             buttons,
+            rule::horizontal(1),
+            default_row,
         ]
-        .spacing(6)
+        .spacing(8)
         .into()
     }
 }
@@ -643,6 +664,20 @@ mod tests {
     }
 
     #[test]
+    fn the_default_vault_can_be_opened_from_the_settings_and_is_then_in_use() {
+        let (mut app, home) = app_with_home();
+        let other = tempfile::tempdir().unwrap();
+        let none = Options { samples: Samples::Never, templates: false };
+        let _ = app.switch_vault(other.path().into(), none).unwrap();
+        assert_ne!(app.sh.vault.as_deref(), Some(home.path().join("vault").as_path()));
+        let _ = app.vault_message(VaultMsg::UseDefault);
+        assert_eq!(app.sh.vault, Some(home.path().join("vault")), "the default vault is now the one in use");
+        assert_eq!(Config::load(home.path()).vault, Some(home.path().join("vault")));
+        // Its section of the settings says so.
+        let _ = app.vault_settings();
+    }
+
+    #[test]
     fn cancelling_the_card_changes_nothing() {
         let (mut app, home) = app_with_home();
         app.setup = Some(Setup::new(Mode::Open, home.path().into()));
@@ -706,17 +741,17 @@ mod rename_tests {
     use super::*;
 
     #[test]
-    fn the_choices_follow_the_data_folder_when_it_moves_and_a_vaults_pens_follow_its_folder() {
+    fn the_choices_follow_the_files_when_one_folder_becomes_config_and_data_and_a_vaults_pens_follow_its_folder() {
         let base = tempfile::tempdir().unwrap();
-        let (old, home) = (base.path().join("bible-study"), base.path().join("zoe"));
+        let (old, config, data) = (base.path().join("old"), base.path().join("config/zoe"), base.path().join("data/zoe"));
         let elsewhere = base.path().join("Notes");
         std::fs::create_dir_all(old.join("vault")).unwrap();
         Config { vault: Some(old.join("vault")), module_folders: vec![old.join("mods"), elsewhere.clone()] }.save(&old).unwrap();
-        assert_eq!(vault::migrate_data_home(&home), Some(old.clone()));
-        Config::moved(&home, &old);
-        let config = Config::load(&home);
-        assert_eq!(config.vault, Some(home.join("vault")), "the default vault is where it moved to");
-        assert_eq!(config.module_folders, vec![home.join("mods"), elsewhere], "and only paths inside the folder change");
+        assert!(vault::migrate_home(&old, &config, &data));
+        Config::moved(&config, &old, &data);
+        let moved = Config::load(&config);
+        assert_eq!(moved.vault, Some(data.join("vault")), "the default vault is where it moved to");
+        assert_eq!(moved.module_folders, vec![data.join("mods"), elsewhere], "and only paths inside the old folder change");
 
         // A vault with pens in the old hidden folder keeps them in the new one.
         let vault = tempfile::tempdir().unwrap();

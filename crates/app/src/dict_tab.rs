@@ -27,6 +27,8 @@ pub enum DictMsg {
     /// Look up what is typed.
     Go,
     Back,
+    /// The entry was scrolled this far.
+    Scrolled(f32),
     Forward,
     /// Show a verse that has the word (the app decides where, as for any link).
     OpenVerse(scripture::RefRange, ModuleId, Vec<(usize, usize)>),
@@ -40,13 +42,15 @@ pub struct DictTab {
     pub draft: String,
     /// What the dictionary says for `key`, if it has an entry.
     pub entry: Option<LexiconEntry>,
+    /// How far down the entry is scrolled, to put back when the tab is shown again.
+    pub scroll: f32,
     /// The entries this tab has shown, as dictionary and key.
     pub history: History<(ModuleId, String)>,
 }
 
 impl DictTab {
     pub fn new(id: TabId, sh: &Shared, module: ModuleId, key: &str) -> Self {
-        let mut tab = DictTab { id, history: History::new((module.clone(), String::new())), module, key: String::new(), draft: String::new(), entry: None };
+        let mut tab = DictTab { id, history: History::new((module.clone(), String::new())), module, key: String::new(), draft: String::new(), entry: None, scroll: 0.0 };
         tab.show(sh, key);
         tab.history = History::new((tab.module.clone(), tab.key.clone()));
         tab
@@ -79,6 +83,10 @@ impl DictTab {
             .map_or_else(|| self.module.0.clone(), |d| d.abbreviation)
     }
 
+    pub fn scroll_id(&self) -> iced::widget::Id {
+        iced::widget::Id::from(format!("dict-{}", self.id))
+    }
+
     pub fn title(&self, sh: &Shared) -> String {
         let module = self.module_name(sh);
         if self.key.is_empty() { module } else { format!("{} · {module}", self.key) }
@@ -91,6 +99,7 @@ impl DictTab {
                 self.open(sh, module, &key);
             }
             DictMsg::Draft(draft) => self.draft = draft,
+            DictMsg::Scrolled(y) => self.scroll = y,
             DictMsg::Back | DictMsg::Forward => {
                 let place = if matches!(message, DictMsg::Back) { self.history.back() } else { self.history.forward() }.cloned();
                 if let Some((module, key)) = place {
@@ -198,7 +207,10 @@ impl DictTab {
         column![
             container(bar).padding([8, 16]),
             rule::horizontal(1),
-            scrollable(container(body).padding(24).width(Length::Fill)).height(Length::Fill),
+            scrollable(container(body).padding(24).width(Length::Fill))
+                .id(self.scroll_id())
+                .on_scroll(|v| DictMsg::Scrolled(v.absolute_offset().y))
+                .height(Length::Fill),
             space::vertical().height(0),
         ]
         .into()

@@ -35,6 +35,8 @@ pub enum SearchMsg {
     /// Only the verses of one book (or all).
     Book(Option<Book>),
     More,
+    /// The list was scrolled this far.
+    Scrolled(f32),
     /// Show this verse in the reader, with these words (byte spans of its text) pointed out.
     Open(RefRange, ModuleId, Vec<(usize, usize)>),
 }
@@ -59,6 +61,8 @@ pub struct SearchTab {
     pub shown: usize,
     /// How many times the box was typed in, to tell the last from the ones before it.
     typed: u64,
+    /// How far down the list is scrolled, to put back when the tab is shown again.
+    pub scroll: f32,
     /// What is being waited for (making the index), or why the search failed.
     pub busy: Option<String>,
     pub error: Option<String>,
@@ -66,7 +70,11 @@ pub struct SearchTab {
 
 impl SearchTab {
     pub fn new(id: TabId, module: ModuleId) -> Self {
-        SearchTab { id, module, draft: String::new(), options: Options::default(), ran: None, book: None, shown: PAGE, typed: 0, busy: None, error: None }
+        SearchTab { id, module, draft: String::new(), options: Options::default(), ran: None, book: None, shown: PAGE, typed: 0, scroll: 0.0, busy: None, error: None }
+    }
+
+    pub fn scroll_id(&self) -> iced::widget::Id {
+        iced::widget::Id::from(format!("search-list-{}", self.id))
     }
 
     pub fn input_id(&self) -> iced::widget::Id {
@@ -168,6 +176,7 @@ impl SearchTab {
                 self.shown = PAGE;
             }
             SearchMsg::More => self.shown += 2 * PAGE,
+            SearchMsg::Scrolled(y) => self.scroll = y,
             // Showing a verse in the reader is for the workspace to do.
             SearchMsg::Open(..) => {}
         }
@@ -246,7 +255,10 @@ impl SearchTab {
         column![
             container(column![bar, options].spacing(8)).padding([8, 16]),
             rule::horizontal(1),
-            scrollable(container(page).padding([12, 20]).width(Length::Fill)).height(Length::Fill),
+            scrollable(container(page).padding([12, 20]).width(Length::Fill))
+                .id(self.scroll_id())
+                .on_scroll(|v| SearchMsg::Scrolled(v.absolute_offset().y))
+                .height(Length::Fill),
             space::vertical().height(0),
         ]
         .into()

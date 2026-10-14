@@ -1,13 +1,15 @@
 //! Read-only access to CrossWire SWORD module libraries (docs/01).
 //!
 //! A *library* is a directory holding `mods.d/*.conf` and `modules/…`; the same layout
-//! `~/.sword`, Xiphos and `installmgr` use. Nothing here ever writes to one.
+//! `~/.sword`, Xiphos and `installmgr` use. Reading never writes to one; only [`package`]
+//! installs, removes and exports modules.
 
 mod canon_data;
 mod conf;
 mod entry;
 mod lexicon;
 mod osis;
+pub mod package;
 mod ztext;
 
 pub use ztext::{chapter_count, verse_count};
@@ -54,7 +56,7 @@ pub fn path_override() -> Option<std::ffi::OsString> {
 }
 
 /// Where modules are looked for, in search order: `SWORD_PATH` and the app's own folder
-/// `~/.config/sword`. `ZOE_SWORD_PATH` (colon-separated; the older name `BIBLE_STUDY_SWORD_PATH`
+/// [`own_folder`] (`~/.config/sword`). `ZOE_SWORD_PATH` (colon-separated; the older name `BIBLE_STUDY_SWORD_PATH`
 /// also works) replaces both.
 pub fn default_roots() -> Vec<PathBuf> {
     if let Some(v) = path_override() {
@@ -64,10 +66,21 @@ pub fn default_roots() -> Vec<PathBuf> {
     if let Some(v) = std::env::var_os("SWORD_PATH") {
         roots.extend(std::env::split_paths(&v));
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        roots.push(home.join(".config").join("sword"));
-    }
+    roots.extend(own_folder());
     roots
+}
+
+/// The folder of modules that is the app's own: `sword` in the user's config folder
+/// (`$XDG_CONFIG_HOME/sword`, which is `~/.config/sword`; `%APPDATA%\sword` on Windows).
+pub fn own_folder() -> Option<PathBuf> {
+    let set = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(windows)
+        && let Some(appdata) = set("APPDATA")
+    {
+        return Some(appdata.join("sword"));
+    }
+    let config = set("XDG_CONFIG_HOME").or_else(|| set("HOME").or_else(|| set("USERPROFILE")).map(|h| h.join(".config")))?;
+    Some(config.join("sword"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

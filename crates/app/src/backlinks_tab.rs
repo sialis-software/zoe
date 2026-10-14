@@ -11,6 +11,8 @@ use scripture::RefRange;
 pub enum BacklinksMsg {
     /// Show this note.
     Open(String),
+    /// The list was scrolled this far.
+    Scrolled(f32),
 }
 
 /// What the notes found link to.
@@ -25,11 +27,17 @@ pub enum Target {
 pub struct BacklinksTab {
     pub id: TabId,
     pub target: Target,
+    /// How far down the list is scrolled, to put back when the tab is shown again.
+    pub scroll: f32,
 }
 
 impl BacklinksTab {
     pub fn new(id: TabId, target: Target) -> Self {
-        BacklinksTab { id, target }
+        BacklinksTab { id, target, scroll: 0.0 }
+    }
+
+    pub fn scroll_id(&self) -> iced::widget::Id {
+        iced::widget::Id::from(format!("backlinks-{}", self.id))
     }
 
     /// What is linked to, as a person would say it.
@@ -48,6 +56,10 @@ impl BacklinksTab {
     pub fn update(&mut self, message: BacklinksMsg) -> Option<String> {
         match message {
             BacklinksMsg::Open(path) => Some(path),
+            BacklinksMsg::Scrolled(y) => {
+                self.scroll = y;
+                None
+            }
         }
     }
 
@@ -92,7 +104,10 @@ impl BacklinksTab {
         column![
             container(heading).padding([10, 16]),
             rule::horizontal(1),
-            scrollable(container(list).padding(24).width(Length::Fill)).height(Length::Fill),
+            scrollable(container(list).padding(24).width(Length::Fill))
+                .id(self.scroll_id())
+                .on_scroll(|v| BacklinksMsg::Scrolled(v.absolute_offset().y))
+                .height(Length::Fill),
         ]
         .into()
     }

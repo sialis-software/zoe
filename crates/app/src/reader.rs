@@ -58,6 +58,8 @@ pub struct ViewOptions {
     pub select: Option<(u64, u16, u16)>,
     /// Select from the first to the last of these words of a verse: (token, a slice of its text).
     pub select_words: Option<(u64, crate::reader_text::CanonSlice)>,
+    /// The selection the tab holds, to put back when the reader is made again.
+    pub restore: Option<Vec<crate::reader_text::CanonSlice>>,
     /// Verses that some note links to; their numbers are tinted.
     pub annotated: BTreeSet<u16>,
     /// Scroll-into-view request: (token, verse). See `ReaderText::reveal`.
@@ -232,6 +234,7 @@ pub fn chapter_view<'a, M: 'a>(
         .reveal(opts.reveal)
         .select_verses(opts.select)
         .select_words(opts.select_words)
+        .restore_selection(opts.restore.clone())
         .marks(opts.marks.clone())
         .clear_selection(opts.clear_token)
         .toolbar(toolbar)
@@ -316,6 +319,7 @@ mod tests {
         ViewOptions {
             select: None,
             select_words: None,
+            restore: None,
             annotated: BTreeSet::new(),
             reveal: None,
             marks: Vec::new(),

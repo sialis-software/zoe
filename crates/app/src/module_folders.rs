@@ -63,7 +63,7 @@ impl App {
     /// Change the folders added, keep them, and load the modules again. If that would leave no
     /// Bible at all, nothing changes.
     fn change_folders(&mut self, change: impl FnOnce(&mut Vec<PathBuf>), done: String) -> Task<Message> {
-        let Some(home) = self.home.clone() else { return Task::none() };
+        let Some(home) = self.config_dir() else { return Task::none() };
         let mut config = Config::load(&home);
         let before = config.module_folders.clone();
         change(&mut config.module_folders);
@@ -84,7 +84,26 @@ impl App {
             self.sh.toast("Saved: restart the app to use these modules");
             return Task::none();
         }
-        // Swap the modules under what is open, and put the workspace back on them.
+        let task = self.install_backend(backend);
+        self.sh.toast(done);
+        task
+    }
+
+    /// Load the modules again from the folders searched, in place: after one was installed or
+    /// removed. What is open is put back on the new modules; a tab whose module is gone is dropped.
+    pub fn reload_modules(&mut self) -> Task<Message> {
+        if self.no_modules {
+            // The app started on sample text, with no vault open; it starts over with the modules.
+            self.sh.toast("Restart the app to use these modules");
+            return Task::none();
+        }
+        let folders = self.config_dir().as_deref().map(Config::load).map(|c| c.module_folders).unwrap_or_default();
+        let backend = LiveBackend::open(&live::module_roots(&folders));
+        self.install_backend(backend)
+    }
+
+    /// Swap the modules under what is open, and put the workspace back on them.
+    fn install_backend(&mut self, backend: LiveBackend) -> Task<Message> {
         let open: Vec<_> = self.tabs.keys().copied().collect();
         for id in open {
             if let Some(crate::Tab::Bible(tab)) = self.tabs.get_mut(&id) {
@@ -94,18 +113,16 @@ impl App {
         let workspace = self.workspace();
         self.sh.backend = Box::new(backend);
         self.sh.forget_modules();
-        let task = self.apply_workspace(&workspace).unwrap_or_else(|e| {
+        self.apply_workspace(&workspace).unwrap_or_else(|e| {
             self.sh.status = e;
             Task::none()
-        });
-        self.sh.toast(done);
-        task
+        })
     }
 
     /// The folders searched, the ones added (which can be taken away) and what was found.
     pub fn modules_settings(&self) -> Element<'_, Message> {
         let faint = |t: String| text(t).size(11).style(text::secondary);
-        let added = self.home.as_deref().map(Config::load).map(|c| c.module_folders).unwrap_or_default();
+        let added = self.config_dir().as_deref().map(Config::load).map(|c| c.module_folders).unwrap_or_default();
         let mut list = column![].spacing(3);
         for (i, folder) in added.iter().enumerate() {
             list = list.push(
@@ -165,7 +182,7 @@ mod tests {
             return eprintln!("skipped: the search path is set by the environment");
         }
         let roots = sword::default_roots();
-        assert!(roots[0].ends_with(".config/sword"), "{roots:?}");
+        assert_eq!(Some(&roots[0]), sword::own_folder().as_ref(), "{roots:?}");
         assert!(roots.iter().all(|r| !r.ends_with(".sword") && !r.starts_with("/usr/share")), "no other frontend's folder");
     }
 

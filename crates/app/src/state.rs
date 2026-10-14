@@ -17,6 +17,9 @@ use std::{fs, io};
 pub const BIBLE_SIZES: RangeInclusive<f32> = 12.0..=36.0;
 pub const NOTES_SIZES: RangeInclusive<f32> = 12.0..=32.0;
 
+/// How many seconds in front of the reader make a chapter read, at least and at most.
+pub const READ_SECONDS: std::ops::Range<u32> = 10..600;
+
 /// How the app looks. Changing one takes effect at once and is saved at once.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -34,6 +37,18 @@ pub struct Settings {
     pub font: Option<String>,
     /// The pens: each is a shortcut for making a note on the selected text with a tag, in a color.
     pub pens: Vec<PenDef>,
+    /// Add each chapter read to the reading log note by itself, once it has been in front of the
+    /// reader for `reading_log_seconds` (see `study_core::reading_log`). Off unless asked for; the
+    /// button at the foot of a chapter logs it by hand either way.
+    pub reading_log_auto: bool,
+    pub reading_log_seconds: u32,
+    /// Add it to the day's note too, when there is one.
+    pub reading_log_daily: bool,
+    /// Add each new mark (highlight, underline or note on a passage) to today's note under its
+    /// `## Bookmarks`, when there is such a note with such a heading.
+    pub bookmarks_daily: bool,
+    /// Vim key bindings in the writer (normal, insert and visual modes).
+    pub vim_mode: bool,
 }
 
 /// How a pen marks the text.
@@ -82,7 +97,7 @@ pub fn default_pens() -> Vec<PenDef> {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: Theme::Dark.to_string(), bible_size: 19.0, notes_size: 17.0, font: None, pens: default_pens() }
+        Settings { theme: Theme::Dark.to_string(), bible_size: 19.0, notes_size: 17.0, font: None, pens: default_pens(), reading_log_auto: false, reading_log_seconds: 30, reading_log_daily: true, bookmarks_daily: false, vim_mode: false }
     }
 }
 
@@ -93,6 +108,7 @@ impl Settings {
         self.bible_size = fix(self.bible_size, &BIBLE_SIZES, 19.0);
         self.notes_size = fix(self.notes_size, &NOTES_SIZES, 17.0);
         self.font = self.font.filter(|f| !f.trim().is_empty());
+        self.reading_log_seconds = self.reading_log_seconds.clamp(READ_SECONDS.start, READ_SECONDS.end);
         // Pens: tags in one form, each once, colors that are colors.
         let mut seen = Vec::new();
         self.pens.retain_mut(|pen| {
@@ -253,18 +269,18 @@ impl Config {
         fs::read_to_string(home.join(Self::FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
     }
 
-    /// The data folder was moved from `old` to `home`: the folders the choices name inside it
-    /// are the same ones in their new place.
-    pub fn moved(home: &Path, old: &Path) {
-        let mut config = Config::load(home);
+    /// What was in the folder `old` is now in `data` (and the choices in `config`): the folders the
+    /// choices name inside it are the same ones in their new place.
+    pub fn moved(config_dir: &Path, old: &Path, data: &Path) {
+        let mut config = Config::load(config_dir);
         let follow = |path: &mut PathBuf| {
             if let Ok(rest) = path.strip_prefix(old) {
-                *path = home.join(rest);
+                *path = data.join(rest);
             }
         };
         config.vault.as_mut().map(follow);
         config.module_folders.iter_mut().for_each(follow);
-        let _ = config.save(home);
+        let _ = config.save(config_dir);
     }
 
     pub fn save(&self, home: &Path) -> io::Result<()> {
@@ -279,13 +295,28 @@ impl Config {
 
 // ---- the files -----------------------------------------------------------------------------
 
+/// The files that are kept: what the person chose (settings, saved layouts) in the config folder,
+/// what the app makes (the session) in the data folder.
 pub struct Store {
-    dir: PathBuf,
+    config: PathBuf,
+    data: PathBuf,
 }
 
 impl Store {
+    /// Everything in one folder.
+    #[cfg(test)]
     pub fn new(dir: PathBuf) -> Self {
-        Store { dir }
+        Store { config: dir.clone(), data: dir }
+    }
+
+    /// Choices in `config`, the session in `data`.
+    pub fn split(config: PathBuf, data: PathBuf) -> Self {
+        Store { config, data }
+    }
+
+    /// The folder `file` is kept in.
+    fn dir_of(&self, file: &str) -> &Path {
+        if file == "session.json" { &self.data } else { &self.config }
     }
 
     pub fn settings(&self) -> Settings {
@@ -313,7 +344,7 @@ impl Store {
     }
 
     fn read<T: for<'de> Deserialize<'de>>(&self, file: &str) -> Option<T> {
-        let path = self.dir.join(file);
+        let path = self.dir_of(file).join(file);
         let text = fs::read_to_string(&path).ok()?;
         match serde_json::from_str(&text) {
             Ok(value) => Some(value),
@@ -325,9 +356,9 @@ impl Store {
     }
 
     fn write<T: Serialize + ?Sized>(&self, file: &str, value: &T) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)?;
+        fs::create_dir_all(self.dir_of(file))?;
         let text = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
-        let path = self.dir.join(file);
+        let path = self.dir_of(file).join(file);
         let temp = path.with_extension("json.tmp");
         fs::write(&temp, text)?;
         fs::rename(&temp, &path)
@@ -377,7 +408,7 @@ mod tests {
         assert_eq!(store.session(), None);
         assert!(store.layouts().is_empty());
 
-        let settings = Settings { theme: "Nord".into(), bible_size: 22.0, notes_size: 15.0, font: Some("Georgia".into()), pens: default_pens() };
+        let settings = Settings { theme: "Nord".into(), bible_size: 22.0, notes_size: 15.0, font: Some("Georgia".into()), pens: default_pens(), ..Settings::default() };
         store.save_settings(&settings).unwrap();
         store.save_session(&sample()).unwrap();
         store.save_layouts(&[NamedLayout { name: "Study".into(), workspace: sample() }]).unwrap();
@@ -414,9 +445,33 @@ mod tests {
     }
 
     #[test]
+    fn vim_mode_is_off_unless_the_settings_file_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        fs::write(dir.path().join("settings.json"), r#"{ "theme": "Dark" }"#).unwrap();
+        assert!(!store.settings().vim_mode);
+        fs::write(dir.path().join("settings.json"), r#"{ "vim_mode": true }"#).unwrap();
+        assert!(store.settings().vim_mode);
+    }
+
+    #[test]
     fn every_theme_name_finds_its_theme() {
         for theme in Theme::ALL {
             assert_eq!(&Settings { theme: theme.to_string(), ..Settings::default() }.theme(), theme);
         }
+    }
+
+    #[test]
+    fn choices_are_kept_in_the_config_folder_and_the_session_in_the_data_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, data) = (dir.path().join("config/zoe"), dir.path().join("data/zoe"));
+        let store = Store::split(config.clone(), data.clone());
+        store.save_settings(&Settings::default()).unwrap();
+        store.save_layouts(&[]).unwrap();
+        store.save_session(&sample()).unwrap();
+        assert!(config.join("settings.json").is_file() && config.join("layouts.json").is_file());
+        assert!(data.join("session.json").is_file());
+        assert!(!config.join("session.json").exists() && !data.join("settings.json").exists());
+        assert_eq!(Store::split(config, data).session(), Some(sample()));
     }
 }

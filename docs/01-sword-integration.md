@@ -129,6 +129,34 @@ user-supplied unlock keys is small once reading works. Store keys outside the va
 - Respect `DistributionLicense` when listing; surface "Copyrighted" modules' terms.
 - Compatibility rule: **never mutate an installed module**. We only read.
 
+### Module manager (the Modules button in the top bar)
+
+A window of its own, opened like the settings window, for the modules in every folder searched.
+The archive and conf logic is `crates/sword/src/package.rs` (no UI, no network); the window is
+`crates/app/src/module_manager.rs`; the one place that touches the network is
+`crates/app/src/module_repo.rs` (the `Fetcher` trait, with `ureq` behind it; tests use a fake).
+
+- **List**: name, description, language, version, license, size on disk, folder, and whether the app
+  can read it. "Readable" is exactly `Module::bible/commentary/lexicon` succeeding (locked, other
+  drivers, compression, versification or markup are shown as unreadable with that reason), and
+  that the data files exist.
+- **Remove**: deletes `mods.d/<name>.conf` and the module's data (a `DataPath` folder, or the files
+  of a dictionary's stem), and folders left empty. Data another conf shares is kept. A module in
+  a folder other than `sword::own_folder()` needs a second, explicit confirmation.
+- **Import / export**: a `.zip` or a folder laid out like a library (`mods.d/*.conf` and
+  `modules/...`; CrossWire's `rawzip` packages are this) is copied into the app's own folder; an
+  export writes one module the same way. Any entry that is absolute or climbs out with `..`
+  refuses the whole package (zip-slip); a `.conf` whose data is not in the package is refused;
+  nothing is overwritten unless the person confirms replacing, and a partly written install is
+  taken back.
+- **Download** (only on a button press): the list is `raw/mods.d.tar.gz` (every `.conf`; name,
+  description, `Lang`, `Version`, `InstallSize`, `DistributionLicense`, `Category`, locked or
+  not), filterable by text, language, kind and "free to download" (public domain, GPL, Creative
+  Commons and similar licenses; it is a marker, the license text is shown too). A module comes
+  from `packages/rawzip/<Name>.zip`. Both run on a thread with progress and a Cancel button.
+- After any install or remove, `App::reload_modules()` (shared with adding a folder) loads the
+  backend again in place; `apply_workspace` drops tabs whose module is gone.
+
 ## 8. Rust landscape and licensing
 
 - **rsword_chirho** (docs.rs, v0.3.0, GPL-2.0-or-later): pure-Rust port claiming

@@ -14,6 +14,8 @@ mod history;
 mod icons;
 mod live;
 mod module_folders;
+mod module_manager;
+mod module_repo;
 mod link_area;
 mod live_editor;
 mod native;
@@ -37,7 +39,7 @@ use bible_tab::{BibleMsg, BibleTab};
 use commentary_tab::{CommentaryMsg, CommentaryTab};
 use dict_tab::{DictMsg, DictTab};
 use drag::{Drag, Over, Payload, Pressed, Zone};
-use iced::widget::operation::{RelativeOffset, snap_to};
+use iced::widget::operation::{AbsoluteOffset, RelativeOffset, scroll_to, snap_to};
 use iced::widget::{button, column, container, pick_list, row, rule, space, stack, text, text_input, tooltip};
 use iced::{Element, Length, Task, Theme};
 use note_tab::{NoteMsg, NoteTab};
@@ -92,10 +94,11 @@ enum SettingsTab {
     Pens,
     Vault,
     Modules,
+    Reading,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [SettingsTab::Appearance, SettingsTab::Pens, SettingsTab::Vault, SettingsTab::Modules];
+    const ALL: [SettingsTab; 5] = [SettingsTab::Appearance, SettingsTab::Pens, SettingsTab::Vault, SettingsTab::Modules, SettingsTab::Reading];
 
     fn label(self) -> &'static str {
         match self {
@@ -103,6 +106,7 @@ impl SettingsTab {
             SettingsTab::Pens => "Pens",
             SettingsTab::Vault => "Vault",
             SettingsTab::Modules => "Modules",
+            SettingsTab::Reading => "Reading",
         }
     }
 }
@@ -180,6 +184,19 @@ enum Choice {
     Note,
 }
 
+/// A chapter being looked at, and since when.
+struct Reading {
+    tab: TabId,
+    book: scripture::Book,
+    chapter: u16,
+    since: std::time::Instant,
+    /// Whether it has been put in the reading log already.
+    logged: bool,
+}
+
+/// How long a chapter must be in front of the reader to count as read, and how often that is looked at.
+const READING_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
 struct App {
     sh: Shared,
     tabs: BTreeMap<TabId, Tab>,
@@ -202,12 +219,19 @@ struct App {
     modifiers: iced::keyboard::Modifiers,
     /// The menu of where to open a link, while it is open.
     link_menu: Option<LinkMenu>,
+    /// The chapter in front of the reader, for the reading log.
+    reading: Option<Reading>,
+    /// The tabs that were showing at the last update, to tell which came into view and which left.
+    shown: std::collections::BTreeSet<TabId>,
     /// Something being carried across the window, and a tab pressed that may become that.
     drag: Option<Drag>,
     pressed: Option<Pressed>,
     /// The window with the workspace, and the settings window while it is open.
     main: iced::window::Id,
     settings_window: Option<iced::window::Id>,
+    /// The module manager's window while it is open, and what it shows.
+    manager_window: Option<iced::window::Id>,
+    manager: module_manager::Manager,
     /// The layouts panel, while it is open.
     panel: Option<Panel>,
     /// The tag typed for a new pen, and the color it will have (an index into `state::PEN_COLORS`).
@@ -221,6 +245,8 @@ struct App {
     naming: bool,
     /// The data folder, when there is one: the vault choice, settings and session are kept in it.
     home: Option<std::path::PathBuf>,
+    /// Where the person's choices are kept, when that is not the data folder.
+    config: Option<std::path::PathBuf>,
     /// Set while there is no vault: the welcome page covers the window.
     onboarding: Option<live::Onboarding>,
     /// No SWORD module was found at start-up: sample text stands in, and no session is kept.
@@ -294,6 +320,13 @@ enum Message {
     ResetSettings,
     /// Which page of the settings window shows.
     SettingsTab(SettingsTab),
+    SetReadingAuto(bool),
+    SetReadingSeconds(u32),
+    SetReadingDaily(bool),
+    SetBookmarksDaily(bool),
+    SetVimMode(bool),
+    /// A moment passes: a chapter that has been in front of the reader long enough was read.
+    ReadingTick,
     /// The pens (tag shortcuts): the one being named, and changes to them.
     PenDraft(String),
     AddPen,
@@ -309,6 +342,7 @@ enum Message {
     OpenSettings,
     Vault(vault_setup::VaultMsg),
     Modules(module_folders::ModulesMsg),
+    Manager(module_manager::ManagerMsg),
     /// Escape: put away the card that is open.
     EscapeCard,
     /// Ask for a name to save the workspace as a layout under.
@@ -376,6 +410,7 @@ impl App {
         app.onboarding = boot.onboarding;
         app.no_modules = boot.no_modules;
         app.home = boot.home.clone();
+        app.config = boot.config.clone();
         let (main, open) = iced::window::open(iced::window::Settings {
             size: iced::Size::new(1280.0, 800.0),
             // Closing saves the session first (see `Message::CloseRequested`).
@@ -386,7 +421,7 @@ impl App {
         app.main = main;
         let mut task = open.then(native::install_menu).discard();
         if let Some(home) = boot.home {
-            let store = Store::new(home.join("state"));
+            let store = Store::split(boot.config.clone().unwrap_or_else(|| home.clone()), home.clone());
             let session = store.session();
             app.sh.attach(store);
             app.sh.cache_dir = Some(home.join("cache"));
@@ -419,10 +454,14 @@ impl App {
             next_split: 1,
             modifiers: iced::keyboard::Modifiers::empty(),
             link_menu: None,
+            shown: std::collections::BTreeSet::new(),
+            reading: None,
             drag: None,
             pressed: None,
             main: iced::window::Id::unique(),
             settings_window: None,
+            manager_window: None,
+            manager: module_manager::Manager::new(),
             panel: None,
             pen_draft: String::new(),
             pen_color: state::DEFAULT_PEN_COLOR,
@@ -431,6 +470,7 @@ impl App {
             layout_draft: String::new(),
             naming: false,
             home: None,
+            config: None,
             onboarding: None,
             no_modules: false,
             setup: None,
@@ -452,6 +492,37 @@ impl App {
     }
 
     // ---- tabs and panes ----------------------------------------------------------------
+
+    /// The chapter in front of the reader is read once it has been there long enough: it is added to
+    /// the reading log. Called as time passes (`now`), and also by what is read being changed.
+    fn note_reading(&mut self, now: std::time::Instant) {
+        if !self.sh.settings.reading_log_auto {
+            self.reading = None;
+            return;
+        }
+        let here = self
+            .reference_bible_id()
+            .filter(|&id| self.is_showing(id))
+            .and_then(|id| self.bible_tab(id).map(|t| (id, t.book, t.chapter_no)));
+        let Some((tab, book, chapter)) = here else {
+            self.reading = None;
+            return;
+        };
+        match &mut self.reading {
+            Some(r) if (r.tab, r.book, r.chapter) == (tab, book, chapter) => {
+                if !r.logged && now.duration_since(r.since) >= std::time::Duration::from_secs(u64::from(self.sh.settings.reading_log_seconds)) {
+                    r.logged = true;
+                    let _ = self.sh.log_reading(book, chapter, &chrono::Local::now());
+                }
+            }
+            _ => self.reading = Some(Reading { tab, book, chapter, since: now, logged: false }),
+        }
+    }
+
+    /// The folder the person's choices are kept in: its own, else the data folder.
+    fn config_dir(&self) -> Option<std::path::PathBuf> {
+        self.config.clone().or_else(|| self.home.clone())
+    }
 
     fn first_module(&self) -> ModuleId {
         self.sh.backend.modules().first().map(|m| m.id.clone()).unwrap_or(ModuleId(String::new()))
@@ -663,6 +734,51 @@ impl App {
         }
     }
 
+    /// The commentary a new tab opens on: the first installed, else the person's own.
+    fn first_commentary(&self) -> ModuleId {
+        self.sh.backend.commentaries().first().map_or_else(|| ModuleId(commentary_tab::MINE.into()), |c| c.id.clone())
+    }
+
+    /// Add a section for the passage typed in tab `id` to the person's commentary on its book (the
+    /// note, and the chapter's heading, are made if they are not there), and show the note in the
+    /// writer with the caret under the new heading.
+    fn begin_commentary(&mut self, id: TabId) -> Task<Message> {
+        let Some(Tab::Commentary(tab)) = self.tabs.get(&id) else { return Task::none() };
+        let Some(range) = scripture::RefRange::parse(&tab.passage) else {
+            self.sh.toast(format!("\u{201c}{}\u{201d} is not a passage: try John 3:16-21", tab.passage.trim()));
+            return Task::none();
+        };
+        let path = study_core::own_commentary::path(range.book);
+        let text = self.sh.notes.get(&path).cloned().unwrap_or_else(|| study_core::own_commentary::new_book(range.book, &study_core::frontmatter::now()));
+        let (text, at) = study_core::own_commentary::ensure(&text, range);
+        if self.sh.notes.get(&path) != Some(&text) {
+            self.sh.notes.insert(path.clone(), text);
+        }
+        self.show_note_at(path, at);
+        if let Some(Tab::Commentary(tab)) = self.tabs.get_mut(&id) {
+            tab.show(&self.sh, range.book, range.chapter, None);
+        }
+        Task::none()
+    }
+
+    /// Show the note at `path` in a new tab beside the tab `from`, whatever is open already.
+    fn open_note_in_new_tab(&mut self, from: TabId, path: String) {
+        let pane = self.pane_of(from).unwrap_or(0);
+        let tab = self.new_note(path);
+        let id = self.add_tab(pane, tab);
+        self.activate(id);
+    }
+
+    /// Show a note with the caret at `offset` of its text.
+    fn show_note_at(&mut self, path: String, offset: usize) {
+        if let Some(id) = self.show_note(path)
+            && let Some(Tab::Note(tab)) = self.tabs.get_mut(&id)
+        {
+            let offset = (0..=offset.min(tab.doc.source().len())).rev().find(|&i| tab.doc.source().is_char_boundary(i)).unwrap_or(0);
+            tab.doc.perform(md_editor::Action::SetCaret { offset, extend: false });
+        }
+    }
+
     /// Where the Bible tab others work with is reading: its chapter, and its selected verse.
     fn reference_place(&self) -> (scripture::Book, u16, Option<u16>) {
         match self.reference_bible_id().and_then(|b| self.bible_tab(b)) {
@@ -674,10 +790,7 @@ impl App {
     /// Show a commentary on a chapter, asked for from tab `from`: in the commentary tab there
     /// already is, else in a new one in another pane.
     fn show_commentary(&mut self, from: TabId, book: scripture::Book, chapter: u16, verse: Option<u16>) -> Task<Message> {
-        let Some(module) = self.sh.backend.commentaries().first().map(|c| c.id.clone()) else {
-            self.sh.status = "No commentaries are installed".into();
-            return Task::none();
-        };
+        let module = self.first_commentary();
         let existing = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Commentary(_)).then_some(*id));
         let id = match existing {
             Some(id) => id,
@@ -697,14 +810,14 @@ impl App {
 
     /// Show a note in a note tab: the one already holding it, else the one last used (which
     /// follows the link), else a new one in the last pane.
-    fn show_note(&mut self, path: String) {
+    fn show_note(&mut self, path: String) -> Option<TabId> {
         let holding = self.tabs.iter().find_map(|(id, t)| match t {
             Tab::Note(n) if n.path == path => Some(*id),
             _ => None,
         });
         if let Some(id) = holding {
             self.activate(id);
-            return;
+            return Some(id);
         }
         let last = self.last_note.filter(|id| matches!(self.tabs.get(id), Some(Tab::Note(_))));
         match last {
@@ -713,12 +826,14 @@ impl App {
                     tab.open(&mut self.sh, path);
                 }
                 self.activate(id);
+                Some(id)
             }
             None => {
                 let tab = self.new_note(path);
                 let pane = self.panes.len() - 1;
                 let id = self.add_tab(pane, tab);
                 self.activate(id);
+                Some(id)
             }
         }
     }
@@ -750,7 +865,7 @@ impl App {
             }
             Choice::Note => Tab::Note(Box::new(NoteTab::new(id, &self.sh, self.sh.first_ordinary_note()))),
             Choice::Commentary => {
-                let Some(module) = self.sh.backend.commentaries().first().map(|c| c.id.clone()) else { return };
+                let module = self.first_commentary();
                 let (book, chapter, verse) = self.reference_place();
                 Tab::Commentary(Box::new(CommentaryTab::new(id, &self.sh, module, book, chapter, verse)))
             }
@@ -774,7 +889,51 @@ impl App {
         self.settle();
         self.sh.save();
         self.note_session();
-        task
+        Task::batch([task, self.shown_changed()])
+    }
+
+    /// The tabs showing: the one of each pane, or only that of the pane filling the window.
+    fn visible_tabs(&self) -> std::collections::BTreeSet<TabId> {
+        let zoomed = self.zoomed.and_then(|z| self.pane_index(z));
+        self.panes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| zoomed.is_none_or(|z| z == *i))
+            .filter_map(|(_, p)| p.active)
+            .collect()
+    }
+
+    /// What is done as tabs come and go from view. A tab's widgets are made again when it is shown
+    /// again, so: what it was asked to do once is forgotten as it leaves (or it would be done again),
+    /// and where it was scrolled to is put back as it returns.
+    fn shown_changed(&mut self) -> Task<Message> {
+        let now = self.visible_tabs();
+        let (left, back): (Vec<TabId>, Vec<TabId>) =
+            (self.shown.difference(&now).copied().collect(), now.difference(&self.shown).copied().collect());
+        self.shown = now;
+        for id in left {
+            if let Some(Tab::Bible(tab)) = self.tabs.get_mut(&id) {
+                tab.forget_requests();
+            }
+        }
+        // The person's own commentary may have been written in since it was last in view.
+        for &id in &back {
+            if let Some(Tab::Commentary(tab)) = self.tabs.get_mut(&id)
+                && tab.is_mine()
+            {
+                tab.show(&self.sh, tab.book, tab.chapter, tab.verse);
+            }
+        }
+        let to = |id: iced::widget::Id, y: f32| (y > 0.0).then(|| scroll_to(id, AbsoluteOffset { x: 0.0, y }));
+        Task::batch(back.into_iter().filter_map(|id| match self.tabs.get(&id)? {
+            Tab::Bible(t) => to(t.reader_id(), t.scroll_y),
+            Tab::Note(t) => to(t.editor_id(), t.scroll),
+            Tab::Commentary(t) => to(t.editor_id(), t.scroll),
+            Tab::Search(t) => to(t.scroll_id(), t.scroll),
+            Tab::Dict(t) => to(t.scroll_id(), t.scroll),
+            Tab::Backlinks(t) => to(t.scroll_id(), t.scroll),
+            Tab::Blank(_) => None,
+        }))
     }
 
     /// Remember that the workspace changed, to be written soon.
@@ -811,6 +970,7 @@ impl App {
             &message,
             Message::Bible(_, BibleMsg::MarginChanged(_) | BibleMsg::AutoScroll(_) | BibleMsg::SelectionChanged(None))
                 | Message::Tick(_)
+                | Message::ReadingTick
                 | Message::SaveSession
                 | Message::Modifiers(_)
                 | Message::Navigate { .. }
@@ -892,8 +1052,32 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Bible(id, msg) => {
+            Message::Bible(id, msg) if self.modifiers.command() && matches!(msg, BibleMsg::StartEdit(_) | BibleMsg::CardPressed(_)) => {
+                // A card pressed with the command key is opened in a tab of its own, not written in.
                 self.touch(id);
+                match msg {
+                    BibleMsg::StartEdit(index) => {
+                        if let Some(mark) = self.sh.marks.get(index) {
+                            let (path, markdown) = (mark.path(), mark.to_markdown());
+                            self.sh.notes.or_insert_with(path.clone(), || markdown);
+                            self.open_note_in_new_tab(id, path);
+                        }
+                    }
+                    BibleMsg::CardPressed(key) => match self.sh.backend.strongs_dictionary(&key) {
+                        Some(module) => self.open_dictionary(id, module, key, Dest::NewTab),
+                        None => self.sh.status = format!("No installed dictionary has {key}"),
+                    },
+                    _ => {}
+                }
+                Task::none()
+            }
+            Message::Bible(id, msg) => {
+                // What a reader reports of itself (its layout, losing its selection when something
+                // else is pressed, scrolling) is not something done in it: it does not take the focus
+                // from where the press was.
+                if !matches!(msg, BibleMsg::MarginChanged(_) | BibleMsg::AutoScroll(_) | BibleMsg::SelectionChanged(None) | BibleMsg::Scrolled(_)) {
+                    self.touch(id);
+                }
                 let Some(Tab::Bible(tab)) = self.tabs.get_mut(&id) else { return Task::none() };
                 let (task, request) = tab.update(&mut self.sh, msg);
                 let task = task.map(move |m| Message::Bible(id, m));
@@ -911,7 +1095,9 @@ impl App {
                             self.show_note(path);
                         }
                     }
-                    Some(bible_tab::Request::OpenNote(path)) => self.show_note(path),
+                    Some(bible_tab::Request::OpenNote(path)) => {
+                        self.show_note(path);
+                    }
                     Some(bible_tab::Request::OpenBacklinks(passage)) => self.show_backlinks(id, Target::Passage(passage)),
                     Some(bible_tab::Request::OpenSearch) => return Task::batch([task, self.show_search(None)]),
                     Some(bible_tab::Request::Search(words)) => return Task::batch([task, self.show_search(Some(words))]),
@@ -969,6 +1155,31 @@ impl App {
             Message::OpenSearch => self.show_search(None),
             Message::Commentary(id, msg) => {
                 self.touch(id);
+                if matches!(msg, CommentaryMsg::Begin) {
+                    return self.begin_commentary(id);
+                }
+                // A link to one of the person's own notes shows it in the writer.
+                if let CommentaryMsg::Link(study_core::markdown::LinkTarget::Note(name)) = &msg {
+                    // `note#heading`: the note, with the caret under that heading.
+                    let (name, heading) = name.split_once('#').map_or((name.as_str(), None), |(n, h)| (n, Some(h)));
+                    let paths = self.sh.note_paths();
+                    if let Some(path) = study_core::markdown::resolve_note(&paths, name).cloned() {
+                        let at = heading
+                            .and_then(scripture::RefRange::parse)
+                            .zip(study_core::own_commentary::book_of(&path))
+                            .and_then(|(range, book)| {
+                                let text = self.sh.notes.get(&path)?;
+                                study_core::own_commentary::sections(text, book).into_iter().find(|s| s.range == range).map(|s| s.write_at(text))
+                            });
+                        match at {
+                            Some(at) => self.show_note_at(path, at),
+                            None => {
+                                self.show_note(path);
+                            }
+                        }
+                    }
+                    return Task::none();
+                }
                 // A link in the notes shows its verse in the reader.
                 if let CommentaryMsg::Link(study_core::markdown::LinkTarget::Verse { range, .. }) = &msg {
                     let dest = Dest::from_modifiers(self.modifiers);
@@ -1096,9 +1307,19 @@ impl App {
             Message::SetFont(FontChoice(font)) => self.change_settings(|s| s.font = font),
             // The look of the app only: the pens are the vault's own and are kept.
             Message::ResetSettings => self.change_settings(|s| {
-                let pens = std::mem::take(&mut s.pens);
-                *s = Settings { pens, ..Settings::default() };
+                let (pens, auto, seconds, daily, vim) =
+                    (std::mem::take(&mut s.pens), s.reading_log_auto, s.reading_log_seconds, s.reading_log_daily, s.vim_mode);
+                *s = Settings { pens, reading_log_auto: auto, reading_log_seconds: seconds, reading_log_daily: daily, vim_mode: vim, ..Settings::default() };
             }),
+            Message::SetReadingAuto(on) => self.change_settings(|s| s.reading_log_auto = on),
+            Message::SetReadingSeconds(n) => self.change_settings(|s| s.reading_log_seconds = n),
+            Message::SetReadingDaily(on) => self.change_settings(|s| s.reading_log_daily = on),
+            Message::SetBookmarksDaily(on) => self.change_settings(|s| s.bookmarks_daily = on),
+            Message::SetVimMode(on) => self.change_settings(|s| s.vim_mode = on),
+            Message::ReadingTick => {
+                self.note_reading(std::time::Instant::now());
+                Task::none()
+            }
             Message::SettingsTab(tab) => {
                 self.settings_tab = tab;
                 self.pen_editing = None;
@@ -1181,6 +1402,7 @@ impl App {
             }
             Message::Vault(message) => self.vault_message(message),
             Message::Modules(message) => self.modules_message(message),
+            Message::Manager(message) => self.manager_message(message),
             Message::EscapeCard => {
                 if self.setup.is_some() {
                     self.setup = None;
@@ -1250,6 +1472,9 @@ impl App {
             Message::CloseRequested(id) => {
                 if self.settings_window == Some(id) {
                     self.settings_window = None;
+                }
+                if self.manager_window == Some(id) {
+                    self.manager_window = None;
                 }
                 iced::window::close(id)
             }
@@ -1692,12 +1917,20 @@ impl App {
     }
 
     fn window_title(&self, window: iced::window::Id) -> String {
-        if Some(window) == self.settings_window { "Settings".into() } else { "Zoe".into() }
+        if Some(window) == self.settings_window {
+            "Settings".into()
+        } else if Some(window) == self.manager_window {
+            "Manage modules".into()
+        } else {
+            "Zoe".into()
+        }
     }
 
     fn window_view(&self, window: iced::window::Id) -> Element<'_, Message> {
         if Some(window) == self.settings_window {
             self.settings_panel()
+        } else if Some(window) == self.manager_window {
+            self.manager_panel()
         } else {
             self.view()
         }
@@ -1737,6 +1970,9 @@ impl App {
                 }) => Some(Message::EscapeCard),
                 _ => None,
             }));
+        }
+        if self.sh.settings.reading_log_auto {
+            all.push(iced::time::every(READING_TICK).map(|_| Message::ReadingTick));
         }
         if self.unsaved.is_some() {
             all.push(iced::time::every(SESSION_DELAY).map(|_| Message::SaveSession));
@@ -1880,6 +2116,7 @@ impl App {
             SettingsTab::Pens => section("Pens", self.pens_settings()),
             SettingsTab::Vault => section("Vault", self.vault_settings()),
             SettingsTab::Modules => section("Bible modules", self.modules_settings()),
+            SettingsTab::Reading => section("Reading log", self.reading_settings()),
         };
         column![
             container(strip).padding([10, 14]),
@@ -1890,7 +2127,7 @@ impl App {
     }
 
     fn appearance_page(&self) -> Element<'_, Message> {
-        use iced::widget::slider;
+        use iced::widget::{checkbox, slider};
         let settings = &self.sh.settings;
         let label = |t: &'static str| text(t).size(13);
         let size_row = |value: f32, range: std::ops::RangeInclusive<f32>, msg: fn(f32) -> Message| {
@@ -1922,9 +2159,42 @@ impl App {
                 .spacing(16)
                 .into(),
             ),
+            section(
+                "Writer",
+                checkbox(settings.vim_mode).label("Vim key bindings in the writer").on_toggle(Message::SetVimMode).size(16).text_size(13).into(),
+            ),
             button(text("Reset appearance").size(13)).padding([4, 10]).style(button::secondary).on_press(Message::ResetSettings),
         ]
         .spacing(16)
+        .into()
+    }
+
+    /// What the reading log does: a note that chapters are added to as they are read.
+    fn reading_settings(&self) -> Element<'_, Message> {
+        use iced::widget::{checkbox, slider};
+        let settings = &self.sh.settings;
+        column![
+            text("A chapter you have read is added, with the time, to a note called Reading log in your vault. The button at the foot of a chapter's text does it by hand.").size(12).style(text::secondary),
+            checkbox(settings.reading_log_auto).label("Log a chapter by itself once it has been read a while").on_toggle(Message::SetReadingAuto).size(16).text_size(13),
+            column![
+                text(format!("A while is {} seconds in front of the reader", settings.reading_log_seconds)).size(12).style(text::secondary),
+                slider(state::READ_SECONDS.start..=state::READ_SECONDS.end, settings.reading_log_seconds, Message::SetReadingSeconds).step(5u32),
+            ]
+            .spacing(4),
+            checkbox(settings.reading_log_daily)
+                .label("Also add it to today's note, under Reading")
+                .on_toggle(Message::SetReadingDaily)
+                .size(16)
+                .text_size(13),
+            text("Today's note is only added to if it is already there.").size(11).style(text::secondary),
+            checkbox(settings.bookmarks_daily)
+                .label("Add each new highlight or note to today's note, under Bookmarks")
+                .on_toggle(Message::SetBookmarksDaily)
+                .size(16)
+                .text_size(13),
+            text("Only when today's note is there; the heading is added if it has none.").size(11).style(text::secondary),
+        ]
+        .spacing(12)
         .into()
     }
 
@@ -2088,7 +2358,8 @@ impl App {
                 .on_press(Message::TogglePanel(panel))
         };
         let settings = button(text("Settings").size(13)).padding([2, 8]).style(button::text).on_press(Message::OpenSettings);
-        bar = bar.push(row![tool("Layouts", Panel::Layouts), settings].spacing(4));
+        let modules = button(text("Modules").size(13)).padding([2, 8]).style(button::text).on_press(Message::Manager(module_manager::ManagerMsg::Open));
+        bar = bar.push(row![tool("Layouts", Panel::Layouts), modules, settings].spacing(4));
         container(bar).padding([6, 16]).into()
     }
 
@@ -2283,7 +2554,6 @@ impl App {
         };
         let has_bible = !self.sh.backend.modules().is_empty();
         let has_dictionary = !self.sh.backend.dictionaries().is_empty();
-        let has_commentary = !self.sh.backend.commentaries().is_empty();
         container(
             column![
                 text("New tab").size(22),
@@ -2291,7 +2561,7 @@ impl App {
                 column![
                     kind("Bible", "Read a text, with its notes in the margin.", Choice::Bible, has_bible),
                     kind("Dictionary", "Look up a Strong's number or a word.", Choice::Dict, has_dictionary),
-                    kind("Commentary", "Read a commentary alongside the text.", Choice::Commentary, has_commentary),
+                    kind("Commentary", "Read a commentary, or write your own.", Choice::Commentary, true),
                     kind("Search", "Find words in the Bible.", Choice::Search, has_bible),
                     kind("Notes", "Write and read your notes.", Choice::Note, true),
                 ]
@@ -3524,6 +3794,222 @@ mod tests {
         assert_eq!(app.panes.iter().find(|p| p.active == Some(id)).map(|p| p.id), Some(app.focus), "shown");
         let _ = app.update(Message::Bible(bid, BibleMsg::OpenSearch));
         assert_eq!(searches(&app), 1, "the same tab again");
+    }
+
+    #[test]
+    fn pressing_the_marker_of_an_open_card_leaves_the_card_alone() {
+        let mut h = Harness::new(App::new());
+        let (x, y) = h.click_scan(|app| app.bible().note_card.is_some()).expect("a footnote marker opens a card");
+        assert!(h.app.bible().note_card.is_some());
+        // The same marker again: neither the press nor the release closes it to open it afresh.
+        h.move_to(x, y);
+        h.press();
+        assert!(h.app.bible().note_card.is_some(), "the press does not close it");
+        h.release();
+        assert!(h.app.bible().note_card.is_some(), "and the release does not open another");
+        // Pressing somewhere else does close it.
+        h.click(300.0, 900.0);
+        assert!(h.app.bible().note_card.is_none());
+    }
+
+    #[test]
+    fn a_new_reader_has_the_view_choices_of_the_one_last_used_in_the_page_and_the_margin() {
+        let mut app = App::new();
+        app.bible_mut().show_strongs = true;
+        app.bible_mut().show_refs = true;
+        app.bible_mut().in_margin = state::MarginKinds { strongs: true, marks: false, footnotes: true, refs: true };
+        let blank = app.new_blank();
+        let id = App::id_of(&blank);
+        app.add_tab(1, blank);
+        app.open_choice(id, Choice::Bible);
+        let Some(Tab::Bible(new)) = app.tabs.get(&id) else { panic!("a reader") };
+        assert!(new.show_strongs && new.show_refs);
+        assert_eq!(new.in_margin, state::MarginKinds { strongs: true, marks: false, footnotes: true, refs: true });
+    }
+
+    #[test]
+    fn what_a_reader_was_asked_to_do_once_is_not_done_again_when_its_tab_is_shown_again() {
+        let mut app = App::new();
+        let reader = app.bid();
+        let range = scripture::RefRange { book: Book::JOHN, chapter: 3, verses: Some((2, 3)) };
+        let _ = app.show_verse_in(reader, range);
+        let _ = app.update(Message::SaveSession);
+        assert!(app.bible().select_request.is_some() && app.bible().reveal.is_some(), "asked, and shown");
+        // Another tab comes in front: the reader is out of view, and has done what it was asked.
+        let blank = app.new_blank();
+        let other = App::id_of(&blank);
+        app.add_tab(0, blank);
+        let _ = app.update(Message::SaveSession);
+        assert!(app.bible_tab(reader).unwrap().select_request.is_none() && app.bible_tab(reader).unwrap().reveal.is_none());
+        let _ = app.update(Message::TabPressed(reader));
+        assert!(app.bible_tab(reader).unwrap().select_request.is_none(), "shown again: nothing to do again");
+        let _ = other;
+    }
+
+    #[test]
+    fn a_notes_scroll_is_kept_by_its_tab_and_put_back_when_the_tab_is_shown_again() {
+        use iced_test::core::widget::operation::black_box;
+        let mut app = App::new();
+        let long: String = (1..=120).map(|n| format!("Line {n} of a long note.\n\n")).collect();
+        let note = app.nid();
+        if let Some(Tab::Note(t)) = app.tabs.get_mut(&note) {
+            t.doc = Document::new(&long);
+        }
+        let mut h = Harness::new(app);
+        let editor = match h.app.tabs.get(&note) { Some(Tab::Note(t)) => t.editor_id(), _ => unreachable!() };
+        // Scroll it, as the app does when a tab is shown again.
+        let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+        let mut op = iced::advanced::widget::operation::scrollable::scroll_to::<()>(editor.clone(), AbsoluteOffset { x: None, y: Some(400.0) });
+        ui.operate(&h.renderer, &mut black_box(&mut op));
+        h.cache = ui.into_cache();
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let Some(Tab::Note(t)) = h.app.tabs.get(&note) else { unreachable!() };
+        assert!((t.scroll - 400.0).abs() < 1.0, "the tab was told how far it is scrolled: {}", t.scroll);
+    }
+
+    #[test]
+    fn a_selection_is_held_as_a_place_when_something_else_is_pressed_or_its_tab_is_put_away() {
+        let mut h = Harness::new(App::new());
+        let reader = h.app.bid();
+        let range = scripture::RefRange { book: Book::JOHN, chapter: 3, verses: Some((3, 3)) };
+        let _ = h.app.show_verse_in(reader, range);
+        let frames = |h: &mut Harness| {
+            for _ in 0..3 {
+                h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+            }
+        };
+        frames(&mut h);
+        let held = h.app.bible().text_selection.clone();
+        assert!(held.is_some());
+        // The focus is on the note's pane, and a press on empty ground there leaves the selection, and
+        // the focus, as they were.
+        let note = h.app.nid();
+        let note_pane = h.app.panes[h.app.pane_of(note).unwrap()].id;
+        h.app.focus = note_pane;
+        h.click(900.0, 1200.0);
+        assert_eq!(h.app.bible().text_selection, held, "the press did not end the selection");
+        assert_eq!(h.app.focus, note_pane);
+        // Another tab comes in front of the reader and goes away: the selection is where it was.
+        let blank = h.app.new_blank();
+        let other = App::id_of(&blank);
+        let pane = h.app.pane_of(reader).unwrap();
+        h.app.add_tab(pane, blank);
+        let _ = h.app.update(Message::SaveSession);
+        frames(&mut h);
+        let _ = h.app.update(Message::TabPressed(reader));
+        frames(&mut h);
+        assert_eq!(h.app.bible().text_selection, held, "put back when the reader is shown again");
+        let _ = other;
+        // A click in the reader's own text is a new selection, as ever.
+        h.click_n(300.0, 400.0, 2);
+        assert_ne!(h.app.bible().text_selection, held);
+    }
+
+    #[test]
+    fn a_card_pressed_with_the_command_key_is_opened_in_a_tab_of_its_own() {
+        let mut app = App::new();
+        let reader = app.bid();
+        let index = app.sh.marks.iter().position(|m| !m.body.is_empty()).unwrap();
+        let path = app.sh.marks[index].path();
+        let tabs = app.tabs.len();
+        let pane = app.pane_of(reader).unwrap();
+        // Plain, it is written in.
+        let _ = app.update(Message::Bible(reader, BibleMsg::StartEdit(index)));
+        assert_eq!(app.tabs.len(), tabs, "no new tab");
+        assert_eq!(app.bible().editing, Some(index));
+        app.bible_mut().editing = None;
+        // With the command key, it is a note tab beside the reader's own tab, in its pane.
+        let _ = app.update(Message::Modifiers(keyboard::Modifiers::COMMAND));
+        let _ = app.update(Message::Bible(reader, BibleMsg::StartEdit(index)));
+        assert_eq!(app.tabs.len(), tabs + 1);
+        assert!(app.bible().editing.is_none(), "it was not written in");
+        let shown = app.panes[pane].active.expect("a tab shows");
+        assert!(matches!(app.tabs.get(&shown), Some(Tab::Note(n)) if n.path == path), "the note, in the reader's pane");
+    }
+
+    #[test]
+    fn a_new_mark_is_added_to_todays_note_under_bookmarks_when_that_is_on_making_the_heading_if_need_be() {
+        let mut app = App::new();
+        let now = chrono::Local::now();
+        let daily = app.sh.templates().into_iter().find(|t| t.name == "Daily").unwrap();
+        let made = study_core::templates::plan(&daily, &now, None, |_| false);
+        let path = made.path.clone();
+        assert!(made.text.as_ref().unwrap().contains("## Bookmarks"), "a new daily note has the heading");
+        app.sh.notes.insert(made.path, made.text.unwrap());
+        let bid = app.bid();
+        // Off to begin with.
+        select_verses(&mut app, &[2]);
+        let _ = app.update(Message::Bible(bid, BibleMsg::ApplyPen(0)));
+        assert!(!app.sh.notes[&path].contains("|John 3:2]]"));
+        // On: the next mark is a line under Bookmarks, with its tags.
+        let _ = app.update(Message::SetBookmarksDaily(true));
+        select_verses(&mut app, &[3]);
+        let _ = app.update(Message::Bible(bid, BibleMsg::ApplyPen(1)));
+        let text = &app.sh.notes[&path];
+        let mark_path = app.sh.marks.last().unwrap().path();
+        let link = format!("[[{}|John 3:3]]", mark_path.trim_end_matches(".md"));
+        assert!(text.contains(&format!("## Bookmarks\n\n- {link}\n")), "{text}");
+        // Writing in the mark's note renames its file: the link follows, still called by the passage.
+        let index = app.sh.marks.len() - 1;
+        app.sh.set_body(index, "Because.".into());
+        let renamed = app.sh.marks[index].path();
+        assert_ne!(renamed, mark_path);
+        assert!(app.sh.notes[&path].contains(&format!("- [[{}|John 3:3]]", renamed.trim_end_matches(".md"))), "{}", app.sh.notes[&path]);
+        let text = app.sh.notes[&path].clone();
+        let text = &text;
+        // No heading: it is added, at the end, as the Reading one is.
+        let bare = text.replace("## Bookmarks", "## Elsewhere");
+        app.sh.notes.insert(path.clone(), bare);
+        select_verses(&mut app, &[16]);
+        let _ = app.update(Message::Bible(bid, BibleMsg::ApplyPen(1)));
+        let text = &app.sh.notes[&path];
+        let made = app.sh.marks.last().unwrap().path();
+        assert!(text.trim_end().ends_with(&format!("## Bookmarks\n\n- [[{}|John 3:16]]", made.trim_end_matches(".md"))), "{text}");
+        // Off again: nothing is added, heading or not.
+        let _ = app.update(Message::SetBookmarksDaily(false));
+        select_verses(&mut app, &[2]);
+        let _ = app.update(Message::Bible(bid, BibleMsg::ApplyPen(2)));
+        assert!(!app.sh.notes[&path].contains("|John 3:2]]"));
+    }
+
+    #[test]
+    fn a_card_left_open_when_its_tab_goes_away_does_not_come_back_unseen_in_the_way_of_the_toolbar() {
+        let mut h = Harness::new(App::new());
+        let reader = h.app.bid();
+        h.click_scan(|app| app.bible().note_card.is_some()).expect("a footnote marker opens a card");
+        let frames = |h: &mut Harness| {
+            for _ in 0..3 {
+                h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+            }
+        };
+        // The tab goes away and comes back.
+        let blank = h.app.new_blank();
+        let pane = h.app.pane_of(reader).unwrap();
+        h.app.add_tab(pane, blank);
+        let _ = h.app.update(Message::SaveSession);
+        let _ = h.app.update(Message::TabPressed(reader));
+        frames(&mut h);
+        assert!(h.app.bible().note_card.is_none(), "the card is not left behind");
+        // And a selection gets its toolbar.
+        h.click_n(300.0, 500.0, 2);
+        frames(&mut h);
+        assert!(h.app.bible().text_selection.is_some());
+        assert!(h.center_of("Add Note").is_some(), "the selection's toolbar is there");
+        // Even a card that is somehow still open when the widget is made again is let go of.
+        h.app.bible_mut().note_card = Some(bible_tab::NoteCard { content: bible_tab::NoteContent::Footnote("x".into()) });
+        h.app.bible_mut().text_selection = None;
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let _ = h.app.update(Message::Bible(reader, BibleMsg::SetInMargin(bible_tab::NoteKind::Marks, false)));
+        h.app.bible_mut().note_card = Some(bible_tab::NoteCard { content: bible_tab::NoteContent::Footnote("y".into()) });
+        let blank = h.app.new_blank();
+        h.app.add_tab(pane, blank);
+        let _ = h.app.update(Message::SaveSession);
+        frames(&mut h);
+        h.app.bible_mut().note_card = Some(bible_tab::NoteCard { content: bible_tab::NoteContent::Footnote("z".into()) });
+        let _ = h.app.update(Message::TabPressed(reader));
+        frames(&mut h);
+        assert!(h.app.bible().note_card.is_none(), "a stale card is let go of by the new widget");
     }
 
     #[test]
@@ -5223,6 +5709,24 @@ mod tests {
                 h.app.sh.marks.last_mut().unwrap().body = format!("Note {} on this word. It says a good deal, over a line or two, to make a tall card.", n + 1);
             }
         }
+        if std::env::var("SNAP_HIDESHOW").is_ok() {
+            let reader = h.app.bid();
+            let range = scripture::RefRange { book: Book::JOHN, chapter: 3, verses: Some((2, 3)) };
+            let _ = h.app.show_verse_in(reader, range);
+            let frames = |h: &mut Harness| {
+                for _ in 0..3 {
+                    h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+                }
+            };
+            frames(&mut h);
+            let blank = h.app.new_blank();
+            let pane = h.app.pane_of(reader).unwrap();
+            h.app.add_tab(pane, blank);
+            let _ = h.app.update(Message::SaveSession);
+            frames(&mut h);
+            let _ = h.app.update(Message::TabPressed(reader));
+            frames(&mut h);
+        }
         if let Ok(words) = std::env::var("SNAP_SEARCH") {
             let home = tempfile::tempdir().unwrap();
             h.app = live_app(home.path()).expect("real modules");
@@ -5316,6 +5820,7 @@ mod tests {
                     let _ = h.app.update(Message::TogglePanel(Panel::Layouts));
                 }
             } else {
+                h.app.home = Some(std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share/zoe"));
                 let _ = h.app.update(Message::OpenSettings);
                 h.size = Size::new(520.0, 600.0);
                 if let Ok(tab) = std::env::var("SNAP_TAB") {
@@ -5716,8 +6221,10 @@ mod tests {
         assert!(h.center_of("#promise").is_some(), "its tag, to remove");
         let mark = &h.app.sh.marks[0];
         let anchor = mark.anchor.to_string();
-        // The verse is a link: it shows that verse in the reader, as a link in a note does.
-        let (x, y) = h.center_of(&anchor).expect("the verse is shown");
+        // The passage is shown above the properties, its reference a link: it shows that verse in the
+        // reader, as a link in a note does.
+        let title = format!("{anchor} \u{b7} {}", h.app.module_abbreviation());
+        let (x, y) = h.center_of(&title).expect("the verse is shown");
         h.app.bible_mut().chapter_no = 1;
         h.click(x, y);
         assert_eq!((h.app.bible().book, h.app.bible().chapter_no), (Book::JOHN, 3), "the reader went to {anchor}");
@@ -5730,7 +6237,7 @@ mod tests {
         app.open_note(app.sh.marks[0].path());
         let mut h = Harness::new(app);
         let anchor = h.app.sh.marks[0].anchor.to_string();
-        let (x, y) = h.center_of(&anchor).unwrap();
+        let (x, y) = h.center_of(&format!("{anchor} \u{b7} {}", h.app.module_abbreviation())).unwrap();
         // Right click: where to open it.
         h.move_to(x, y);
         h.feed(Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)));

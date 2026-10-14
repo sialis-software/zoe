@@ -9,33 +9,90 @@ pub struct Vault {
     root: PathBuf,
 }
 
-/// Where this app keeps its data: `ZOE_HOME` (or the older `BIBLE_STUDY_HOME`), else the platform's
-/// data directory.
-pub fn data_home() -> PathBuf {
-    if let Some(p) = std::env::var_os("ZOE_HOME").or_else(|| std::env::var_os("BIBLE_STUDY_HOME")) {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/zoe")
-    } else if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(x).join("zoe")
-    } else {
-        home.join(".local/share/zoe")
-    }
+/// A folder of the user's, from an environment variable if it is set to something.
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
-/// The folder the data was kept in before the app was called Zoe, next to where it is now.
-pub const OLD_DATA_FOLDER: &str = "bible-study";
+fn user_home() -> PathBuf {
+    env_dir("HOME").or_else(|| env_dir("USERPROFILE")).unwrap_or_default()
+}
 
-/// Move the data folder of the app's earlier name to `home` (the new one), if there is one and
-/// `home` does not exist yet. Gives the old place, if it was moved.
-pub fn migrate_data_home(home: &Path) -> Option<PathBuf> {
-    let old = home.parent()?.join(OLD_DATA_FOLDER);
-    if home.file_name()? != "zoe" || home.exists() || !old.is_dir() {
-        return None;
+/// Where the app keeps what the person chose (`config.json`, `settings.json`, `layouts.json`):
+/// `ZOE_CONFIG_HOME`, else `ZOE_HOME/config`, else `$XDG_CONFIG_HOME/zoe` (`~/.config/zoe`;
+/// `%APPDATA%\zoe` on Windows).
+pub fn config_home() -> PathBuf {
+    if let Some(p) = env_dir("ZOE_CONFIG_HOME") {
+        return p;
     }
-    fs::rename(&old, home).ok().map(|()| old)
+    if let Some(p) = env_dir("ZOE_HOME").or_else(|| env_dir("BIBLE_STUDY_HOME")) {
+        return p.join("config");
+    }
+    if cfg!(windows)
+        && let Some(p) = env_dir("APPDATA")
+    {
+        return p.join("zoe");
+    }
+    env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| user_home().join(".config")).join("zoe")
+}
+
+/// Where the app keeps what it makes (the session, the search indexes, the vault it makes when none
+/// is chosen): `ZOE_DATA_HOME`, else `ZOE_HOME/data`, else `$XDG_DATA_HOME/zoe`
+/// (`~/.local/share/zoe`; `%LOCALAPPDATA%\zoe` on Windows).
+pub fn data_home() -> PathBuf {
+    if let Some(p) = env_dir("ZOE_DATA_HOME") {
+        return p;
+    }
+    if let Some(p) = env_dir("ZOE_HOME").or_else(|| env_dir("BIBLE_STUDY_HOME")) {
+        return p.join("data");
+    }
+    if cfg!(windows)
+        && let Some(p) = env_dir("LOCALAPPDATA")
+    {
+        return p.join("zoe");
+    }
+    env_dir("XDG_DATA_HOME").unwrap_or_else(|| user_home().join(".local/share")).join("zoe")
+}
+
+/// Where the app's files were before config and data were kept apart, and before the app was
+/// called Zoe: one folder with everything in it.
+pub fn old_homes() -> Vec<PathBuf> {
+    let home = user_home();
+    let mut out = Vec::new();
+    if cfg!(target_os = "macos") {
+        out.push(home.join("Library/Application Support/zoe"));
+        out.push(home.join("Library/Application Support/bible-study"));
+    }
+    out.push(home.join(".local/share/bible-study"));
+    out
+}
+
+/// Move the files of an `old` single folder to where they now belong: what the person chose to
+/// `config`, the rest to `data`. Does nothing if `config` already has its `config.json` (it has been
+/// done) or if either folder to move to is where `old` is. Gives whether something was moved.
+pub fn migrate_home(old: &Path, config: &Path, data: &Path) -> bool {
+    if !old.is_dir() || old == config || old == data || config.join("config.json").exists() {
+        return false;
+    }
+    if fs::create_dir_all(config).is_err() || fs::create_dir_all(data).is_err() {
+        return false;
+    }
+    let mut moved = false;
+    let mut put = |from: PathBuf, to: PathBuf| {
+        if from.exists() && !to.exists() && fs::rename(&from, &to).is_ok() {
+            moved = true;
+        }
+    };
+    put(old.join("config.json"), config.join("config.json"));
+    put(old.join("state/settings.json"), config.join("settings.json"));
+    put(old.join("state/layouts.json"), config.join("layouts.json"));
+    put(old.join("state/session.json"), data.join("session.json"));
+    put(old.join("cache"), data.join("cache"));
+    put(old.join("vault"), data.join("vault"));
+    // What is left is nothing the app made, but if the folders are empty they go.
+    let _ = fs::remove_dir(old.join("state"));
+    let _ = fs::remove_dir(old);
+    moved
 }
 
 fn invalid(path: &str) -> io::Error {
@@ -152,20 +209,31 @@ mod tests {
     }
 
     #[test]
-    fn data_kept_under_the_old_name_moves_to_the_new_folder_once() {
+    fn an_old_single_folder_is_split_into_config_and_data_once() {
         let base = tempfile::tempdir().unwrap();
-        let (old, new) = (base.path().join(OLD_DATA_FOLDER), base.path().join("zoe"));
-        assert_eq!(migrate_data_home(&new), None, "nothing to move");
+        let (old, config, data) = (base.path().join("old"), base.path().join("config/zoe"), base.path().join("data/zoe"));
+        assert!(!migrate_home(&old, &config, &data), "nothing to move");
+        fs::create_dir_all(old.join("state")).unwrap();
         fs::create_dir_all(old.join("vault")).unwrap();
-        fs::write(old.join("vault/Note.md"), "# Note").unwrap();
-        assert_eq!(migrate_data_home(&base.path().join("elsewhere")), None, "only for the app's own folder");
-        assert_eq!(migrate_data_home(&new), Some(old.clone()));
-        assert!(!old.exists());
-        assert_eq!(fs::read_to_string(new.join("vault/Note.md")).unwrap(), "# Note");
-        // A new folder that is there is never written over by an old one.
+        fs::create_dir_all(old.join("cache")).unwrap();
+        for file in ["config.json", "state/settings.json", "state/layouts.json", "state/session.json", "vault/Note.md", "cache/index.sqlite"] {
+            fs::write(old.join(file), file).unwrap();
+        }
+        assert!(!migrate_home(&old, &old, &data), "not into itself");
+        assert!(migrate_home(&old, &config, &data));
+        for file in ["config.json", "settings.json", "layouts.json"] {
+            assert!(config.join(file).is_file(), "{file} is config");
+        }
+        for file in ["session.json", "vault/Note.md", "cache/index.sqlite"] {
+            assert!(data.join(file).is_file(), "{file} is data");
+        }
+        assert_eq!(fs::read_to_string(config.join("settings.json")).unwrap(), "state/settings.json");
+        assert!(!old.exists(), "and nothing is left behind");
+        // Done once: a config.json that is there is never written over by an old one.
         fs::create_dir_all(&old).unwrap();
-        assert_eq!(migrate_data_home(&new), None);
-        assert!(old.exists());
+        fs::write(old.join("config.json"), "old").unwrap();
+        assert!(!migrate_home(&old, &config, &data));
+        assert_eq!(fs::read_to_string(config.join("config.json")).unwrap(), "config.json");
     }
 
     #[test]

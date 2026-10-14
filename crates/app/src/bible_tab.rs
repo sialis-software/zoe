@@ -132,6 +132,8 @@ pub enum BibleMsg {
     SearchSelection,
     /// Open the search tab.
     OpenSearch,
+    /// Put this chapter in the reading log, as read.
+    LogChapter,
     /// Marks under a click in the reader (several when they overlap); empty = dismissed.
     MarksClicked(Vec<usize>),
     AutoScroll(f32),
@@ -142,6 +144,8 @@ pub enum BibleMsg {
     OpenLink(LinkTarget),
     /// Open a Strong's number's definition in a dictionary tab.
     OpenWord(String),
+    /// A dictionary entry's card was pressed (with the command key it opens in a tab of its own).
+    CardPressed(String),
     /// A right click on a link in the text, at this point of the window.
     LinkMenu(Link, iced::Point),
     /// A right click on a link in a card's comment.
@@ -246,6 +250,8 @@ pub struct BibleTab {
     pub select_request: Option<(u64, u16, u16)>,
     /// Words to select in the reader (from the first to the last), once.
     pub select_words: Option<(u64, CanonSlice)>,
+    /// When the chapter was marked as read, while the button still shows that it was.
+    pub marked: Option<std::time::Instant>,
     pub select_token: u64,
     /// Whether the reader is wide enough to show its margin (reported by the reader).
     pub margin_showing: bool,
@@ -500,6 +506,7 @@ impl BibleTab {
         if let Some(n) = near {
             (tab.show_strongs, tab.show_marks, tab.show_footnotes, tab.show_refs) =
                 (n.show_strongs, n.show_marks, n.show_footnotes, n.show_refs);
+            tab.in_margin = n.in_margin;
         }
         tab.open_chapter(sh, book, chapter);
         tab
@@ -524,6 +531,7 @@ impl BibleTab {
             chapter: Err(String::new()),
             select_request: None,
             select_words: None,
+            marked: None,
             select_token: 0,
             margin_showing: false,
             editing: None,
@@ -612,6 +620,8 @@ impl BibleTab {
         self.chapter_no = chapter;
         self.select_request = None;
         self.select_words = None;
+        self.text_selection = None;
+        self.marked = None;
         self.stop_edit(sh);
         self.editing = None;
         self.reveal = None;
@@ -810,6 +820,18 @@ impl BibleTab {
     }
 
     /// Marks of the open chapter, resolved for painting.
+    /// Put away what the reader was asked to do once (select, scroll to a verse): it is done when the
+    /// reader is shown again, which would otherwise do it again.
+    pub fn forget_requests(&mut self) {
+        self.select_request = None;
+        self.select_words = None;
+        self.reveal = None;
+        // A card floating under a click goes with the reader's widgets, which know where it was: with
+        // them gone it would be there, unseen, taking the place of the selection's toolbar.
+        self.note_card = None;
+        self.popup = None;
+    }
+
     /// Select these words of `verse` (canonical offsets) in the reader, from the first to the last,
     /// in place of the whole verse.
     pub fn select_found(&mut self, verse: u16, words: &[(usize, usize)]) {
@@ -875,6 +897,8 @@ impl BibleTab {
         };
         sh.notes.insert(mark.path(), mark.to_markdown());
         sh.marks.push(mark);
+        let new = sh.marks.len() - 1;
+        sh.bookmark_in_daily(new);
         self.popup = None;
         if !keep_selection {
             self.text_selection = None;
@@ -1069,6 +1093,12 @@ impl BibleTab {
                 request = kept.map(Request::OpenNote);
                 Task::none()
             }
+            BibleMsg::LogChapter => {
+                // Already the last in the log is as good: it is marked, and the button says so.
+                let _ = sh.log_reading(self.book, self.chapter_no, &chrono::Local::now());
+                self.marked = Some(std::time::Instant::now());
+                Task::none()
+            }
             BibleMsg::OpenSearch => {
                 request = Some(Request::OpenSearch);
                 Task::none()
@@ -1149,6 +1179,7 @@ impl BibleTab {
                 request = Some(Request::Open(Spec::from_target(&target)));
                 Task::none()
             }
+            BibleMsg::CardPressed(_) => Task::none(),
             BibleMsg::OpenWord(key) => {
                 // The definition moves to a tab, so the pop-over has done its work.
                 self.note_card = None;
@@ -1336,7 +1367,7 @@ impl BibleTab {
                 .height(Length::Fill);
             (dismiss(BibleMsg::CloseHistory), panel.into())
         } else if self.menu_open {
-            let panel = container(iced::widget::opaque(self.menu_panel(sh)))
+            let panel = container(iced::widget::opaque(self.menu_panel()))
                 .padding(iced::Padding { top: 8.0 + 31.0 + 3.0, right: 16.0, bottom: 0.0, left: 0.0 })
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -1360,7 +1391,7 @@ impl BibleTab {
     }
 
     /// What the reader shows: each kind of thing in the text, on or off.
-    fn menu_panel(&self, sh: &Shared) -> Element<'_, BibleMsg> {
+    fn menu_panel(&self) -> Element<'_, BibleMsg> {
         let item = |label: &'static str, on: bool, msg: fn(bool) -> BibleMsg| {
             checkbox(on).label(label).on_toggle(msg).size(16).text_size(14)
         };
@@ -1370,7 +1401,7 @@ impl BibleTab {
                 item("Marks", self.show_marks, BibleMsg::ToggleMarks),
                 item("Footnotes", self.show_footnotes, BibleMsg::ToggleFootnotes),
                 item("References", self.show_refs, BibleMsg::ToggleRefs),
-                button(text("Commentary\u{2026}").size(14)).padding([2, 0]).style(button::text).on_press_maybe((!sh.backend.commentaries().is_empty()).then_some(BibleMsg::OpenCommentary)),
+                button(text("Commentary\u{2026}").size(14)).padding([2, 0]).style(button::text).on_press(BibleMsg::OpenCommentary),
             ]
             .spacing(10),
         )
@@ -1385,6 +1416,29 @@ impl BibleTab {
         let all = sh.backend.available_chapters(&self.module);
         let Some(at) = all.iter().position(|&c| c == (self.book, self.chapter_no)) else { return (None, None) };
         (at.checked_sub(1).map(|i| all[i]), all.get(at + 1).copied())
+    }
+
+    /// The button at the foot of the text that puts the chapter in the reading log.
+    fn log_button<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
+        let size = sh.settings.bible_size * 0.62;
+        // Quiet: words in the faint text color with no box, lit when pointed at; a green check mark
+        // for a few seconds after it is pressed.
+        let marked = self.marked.is_some();
+        let label = if marked { "\u{2713} Marked as read" } else { "Mark as read" };
+        let button = button(text(label).size(size))
+            .padding([4, 10])
+            .style(move |theme: &Theme, status| {
+                let p = theme.extended_palette();
+                let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                let color = if marked {
+                    p.success.base.color
+                } else {
+                    Color { a: if lit { 0.9 } else { 0.5 }, ..p.background.base.text }
+                };
+                button::Style { text_color: color, border: iced::Border { radius: 6.0.into(), ..iced::Border::default() }, ..button::Style::default() }
+            })
+            .on_press(BibleMsg::LogChapter);
+        container(button).width(Length::Fill).center_x(Length::Fill).into()
     }
 
     /// Previous and next chapter, to put at the top and bottom of the text.
@@ -1461,6 +1515,7 @@ impl BibleTab {
         reader::ViewOptions {
             select: self.select_request,
             select_words: self.select_words,
+            restore: self.text_selection.clone(),
             annotated: sh.annotated_verses(self.book, self.chapter_no),
             reveal: self.reveal,
             marks: self.mark_draws(sh),
@@ -1862,7 +1917,7 @@ impl BibleTab {
         let bold = Font { weight: font::Weight::Bold, ..sh.settings.text_font() };
         let title = text(format!("{} {}", self.book, self.chapter_no)).size(sh.settings.bible_size * 1.6).font(bold);
 
-        let scroller = scrollable(container(column![self.chapter_links(sh), title, body, self.chapter_links(sh), space::vertical().height(20)].spacing(16)).padding(32).width(Length::Fill))
+        let scroller = scrollable(container(column![self.chapter_links(sh), title, body, self.chapter_links(sh), self.log_button(sh), space::vertical().height(20)].spacing(16)).padding(32).width(Length::Fill))
             .id(self.reader_id())
             .on_scroll(|v| BibleMsg::Scrolled(v.absolute_offset().y))
             .height(Length::Fill);
@@ -1882,6 +1937,11 @@ pub fn reference_card<'a>(
     action: Option<(&'static str, BibleMsg)>,
 ) -> Element<'a, BibleMsg> {
     let color = Palette::for_theme(&sh.theme()).link;
+    // A dictionary entry's card, pressed with the command key, is taken to a tab of its own.
+    let pressed = match &action {
+        Some((_, BibleMsg::OpenWord(key))) => Some(key.clone()),
+        _ => None,
+    };
     let meta = card_size(sh) * 0.7;
     let mut header = row![text(label.to_string()).size(meta).style(text::secondary)]
         .spacing(16)
@@ -1898,12 +1958,16 @@ pub fn reference_card<'a>(
     }
     let width = if fill { Length::Fill } else { Length::Shrink };
     let body = scrollable(container(body).padding([0, 8]).width(width)).height(Length::Shrink);
-    container(column![header, container(body).max_height(card_body_max(sh))].spacing(6).width(width))
+    let card: Element<'a, BibleMsg> = container(column![header, container(body).max_height(card_body_max(sh))].spacing(6).width(width))
         .padding(10)
         .width(width)
         .style(move |theme: &Theme| container::Style {
             border: iced::Border { color, width: 1.0, radius: 6.0.into() },
             ..container::rounded_box(theme)
         })
-        .into()
+        .into();
+    match pressed {
+        Some(key) => iced::widget::mouse_area(card).on_press(BibleMsg::CardPressed(key)).into(),
+        None => card,
+    }
 }

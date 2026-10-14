@@ -99,7 +99,7 @@ pub fn builtin() -> Vec<(String, String)> {
         ),
         file(
             "Daily",
-            "---\ntemplate_description: \"Today's reading, reflection and prayer. One a day.\"\ntemplate_title: \"{{date:YYYY-MM-DD}}\"\ntemplate_ask_title: false\ntemplate_unique: true\ntags: [daily]\n---\n# {{date:dddd, MMMM D, YYYY}}\n\n## Reading\n\n- \n\n## Reflection\n\n\n## Prayer\n\n- [ ] \n\n## Tomorrow\n\n- [ ] \n",
+            "---\ntemplate_description: \"Today's reading, reflection and prayer. One a day.\"\ntemplate_title: \"{{date:YYYY-MM-DD}}\"\ntemplate_ask_title: false\ntemplate_unique: true\ntags: [daily]\n---\n# {{date:dddd, MMMM D, YYYY}}\n\n## Reading\n\n- \n\n## Bookmarks\n\n- \n\n## Reflection\n\n\n## Prayer\n\n- [ ] \n\n## Tomorrow\n\n- [ ] \n",
         ),
         file("Blank", "---\ntemplate_description: An empty note.\ntemplate_title: Untitled\n---\n# {{title}}\n\n"),
     ]
@@ -178,6 +178,15 @@ fn moment_to_strftime(format: &str) -> String {
         rest = &rest[c.len_utf8()..];
     }
     out
+}
+
+/// Today's note, if there is one: the note of a kind that is one a day (a unique one made without
+/// asking its title) that exists under today's name.
+pub fn todays_note(templates: &[Template], now: &DateTime<Local>, exists: impl Fn(&str) -> bool) -> Option<String> {
+    templates
+        .iter()
+        .filter(|t| t.unique && !t.ask_title)
+        .find_map(|t| Some(plan(t, now, None, &exists)).filter(|p| p.text.is_none()).map(|p| p.path))
 }
 
 /// What making a note from a template comes to.

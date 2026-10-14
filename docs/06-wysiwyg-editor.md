@@ -64,6 +64,37 @@ while dragging past the edge; drawing the IME preedit; bidi-aware caret movement
 mixed lines); tables; folding frontmatter; find and spellcheck; accessibility. The drawing code
 is verified only by tests of its logic and hit-testing, not by eye.
 
+### Vim mode
+
+Settings, Appearance, "Vim key bindings in the writer" (off by default) turns on modal editing
+in the writer. The logic is `crates/md-editor/src/vim.rs`: pure, fed `Key`s, editing the
+`Document` through `perform`, so each command is one undo step. The widget routes keys to it
+(`LiveEditor::vim`) and draws a block cursor in Normal and Visual mode; the note tab keeps the
+state and shows `-- NORMAL --`, `-- INSERT --` or `-- VISUAL --` under the text. In Insert mode
+only Esc and Ctrl-[ are Vim's, so typing, auto-pairing and input methods work as usual. In
+Normal mode Esc with nothing pending lets go of the keyboard, as it does with Vim off. A mouse
+selection puts Vim in Visual mode; a click leaves it in Normal mode. Cmd (and on other systems
+Ctrl) shortcuts keep working, apart from Ctrl-r, Ctrl-d and Ctrl-u.
+
+Supported, all with counts:
+
+- Motions: `h j k l` (by source line, not wrapped line), `w b e W B E`, `0 ^ $`, `gg G {n}G`,
+  `f t F T ; ,`, `%`, `{ }`, `+ -`, Ctrl-d and Ctrl-u (ten lines), and the arrow keys.
+- Operators `d c y > <` with every motion, doubled (`dd cc yy >> <<`), and with the text
+  objects `iw aw`, `i" a"` (also `'` and backtick), `i( a(` (`b`), `i[ a[`, `i{ a{` (`B`),
+  `i< a<`. Shortcuts `D C Y x X s`. `>` and `<` move two spaces.
+- `r{char}`, `J`, `p P` (charwise and linewise), `~`, `u`, Ctrl-r, and `.` (repeats the last
+  change, including the text typed in Insert mode).
+- Insert: `i a I A o O`, with a count repeating the text. `o` continues a list or quote, as
+  Enter does.
+- Visual `v` and `V`: motions and text objects, `d x c s y > < ~ u U J r p o`, `v`/`V` to
+  switch, Esc to leave.
+
+Deliberate gaps: named registers and the system clipboard (the unnamed register is Vim's own),
+marks, macros, search (`/ ? n N *`), blockwise Visual, `g~ gu gU gJ`, `ip ap`, `H M L`, `:`
+commands, and `.` after a Visual operator. `j` and `k` do not follow wrapped lines. `c` is two
+undo steps (the delete, then the typing).
+
 ## 1. Summary and recommendation
 
 **What the user wants.** A writer pane where markdown syntax is hidden or rendered
@@ -635,3 +666,11 @@ an escape hatch using the current `text_editor`).
 widgets; how IME preedit is drawn (widget or shell); behaviour of cosmic-text with a
 zero or tiny font size; iced 0.15 plans; Parley's editor API; Floem's and Xilem's actual text
 editing capabilities for rich text; effort estimates are judgment, not measurements.
+
+## Auto-closing pairs
+
+Typing `(`, `[`, `{`, `"` or a backtick puts in its partner and leaves the caret between, unless a word
+follows (or, for quotes, a word is ending before it, so `don't` and the quote that closes a phrase are
+left alone). Typing the partner right before the one that is there steps over it; with text selected the
+pair is put round it and it stays selected; Backspace between an empty pair takes both. Making a pair is one
+step of undo, and pasting makes none. `[[` for a link comes out as `[[]]`. See `Document::auto_close`.

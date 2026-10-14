@@ -264,3 +264,55 @@ reader with just those words selected (and the usual modifier keys choose where 
 can be a search; the reader's selection toolbar searches the selected words; Cmd/Ctrl-Shift-F brings
 the search tab forward. The tab is saved with the workspace (words and options) and searched again
 when restored if its index is already made.
+
+## Your own commentary
+
+The commentary tab's last choice is *My commentary*: the person's own, a running, ever-changing set of
+conclusions about each chapter and verse. It is not a different kind of thing from a note. It is one
+ordinary note for each book (`notes/Commentary on John.md`, type `commentary`, tagged `commentary`),
+whose only difference is its structure: a `## John 3` heading for each chapter and under it a
+`### John 3:16` (or `### John 3:16-21`) heading for each verse or run of verses written on, kept in the
+order of the text. The tab shows the chapter's part of the note, each heading a link to its passage with
+an *Edit* link that shows the note in the writer with the caret under that heading. A box under the text
+names a passage; *Add section* puts its heading in the right place (making the note and the chapter's
+heading first if need be) and opens the note there, or goes to the section if it is there already. With no
+commentary installed the tab opens on this one.
+
+## The reading log
+
+A chapter is added to the note `Reading log.md` (made the first time, tagged `reading-log`) under a
+heading for the day, as a bullet with the time and a link (`- 16:20 [[John 3]]`); the same chapter twice
+running is one line. When today's note already exists (the daily note: a one-a-day kind of note made
+without asking a title) the chapter is also added under its `## Reading` heading, filling the empty
+bullet the template starts with (and never making the note). A button at the foot of a chapter's text,
+*Log John 3 as read*, does it by hand. Settings → Reading can also have a chapter logged by itself once
+it has been in front of the reader for a chosen number of seconds (10 to 600, thirty to begin with);
+that is **off** to begin with, and so is nothing else: the button is always there. A note open in the writer
+while something is added to it keeps the caret in the words it was in.
+
+The same page of the settings has *Add each new highlight or note to today's note, under Bookmarks* (off
+to begin with): a new mark (made with a pen, Add Note, or a verse number's toolbar) adds a line such as
+`- [[margins/John/03/16-highlight-a1|John 3:16]]` (a link to the mark's own note, called by its passage) under the day's `## Bookmarks`, only when today's note is there
+(the heading is added at the end if it has none, as Reading's is; the Daily template of a new vault has it). The link follows the note if writing in it renames its file.
+
+## Notes
+
+The writer's menu has *Copy link*, which puts `[[Nicodemus]]` on the clipboard (by path and with the
+name as the label, `[[notes/Nicodemus|Nicodemus]]`, when another note has the same name). A tab keeps
+where it was scrolled to and puts it back when it is shown again; what a reader was asked to do once
+(select a verse, scroll to it) is not done again when its tab returns to view.
+
+## Selections held, cards opened apart, the passage of a margin note
+
+- A selection in a reader is a place held, like a dog-ear: pressing elsewhere (another pane, another
+  tab, a note) does not end it, and it is put back, drawn as it was, when the reader is shown again after
+  its tab was put away. Pressing in the reader's own text makes a new one, as ever. The toolbar offered under
+  a selection is shown only while that reader is the one being used.
+- A card pressed with the command key (Ctrl elsewhere) opens in a tab of its own, beside the reader's: a
+  margin note's card as its note, a dictionary entry's card as the dictionary tab.
+- A margin note shows the passage it is on, as the Bible has it with the marked words in the mark's color,
+  directly above its properties; the reference at the head of it is a link (right click for where to open
+  it, pull to carry it). The properties no longer repeat the link.
+- In the writer a bracket or quote typed comes with its partner (`(` `[` `{` `"` `` ` ``) when nothing
+  follows it that it would be put before (and, for quotes, no word is ending: `don't` is left alone);
+  typing the partner steps over it, a selection is wrapped, and Backspace between an empty pair takes both.
