@@ -49,6 +49,8 @@ pub struct Settings {
     pub bookmarks_daily: bool,
     /// Vim key bindings in the writer (normal, insert and visual modes).
     pub vim_mode: bool,
+    /// Reading mode shows the notes and reference material in margins either side of the text.
+    pub reader_margins: bool,
 }
 
 /// How a pen marks the text.
@@ -133,7 +135,7 @@ pub fn default_pens() -> Vec<PenDef> {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: Theme::Dark.to_string(), bible_size: 19.0, notes_size: 17.0, font: None, pens: default_pens(), reading_log_auto: false, reading_log_seconds: 30, reading_log_daily: true, bookmarks_daily: false, vim_mode: false }
+        Settings { theme: Theme::Dark.to_string(), bible_size: 19.0, notes_size: 17.0, font: None, pens: default_pens(), reading_log_auto: false, reading_log_seconds: 30, reading_log_daily: true, bookmarks_daily: false, vim_mode: false, reader_margins: false }
     }
 }
 

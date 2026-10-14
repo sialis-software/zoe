@@ -28,7 +28,8 @@ impl App {
         Workspace { layout: save_node(&self.layout), panes, focus: self.focus, zoomed: self.zoomed }
     }
 
-    /// The built-in layout: the Bible on the left half, a note on the right.
+    /// The built-in layout: the Bible on the left (a little over half), on the right today's note
+    /// (or the first one) with the reading log behind it, if there is one.
     pub fn default_workspace(&self) -> Workspace {
         let module = self.first_module();
         let (book, chapter) = self.sh.first_chapter(&module);
@@ -45,14 +46,22 @@ impl App {
             refs: tab.show_refs,
             in_margin: tab.in_margin,
         };
-        let note = match self.sh.first_ordinary_note() {
+        let note = match self.sh.default_note(&chrono::Local::now()) {
             path if path.is_empty() => TabSave::Blank,
             path => TabSave::Note { path },
+        };
+        // The reading log behind it, when the vault has one (opening a vault adds nothing to it; the log
+        // is made by the first chapter logged or by opening it from a new tab).
+        let has_log = self.sh.notes.contains_key(crate::shared::READING_LOG);
+        let right = match (matches!(note, TabSave::Blank), has_log) {
+            (true, true) => vec![TabSave::Log],
+            (false, true) => vec![note, TabSave::Log],
+            (_, false) => vec![note],
         };
         Workspace {
             layout: Layout::Split {
                 axis: AxisSave::Row,
-                fraction: 0.5,
+                fraction: 0.55,
                 a: Box::new(Layout::Pane { id: 1 }),
                 b: Box::new(Layout::Pane { id: 2 }),
             },
@@ -60,9 +69,9 @@ impl App {
                 // With no Bible modules there is nothing for a Bible tab to read: a new tab, whose
                 // page says where to get some.
                 PaneSave { id: 1, tabs: vec![if self.sh.backend.modules().is_empty() { TabSave::Blank } else { bible }], active: Some(0) },
-                PaneSave { id: 2, tabs: vec![note], active: Some(0) },
+                PaneSave { id: 2, tabs: right, active: Some(0) },
             ],
-            focus: 1,
+            focus: 2,
             zoomed: None,
         }
     }

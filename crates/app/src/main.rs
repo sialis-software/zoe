@@ -80,6 +80,8 @@ fn main() -> iced::Result {
 
 /// The space above and below the logo in the top bar (which is the logo's 24 px and this twice).
 const TOP_BAR_PADDING: f32 = 9.0;
+/// The height of the top bar and the line under it.
+const TOP_BAR_HEIGHT: f32 = 24.0 + 2.0 * TOP_BAR_PADDING + 1.0;
 
 /// What a tab holds. Each kind is one self-contained type of tab.
 enum Tab {
@@ -242,6 +244,10 @@ struct App {
     focus: PaneId,
     /// The pane shown alone, filling the window, if any.
     zoomed: Option<PaneId>,
+    /// The main window's size, as last reported.
+    window_size: iced::Size,
+    /// The Bible tab read alone, filling the window with nothing else around it, if any.
+    reader_mode: Option<ReaderMode>,
     /// The Bible and note tab last used, which others work with: a note's links show their
     /// verses in the Bible tab, and inserting a reference takes the Bible tab's selection.
     last_bible: Option<TabId>,
@@ -339,6 +345,13 @@ struct LinkMenu {
     from: TabId,
 }
 
+/// A Bible tab shown alone. It ends when the number of tabs changes or another comes forward.
+#[derive(Clone, Copy)]
+struct ReaderMode {
+    tab: TabId,
+    tabs: usize,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     Bible(TabId, BibleMsg),
@@ -398,6 +411,20 @@ enum Message {
     Plans(plans_window::PlansMsg),
     /// Escape: put away the card that is open.
     EscapeCard,
+    /// Leave reading mode.
+    EndReading,
+    /// ⌘T, pressed in this window: a new tab in the pane last used.
+    NewTabHere(iced::window::Id),
+    /// ⌘N, pressed in this window: a new pane, split off the pane last used.
+    NewPaneHere(iced::window::Id),
+    /// A window opened or changed size.
+    WindowSize(iced::window::Id, iced::Size),
+    /// ⌘W, pressed in this window: close the tab in front in the pane last used.
+    CloseFocusedTab(iced::window::Id),
+    /// ⌘⇧[ or ⌘⇧], pressed in this window: bring the tab before or after it forward, in the same pane.
+    CycleTab(iced::window::Id, bool),
+    /// Show or put away the margins in reading mode.
+    ToggleReadingMargins,
     /// Ask for a name to save the workspace as a layout under.
     NameLayout,
     CancelNaming,
@@ -502,6 +529,8 @@ impl App {
             layout: Node::Leaf(0),
             focus: 0,
             zoomed: None,
+            window_size: iced::Size::new(1280.0, 800.0),
+            reader_mode: None,
             last_bible: None,
             last_note: None,
             last_dict: None,
@@ -547,9 +576,17 @@ impl App {
         let module = app.first_module();
         let bible = app.new_bible(module, None);
         app.add_tab(0, bible);
-        let note = app.new_note(app.sh.first_ordinary_note());
-        app.add_tab(1, note);
-        app.focus = left;
+        let split = app.next_split - 1;
+        app.layout.set_fraction(split, 0.55);
+        let note = app.new_note(app.sh.default_note(&chrono::Local::now()));
+        let note = app.add_tab(1, note);
+        // The reading log behind it, when the vault has one (see `default_workspace`).
+        if app.sh.notes.contains_key(shared::READING_LOG) {
+            let log = app.new_log();
+            app.add_tab(1, log);
+            app.panes[1].active = Some(note);
+        }
+        app.focus = right;
         app
     }
 
@@ -684,6 +721,11 @@ impl App {
         }
     }
 
+    /// The tab in front in the pane last used.
+    fn focused_tab(&self) -> Option<TabId> {
+        self.panes.iter().find(|p| p.id == self.focus).and_then(|p| p.active)
+    }
+
     fn close_tab(&mut self, id: TabId) {
         if self.pane_of(id).is_none() {
             return;
@@ -713,13 +755,16 @@ impl App {
     /// with a blank tab.
     fn pane_emptied(&mut self, pane: usize) {
         let id = self.panes[pane].id;
-        if self.panes.len() > 1 && self.layout.remove(id) {
+        let heir = if self.panes.len() > 1 { self.layout.remove_to(id) } else { None };
+        if let Some(heir) = heir {
             self.panes.remove(pane);
             if self.zoomed == Some(id) {
                 self.zoomed = None;
             }
+            // The pane that takes the space is the one to go on with (not the first made, which
+            // can be anywhere on the screen).
             if self.focus == id {
-                self.focus = self.panes.first().map_or(0, |p| p.id);
+                self.focus = heir;
             }
         } else {
             let blank = self.new_blank();
@@ -1008,7 +1053,7 @@ impl App {
             }
             Choice::Plans => Tab::Plan(Box::new(PlanTab::new(id))),
             Choice::Log => Tab::Log(Box::new(LogTab::new(id, &mut self.sh))),
-            Choice::Note => Tab::Note(Box::new(NoteTab::new(id, &self.sh, self.sh.first_ordinary_note()))),
+            Choice::Note => Tab::Note(Box::new(NoteTab::new(id, &self.sh, self.sh.default_note(&chrono::Local::now())))),
             Choice::Commentary => {
                 let module = self.first_commentary();
                 let (book, chapter, verse) = self.reference_place();
@@ -1033,6 +1078,7 @@ impl App {
         let task = self.handle(message);
         self.refresh_plans();
         self.settle();
+        self.settle_reading();
         self.sh.save();
         self.note_session();
         Task::batch([task, self.shown_changed()])
@@ -1163,7 +1209,6 @@ impl App {
                 }
                 Tab::Bible(t) => {
                     t.menu_open = false;
-                    t.margin_menu_open = false;
                     t.history_open = false;
                 }
                 Tab::Blank(_) | Tab::Dict(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) | Tab::Plan(_) | Tab::Log(_) => {}
@@ -1253,6 +1298,7 @@ impl App {
                         self.show_note(path);
                     }
                     Some(bible_tab::Request::OpenBacklinks(passage)) => self.show_backlinks(id, Target::Passage(passage)),
+                    Some(bible_tab::Request::ReadingMode) => self.start_reading(id),
                     Some(bible_tab::Request::OpenSearch) => return Task::batch([task, self.show_search(None)]),
                     Some(bible_tab::Request::Search(words)) => return Task::batch([task, self.show_search(Some(words))]),
                     Some(bible_tab::Request::OpenCommentary(book, chapter, verse)) => return Task::batch([task, self.show_commentary(id, book, chapter, verse)]),
@@ -1489,6 +1535,56 @@ impl App {
                 self.close_tab(id);
                 Task::none()
             }
+            Message::NewTabHere(window) => {
+                if window == self.main {
+                    return self.handle(Message::NewTab(self.focus));
+                }
+                Task::none()
+            }
+            Message::WindowSize(window, size) => {
+                if window == self.main {
+                    self.window_size = size;
+                }
+                Task::none()
+            }
+            // (Done at once, from the size last reported: asking the window would put the split after
+            // whatever is pressed next, such as ⌘W closing the tab the split was about to leave.)
+            Message::NewPaneHere(window) if window == self.main => {
+                let window = self.window_size;
+                // Along the longer side of the pane: side by side if it is wider than tall. (A pane
+                // filling the window has all of it; the top bar is above the panes otherwise.)
+                let below_bar = if self.zoomed.is_some() { 0.0 } else { TOP_BAR_HEIGHT };
+                let whole = (window.width, (window.height - below_bar).max(1.0));
+                let (w, h) = match self.zoomed {
+                    Some(_) => whole,
+                    None => self.layout.size_of(self.focus, whole).unwrap_or(whole),
+                };
+                let axis = if w >= h { panes::Axis::Row } else { panes::Axis::Column };
+                self.handle(Message::SplitPane(self.focus, axis))
+            }
+            Message::NewPaneHere(_) => Task::none(),
+            Message::CloseFocusedTab(window) => {
+                if window == self.main
+                    && let Some(id) = self.focused_tab()
+                {
+                    self.close_tab(id);
+                }
+                Task::none()
+            }
+            Message::CycleTab(window, forward) => {
+                if window == self.main
+                    && let Some(pane) = self.pane_index(self.focus)
+                {
+                    let tabs = &self.panes[pane].tabs;
+                    let at = self.panes[pane].active.and_then(|a| tabs.iter().position(|&t| t == a));
+                    if let Some(at) = at.filter(|_| tabs.len() > 1) {
+                        let next = if forward { (at + 1) % tabs.len() } else { (at + tabs.len() - 1) % tabs.len() };
+                        let id = tabs[next];
+                        self.activate(id);
+                    }
+                }
+                Task::none()
+            }
             Message::NewTab(pane) => {
                 if let Some(index) = self.pane_index(pane) {
                     let blank = self.new_blank();
@@ -1627,6 +1723,14 @@ impl App {
             Message::Modules(message) => self.modules_message(message),
             Message::Manager(message) => self.manager_message(message),
             Message::Plans(message) => self.plans_message(message),
+            Message::ToggleReadingMargins => {
+                let on = !self.sh.settings.reader_margins;
+                self.change_settings(|s| s.reader_margins = on)
+            }
+            Message::EndReading => {
+                self.reader_mode = None;
+                Task::none()
+            }
             Message::EscapeCard => {
                 if self.setup.is_some() {
                     self.setup = None;
@@ -2149,6 +2253,32 @@ impl App {
         self.sh.toast(said);
     }
 
+    /// Show the Bible tab `id` alone, as the window's whole content.
+    fn start_reading(&mut self, id: TabId) {
+        self.activate(id);
+        self.reader_mode = Some(ReaderMode { tab: id, tabs: self.tabs.len() });
+    }
+
+    /// Reading mode lasts only while nothing else is opened: another tab (or the tab going
+    /// away, or another tab coming forward) ends it.
+    fn settle_reading(&mut self) {
+        let Some(reading) = self.reader_mode else { return };
+        let shown = self.pane_of(reading.tab).is_some_and(|p| self.panes[p].active == Some(reading.tab))
+            && matches!(self.tabs.get(&reading.tab), Some(Tab::Bible(_)))
+            && self.tabs.len() == reading.tabs;
+        if !shown {
+            self.reader_mode = None;
+        }
+    }
+
+    /// The Bible tab being read alone, if it is.
+    fn reader_tab(&self) -> Option<&BibleTab> {
+        match self.reader_mode.and_then(|r| self.tabs.get(&r.tab)) {
+            Some(Tab::Bible(tab)) => Some(tab),
+            _ => None,
+        }
+    }
+
     /// Pass what one tab did on to the others that show it.
     fn settle(&mut self) {
         for event in std::mem::take(&mut self.sh.events) {
@@ -2243,11 +2373,18 @@ impl App {
     /// The keys held (they decide where a link opens), and a clock only while there is a toast to
     /// take down.
     fn subscription(&self) -> iced::Subscription<Message> {
-        let keys = iced::event::listen_with(|event, _status, _window| match event {
+        let keys = iced::event::listen_with(|event, _status, window| match event {
             iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => Some(Message::Modifiers(m)),
-            // ⌘[ and ⌘] (Ctrl elsewhere), and the mouse's own back and forward buttons.
+            iced::Event::Window(iced::window::Event::Opened { size, .. } | iced::window::Event::Resized(size)) => Some(Message::WindowSize(window, size)),
+            // ⌘[ and ⌘] (Ctrl elsewhere), and the mouse's own back and forward buttons. With shift
+            // they change tab instead (the shifted keys are { and } on some layouts), and ⌘W closes one.
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) if modifiers.command() => {
                 match key.as_ref() {
+                    iced::keyboard::Key::Character("[" | "{") if modifiers.shift() => Some(Message::CycleTab(window, false)),
+                    iced::keyboard::Key::Character("]" | "}") if modifiers.shift() => Some(Message::CycleTab(window, true)),
+                    iced::keyboard::Key::Character("w" | "W") if !modifiers.shift() => Some(Message::CloseFocusedTab(window)),
+                    iced::keyboard::Key::Character("t" | "T") if !modifiers.shift() => Some(Message::NewTabHere(window)),
+                    iced::keyboard::Key::Character("n" | "N") if !modifiers.shift() => Some(Message::NewPaneHere(window)),
                     iced::keyboard::Key::Character("[") => Some(Message::Navigate { back: true }),
                     iced::keyboard::Key::Character("]") => Some(Message::Navigate { back: false }),
                     // The platform's shortcut for preferences (on a Mac the menu bar item takes it).
@@ -2265,6 +2402,16 @@ impl App {
             iced::window::close_requests().map(Message::CloseRequested),
             native::settings_chosen().map(|()| Message::OpenSettings),
         ];
+        // Escape leaves reading mode, unless a card is open: it is put away first.
+        if self.reader_mode.is_some() && !(self.naming || self.setup.is_some()) {
+            all.push(iced::event::listen_with(|event, status, _window| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                    ..
+                }) if status == iced::event::Status::Ignored => Some(Message::EndReading),
+                _ => None,
+            }));
+        }
         // Escape puts away whichever card is open.
         if self.naming || self.setup.is_some() {
             all.push(iced::event::listen_with(|event, _status, _window| match event {
@@ -2302,14 +2449,19 @@ impl App {
     // ---- view ----------------------------------------------------------------------
 
     fn view(&self) -> Element<'_, Message> {
-        let body: Element<'_, Message> = match self.zoomed.and_then(|z| self.pane_index(z)) {
-            Some(index) => self.pane_view(index),
-            None => self.node_view(&self.layout),
-        };
         // The window's press catch-all sits outside everything, so it only sees presses the
         // widgets inside left alone.
-        let window = iced::widget::mouse_area(column![self.top_bar(), rule::horizontal(1), body])
-            .on_press(Message::PressedElsewhere);
+        let window = if let Some(tab) = self.reader_tab() {
+            let id = tab.id;
+            iced::widget::mouse_area(stack![tab.reading_view(&self.sh, self.sh.settings.reader_margins).map(move |m| Message::Bible(id, m)), self.reading_controls()])
+                .on_press(Message::PressedElsewhere)
+        } else {
+            let body: Element<'_, Message> = match self.zoomed.and_then(|z| self.pane_index(z)) {
+                Some(index) => self.pane_view(index),
+                None => self.node_view(&self.layout),
+            };
+            iced::widget::mouse_area(column![self.top_bar(), rule::horizontal(1), body]).on_press(Message::PressedElsewhere)
+        };
         // The toast layer is always there (empty when there is none) so that the windows' widget
         // state is not rebuilt when one comes and goes.
         let toast: Element<'_, Message> = match &self.sh.toast {
@@ -2803,6 +2955,51 @@ impl App {
             .into()
     }
 
+    /// The controls of reading mode, faint in the top right corner over the text: the margins,
+    /// and the way out.
+    fn reading_controls(&self) -> Element<'_, Message> {
+        let margins = self.sh.settings.reader_margins;
+        let small = |icon: icons::Icon, tip: &'static str, msg: Message| {
+            tooltip(
+                button(container(icon.view(18.0)).center(Length::Fill))
+                    .width(28)
+                    .height(28)
+                    .padding(0)
+                    .style(|theme: &Theme, status| {
+                        let base = button::secondary(theme, status);
+                        let alpha = if matches!(status, button::Status::Hovered | button::Status::Pressed) { 0.85 } else { 0.35 };
+                        button::Style {
+                            background: base.background.map(|b| match b {
+                                iced::Background::Color(c) => iced::Background::Color(iced::Color { a: c.a * alpha, ..c }),
+                                other => other,
+                            }),
+                            ..base
+                        }
+                    })
+                    .on_press(msg),
+                container(text(tip).size(12)).padding(4).style(container::rounded_box),
+                tooltip::Position::Bottom,
+            )
+        };
+        let controls = row![
+            small(
+                if margins { icons::Icon::MarginsOn } else { icons::Icon::MarginsOff },
+                if margins { "Hide the margins" } else { "Show the margins" },
+                Message::ToggleReadingMargins,
+            ),
+            small(icons::Icon::Collapse, "Leave reading mode (Esc)", Message::EndReading),
+        ]
+        .spacing(6);
+        container(controls)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Top)
+            // (Clear of the scrollbar down the right edge.)
+            .padding(iced::Padding { top: 10.0, right: 24.0, bottom: 0.0, left: 0.0 })
+            .into()
+    }
+
     fn pane_controls(&self, pane: PaneId) -> Element<'_, Message> {
         let zoomed = self.zoomed == Some(pane);
         let small = |icon: icons::Icon, tip: &'static str, msg: Message| {
@@ -2847,7 +3044,7 @@ impl App {
     /// A new tab: choose what it becomes.
     fn blank_view(&self, id: TabId) -> Element<'_, Message> {
         // What kind of tab: the Bible, a dictionary, the notes. Which one comes after.
-        let kind = |title: &'static str, about: &'static str, choice: Choice, on: bool| {
+        let kind = move |title: &'static str, about: &'static str, choice: Choice, on: bool| {
             // The words in the page's own text color (the faint one of a secondary button is
             // nearly the card's color), the card a shade off the page with a fine edge.
             let faint = |theme: &Theme| text::Style { color: Some(iced::Color { a: 0.7, ..theme.extended_palette().background.base.text }) };
@@ -2872,7 +3069,8 @@ impl App {
         };
         let has_bible = !self.sh.backend.modules().is_empty();
         let has_dictionary = !self.sh.backend.dictionaries().is_empty();
-        let no_bible: Element<'_, Message> = if has_bible {
+        let no_bible = move || -> Element<'_, Message> {
+            if has_bible {
             space::vertical().height(0).into()
         } else {
             column![
@@ -2883,30 +3081,35 @@ impl App {
             .align_x(iced::Center)
             .width(320)
             .into()
+            }
         };
-        container(
+        let page = move || -> Element<'_, Message> { column![
+            text("New tab").size(22),
+            text("What would you like to open?").size(14).style(text::secondary),
+            no_bible(),
             column![
-                text("New tab").size(22),
-                text("What would you like to open?").size(14).style(text::secondary),
-                no_bible,
-                column![
-                    kind("Bible", "Read a text, with its notes in the margin.", Choice::Bible, has_bible),
-                    kind("Notes", "Write and read your notes.", Choice::Note, true),
-                    kind("Search", "Find words in the Bible.", Choice::Search, has_bible),
-                    kind("Commentary", "Read a commentary, or write your own.", Choice::Commentary, true),
-                    kind("Dictionary", "Look up a Strong's number or a word.", Choice::Dict, has_dictionary),
-                    kind("Plans", "Follow a reading plan.", Choice::Plans, true),
-                    kind("Reading log", "The chapters you have read, day by day.", Choice::Log, true),
-                ]
-                .spacing(8),
+                kind("Bible", "Read a text, with its notes in the margin.", Choice::Bible, has_bible),
+                kind("Notes", "Write and read your notes.", Choice::Note, true),
+                kind("Search", "Find words in the Bible.", Choice::Search, has_bible),
+                kind("Commentary", "Read a commentary, or write your own.", Choice::Commentary, true),
+                kind("Dictionary", "Look up a Strong's number or a word.", Choice::Dict, has_dictionary),
+                kind("Plans", "Follow a reading plan.", Choice::Plans, true),
+                kind("Reading log", "The chapters you have read, day by day.", Choice::Log, true),
             ]
-            .spacing(12)
-            .align_x(iced::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
+            .spacing(8),
+        ]
+        .spacing(12)
+        .align_x(iced::Center)
+        .into()
+        };
+        // In the middle of the pane when it all fits, and scrolled when the pane is too short for it
+        // (the page is as tall as the pane or, if more, as the cards need, so it never clips).
+        let needs = if has_bible { 750.0 } else { 870.0 };
+        iced::widget::responsive(move |size| {
+            iced::widget::scrollable(container(page()).padding([24, 16]).width(Length::Fill).height(size.height.max(needs)).center_x(Length::Fill).center_y(Length::Fill))
+                .height(Length::Fill)
+                .into()
+        })
         .into()
     }
 
@@ -3168,7 +3371,7 @@ mod tests {
         let _ = app.update(Message::LoadLayout(DEFAULT_LAYOUT.into()));
         assert_eq!(shape(&app.workspace()), fresh);
         let ws = app.workspace();
-        assert!(matches!(&ws.layout, state::Layout::Split { axis: state::AxisSave::Row, fraction, .. } if *fraction == 0.5));
+        assert!(matches!(&ws.layout, state::Layout::Split { axis: state::AxisSave::Row, fraction, .. } if *fraction == 0.55));
         assert!(matches!(ws.panes[0].tabs[..], [state::TabSave::Bible { .. }]));
         assert!(matches!(ws.panes[1].tabs[..], [state::TabSave::Note { .. }]));
 
@@ -4445,6 +4648,58 @@ mod tests {
         assert!(app.bible().editing.is_none(), "it was not written in");
         let shown = app.panes[pane].active.expect("a tab shows");
         assert!(matches!(app.tabs.get(&shown), Some(Tab::Note(n)) if n.path == path), "the note, in the reader's pane");
+    }
+
+    #[test]
+    fn marking_a_chapter_read_and_bookmarking_say_where_they_were_added() {
+        let mut app = App::new();
+        let bid = app.bid();
+        let now = chrono::Local::now();
+        let _ = app.update(Message::Bible(bid, BibleMsg::LogChapter));
+        assert_eq!(app.sh.toast.as_ref().map(|t| t.text.as_str()), Some("Added to reading log"));
+        let daily = app.sh.templates().into_iter().find(|t| t.name == "Daily").unwrap();
+        let made = study_core::templates::plan(&daily, &now, None, |_| false);
+        app.sh.notes.insert(made.path, made.text.unwrap());
+        app.sh.toast = None;
+        let _ = app.update(Message::Bible(bid, BibleMsg::LogChapter));
+        assert_eq!(app.sh.toast.as_ref().map(|t| t.text.as_str()), Some("Removed from reading log"), "it was not in the daily note, which did not exist yet");
+        let _ = app.update(Message::Bible(bid, BibleMsg::LogChapter));
+        assert_eq!(app.sh.toast.as_ref().map(|t| t.text.as_str()), Some("Added to reading log and daily note"));
+        let _ = app.update(Message::Bible(bid, BibleMsg::LogChapter));
+        assert_eq!(app.sh.toast.as_ref().map(|t| t.text.as_str()), Some("Removed from reading log and daily note"));
+        let _ = app.update(Message::Bible(bid, BibleMsg::LogChapter));
+        app.sh.toast = None;
+        let _ = app.update(Message::SetBookmarksDaily(true));
+        select_verses(&mut app, &[3]);
+        let _ = app.update(Message::Bible(bid, BibleMsg::ApplyPen(1)));
+        assert_eq!(app.sh.toast.as_ref().map(|t| t.text.as_str()), Some("Added to daily note"));
+        // Deleting the mark takes its bookmark out again.
+        let index = app.sh.marks.len() - 1;
+        let mark_path = app.sh.marks[index].path();
+        app.sh.toast = None;
+        app.sh.delete_mark(index, None);
+        assert_eq!(app.sh.toast.as_ref().map(|t| t.text.as_str()), Some("Removed from daily note"));
+        assert!(app.sh.notes.values().all(|t| !t.contains(mark_path.trim_end_matches(".md"))), "no link to it is left in a daily note");
+    }
+
+    #[test]
+    fn a_new_notes_tab_opens_on_todays_note_when_there_is_one() {
+        let mut app = App::new();
+        let pane = app.panes[0].id;
+        let first = app.sh.first_ordinary_note();
+        let _ = app.update(Message::NewTab(pane));
+        let blank = *app.panes[0].tabs.last().unwrap();
+        let _ = app.update(Message::Open(blank, Choice::Note));
+        assert!(matches!(&app.tabs[&blank], Tab::Note(n) if n.path == first), "with no daily note, the first ordinary one");
+        let now = chrono::Local::now();
+        let daily = app.sh.templates().into_iter().find(|t| t.name == "Daily").unwrap();
+        let made = study_core::templates::plan(&daily, &now, None, |_| false);
+        let path = made.path.clone();
+        app.sh.notes.insert(made.path, made.text.unwrap());
+        let _ = app.update(Message::NewTab(pane));
+        let blank = *app.panes[0].tabs.last().unwrap();
+        let _ = app.update(Message::Open(blank, Choice::Note));
+        assert!(matches!(&app.tabs[&blank], Tab::Note(n) if n.path == path), "today's note, once it exists");
     }
 
     #[test]
@@ -6240,15 +6495,131 @@ mod tests {
     }
 
     #[test]
+    fn reading_mode_shows_the_text_alone_and_ends_when_another_tab_opens() {
+        let mut h = Harness::new(App::new());
+        let bible = h.app.bible().id;
+        let _ = h.app.update(Message::Bible(bible, BibleMsg::ReadingMode));
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.app.reader_mode.is_some());
+        assert!(h.center_of(NOTE_PANE_MARK).is_none(), "the other pane is out of the way");
+        assert!(h.center_of("Settings").is_none(), "and so is the top bar");
+        let _ = h.app.update(Message::ToggleReadingMargins);
+        assert!(h.app.sh.settings.reader_margins);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.app.reader_mode.is_some(), "the margins are part of reading mode");
+        let _ = h.app.update(Message::EndReading);
+        assert!(h.app.reader_mode.is_none());
+        // Opening a tab, anywhere, ends it too.
+        let _ = h.app.update(Message::Bible(bible, BibleMsg::ReadingMode));
+        let _ = h.app.update(Message::Bible(bible, BibleMsg::OpenSearch));
+        assert!(h.app.reader_mode.is_none(), "the search tab is shown, so the text is not alone");
+    }
+
+    #[test]
+    fn the_keys_close_the_tab_in_front_and_step_through_the_panes_tabs() {
+        let mut app = App::new();
+        let main = app.main;
+        let pane = app.pane_index(app.focus).unwrap();
+        let blank = app.new_blank();
+        let first = app.panes[pane].active.unwrap();
+        let second = app.add_tab(pane, blank);
+        assert_eq!(app.panes[pane].active, Some(second));
+        let _ = app.update(Message::CycleTab(main, true));
+        assert_eq!(app.panes[pane].active, Some(app.panes[pane].tabs[0]), "after the last comes the first");
+        let _ = app.update(Message::CycleTab(main, false));
+        assert_eq!(app.panes[pane].active, Some(second), "and before the first, the last");
+        let _ = app.update(Message::CycleTab(iced::window::Id::unique(), true));
+        assert_eq!(app.panes[pane].active, Some(second), "another window's keys are not ours");
+        let _ = app.update(Message::CloseFocusedTab(main));
+        assert!(!app.tabs.contains_key(&second));
+        assert!(app.tabs.contains_key(&first));
+    }
+
+    #[test]
+    fn new_tab_and_new_pane_keys_add_to_the_pane_last_used_splitting_along_its_longer_side() {
+        let mut app = App::new();
+        let main = app.main;
+        let panes_before = app.panes.len();
+        let tabs_before = app.tabs.len();
+        let _ = app.update(Message::NewTabHere(iced::window::Id::unique()));
+        assert_eq!(app.tabs.len(), tabs_before, "another window's keys are not ours");
+        let _ = app.update(Message::NewTabHere(main));
+        assert_eq!(app.tabs.len(), tabs_before + 1);
+        // The two panes are each 512 wide: in a 1024 by 1000 window they are tall, so the split is top and bottom.
+        let focus = app.focus;
+        app.window_size = Size::new(1024.0, 1000.0);
+        let _ = app.update(Message::NewPaneHere(main));
+        assert_eq!(app.panes.len(), panes_before + 1);
+        assert_ne!(app.focus, focus, "the new pane is the one used");
+        fn axis_over(node: &panes::Node, pane: u32) -> Option<panes::Axis> {
+            match node {
+                panes::Node::Split { axis, a, b, .. } if matches!(**a, panes::Node::Leaf(p) if p == pane) || matches!(**b, panes::Node::Leaf(p) if p == pane) => Some(*axis),
+                panes::Node::Split { a, b, .. } => axis_over(a, pane).or_else(|| axis_over(b, pane)),
+                _ => None,
+            }
+        }
+        assert_eq!(axis_over(&app.layout, focus), Some(panes::Axis::Column));
+        let wide = {
+            let mut app = App::new();
+            let focus = app.focus;
+            app.window_size = Size::new(2400.0, 700.0);
+            let main = app.main;
+            let _ = app.update(Message::NewPaneHere(main));
+            axis_over(&app.layout, focus)
+        };
+        assert_eq!(wide, Some(panes::Axis::Row), "a wide pane is split side by side");
+    }
+
+    #[test]
+    fn closing_a_pane_moves_the_focus_to_the_pane_that_takes_its_space() {
+        let mut app = App::new();
+        let main = app.main;
+        // Three panes: the two there are, then another split off the first (so the one made last sits in the middle).
+        let first = app.panes[0].id;
+        let _ = app.update(Message::SplitPane(first, panes::Axis::Row));
+        let middle = app.focus;
+        let leaves = app.layout.leaves();
+        assert_eq!(leaves.iter().position(|&p| p == middle), Some(1), "split off the first, so second from the left");
+        let _ = app.update(Message::CloseFocusedTab(main));
+        assert_eq!(app.focus, first, "the pane it was split off takes its space");
+    }
+
+    #[test]
+    fn closing_right_after_a_new_pane_closes_the_new_panes_tab_not_the_old_ones() {
+        let mut app = App::new();
+        let main = app.main;
+        let old = app.focus;
+        let _ = app.update(Message::NewPaneHere(main));
+        let _ = app.update(Message::CloseFocusedTab(main));
+        assert!(app.pane_index(old).is_some(), "the old pane is still there");
+        assert_eq!(app.focus, old, "and it is the one left in use");
+    }
+
+    #[test]
+    fn the_new_pane_keeps_the_focus_once_everything_has_been_laid_out() {
+        let mut h = Harness::new(App::new());
+        let old = h.app.focus;
+        h.app.window_size = iced::Size::new(1024.0, 768.0);
+        let main = h.app.main;
+        let _ = h.app.update(Message::NewPaneHere(main));
+        let new = h.app.focus;
+        assert_ne!(new, old);
+        for _ in 0..3 {
+            h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        }
+        assert_eq!(h.app.focus, new, "what the old pane reports of its new size does not take the focus back");
+    }
+
+    #[test]
     fn dragging_a_divider_resizes_the_panes_either_side() {
         let mut h = Harness::new(App::new());
         let before = match &h.app.layout {
             panes::Node::Split { fraction, .. } => *fraction,
             _ => unreachable!(),
         };
-        assert_eq!(before, 0.5);
-        // The divider is in the middle of the 1024 wide window, below the top bar.
-        h.move_to(512.0, 400.0);
+        assert_eq!(before, 0.55);
+        // The divider is a little right of the middle of the 1024 wide window, below the top bar.
+        h.move_to(564.0, 400.0);
         h.press();
         h.move_to(400.0, 400.0);
         h.move_to(300.0, 400.0);
@@ -6636,10 +7007,6 @@ mod tests {
         if let Ok(at) = std::env::var("SNAP_HOVER") {
             let (x, y) = at.split_once(',').unwrap();
             h.move_to(x.parse().unwrap(), y.parse().unwrap());
-        }
-        if std::env::var("SNAP_MARGINMENU").is_ok() {
-            let id = h.app.bid();
-            let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarginMenu));
         }
         if std::env::var("SNAP_BACKLINKS").is_ok() {
             let id = h.app.bid();
@@ -7208,6 +7575,8 @@ mod tests {
     fn the_reading_log_has_a_tab_of_its_own_that_grows_down_and_is_written_in_but_for_its_title_name_and_properties() {
         use crate::shared::READING_LOG;
         let mut app = App::new();
+        // (The log is shown in the other pane than the one last used: the notes' pane is where it goes.)
+        app.focus = app.panes[0].id;
         let log = log_text();
         app.sh.notes.insert(READING_LOG.into(), log.clone());
         let id = app.show_log();
@@ -7653,36 +8022,6 @@ mod tests {
     }
 
     #[test]
-    fn what_is_under_the_open_margin_menu_is_not_pointed_at() {
-        let mut app = App::new();
-        app.zoomed = Some(app.panes[0].id);
-        let mut h = Harness::new(app);
-        h.size = Size::new(1500.0, 800.0);
-        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
-        let id = h.app.bid();
-        let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarginMenu));
-        // The lower note, as pixels: it is dimmed if a note is thought to be pointed at.
-        let lower = |h: &mut Harness| -> Vec<u8> {
-            let theme = h.app.theme();
-            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
-            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
-            h.cache = ui.into_cache();
-            let w = h.size.width as usize;
-            let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
-            let mut part = Vec::new();
-            for y in 600..700usize {
-                part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
-            }
-            part
-        };
-        h.cursor = mouse::Cursor::Unavailable;
-        let calm = lower(&mut h);
-        // On the menu's panel, over the note beneath it.
-        h.move_to(1250.0, 380.0);
-        assert_eq!(lower(&mut h), calm, "nothing under the menu is pointed at");
-    }
-
-    #[test]
     fn strongs_words_have_their_entries_in_the_margin_when_kept_there_and_nothing_opens_on_a_click() {
         let mut app = App::new();
         app.zoomed = Some(app.panes[0].id);
@@ -7834,22 +8173,6 @@ mod tests {
             let _ = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer).into_cache();
         }
         println!("10 view+build (no draw, cache dropped): {:?}", start.elapsed());
-    }
-
-    #[test]
-    fn the_margin_menu_goes_when_a_click_lands_anywhere_else() {
-        let mut app = App::new();
-        app.zoomed = Some(app.panes[0].id);
-        let mut h = Harness::new(app);
-        h.size = Size::new(1500.0, 800.0);
-        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
-        let id = h.app.bid();
-        for (name, at) in [("text", (200.0, 330.0)), ("an empty part of the margin", (1250.0, 520.0)), ("a note", (1250.0, 650.0))] {
-            let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarginMenu));
-            assert!(h.app.bible().margin_menu_open);
-            h.click(at.0, at.1);
-            assert!(!h.app.bible().margin_menu_open, "a click on {name} puts the menu away");
-        }
     }
 
     #[test]
@@ -8965,9 +9288,9 @@ mod tests {
         let (left, right) = (app.panes[0].id, app.panes[1].id);
         pick_up(&mut app, note);
         let mut h = Harness::new(app);
-        // The window is 1024 wide and 1500 tall: the right pane is the right half.
+        // The window is 1024 wide and 1500 tall: the right pane is the right 45% of it.
         for (x, y, zone) in [
-            (560.0, 700.0, Zone::Left),
+            (600.0, 700.0, Zone::Left),
             (770.0, 700.0, Zone::Center),
             (1000.0, 700.0, Zone::Right),
             (770.0, 180.0, Zone::Top),

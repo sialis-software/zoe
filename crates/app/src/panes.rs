@@ -63,18 +63,37 @@ impl Node {
         }
     }
 
-    /// Take `target` out; its neighbour takes its space. False if it is the only pane (or
-    /// absent).
-    pub fn remove(&mut self, target: PaneId) -> bool {
-        let Node::Split { a, b, .. } = self else { return false };
+    /// The (width, height) `target` has when the whole arrangement is `size` (the dividers' own
+    /// width is ignored). None if there is no `target`.
+    pub fn size_of(&self, target: PaneId, size: (f32, f32)) -> Option<(f32, f32)> {
+        match self {
+            Node::Leaf(p) => (*p == target).then_some(size),
+            Node::Split { axis, fraction, a, b, .. } => {
+                let (first, second) = match axis {
+                    Axis::Row => ((size.0 * fraction, size.1), (size.0 * (1.0 - fraction), size.1)),
+                    Axis::Column => ((size.0, size.1 * fraction), (size.0, size.1 * (1.0 - fraction))),
+                };
+                a.size_of(target, first).or_else(|| b.size_of(target, second))
+            }
+        }
+    }
+
+    /// Take `target` out; its neighbour takes its space. Says which pane to go on with: the one that
+    /// takes over the space or, if that is a group, the one in it nearest where `target` was (the
+    /// first of the group if `target` was before it, the last if after). None if it is the only
+    /// pane (or absent).
+    pub fn remove_to(&mut self, target: PaneId) -> Option<PaneId> {
+        let Node::Split { a, b, .. } = self else { return None };
         if matches!(**a, Node::Leaf(p) if p == target) {
+            let heir = b.leaves().first().copied();
             *self = (**b).clone();
-            true
+            heir
         } else if matches!(**b, Node::Leaf(p) if p == target) {
+            let heir = a.leaves().last().copied();
             *self = (**a).clone();
-            true
+            heir
         } else {
-            a.remove(target) || b.remove(target)
+            a.remove_to(target).or_else(|| b.remove_to(target))
         }
     }
 
@@ -103,6 +122,24 @@ mod tests {
             Node::Split { axis, .. } => Some(*axis),
             Node::Leaf(_) => None,
         }
+    }
+
+    #[test]
+    fn removing_a_pane_names_the_one_nearest_it_that_takes_its_space() {
+        // 1 | (2 / 3): the group on the right takes 1's space, so its first pane is next.
+        let mut n = Node::Leaf(1);
+        n.split(1, 2, 1, Axis::Row);
+        n.split(2, 3, 2, Axis::Column);
+        assert_eq!(n.clone().remove_to(1), Some(2));
+        // 2 over 3: either one closing leaves the other.
+        assert_eq!(n.clone().remove_to(3), Some(2));
+        assert_eq!(n.clone().remove_to(2), Some(3));
+        // (1 over 3) | 2, with 3 closing: 1, which was above it, takes the space.
+        let mut m = Node::Leaf(1);
+        m.split(1, 2, 1, Axis::Row);
+        m.split(1, 3, 2, Axis::Column);
+        assert_eq!(m.remove_to(3), Some(1));
+        assert_eq!(Node::Leaf(1).remove_to(1), None);
     }
 
     #[test]
@@ -147,13 +184,13 @@ mod tests {
         let mut n = Node::Leaf(1);
         n.split(1, 2, 10, Axis::Row);
         n.split(2, 3, 11, Axis::Row);
-        assert!(n.remove(2));
+        assert!(n.remove_to(2).is_some());
         assert_eq!(n.leaves(), [1, 3]);
         assert_eq!(axis_of(&n), Some(Axis::Row), "the stacked split collapsed away");
-        assert!(n.remove(1));
+        assert!(n.remove_to(1).is_some());
         assert_eq!(n, Node::Leaf(3));
-        assert!(!n.remove(3), "the last pane stays");
-        assert!(!n.remove(7));
+        assert!(n.remove_to(3).is_none(), "the last pane stays");
+        assert!(n.remove_to(7).is_none());
     }
 
     #[test]

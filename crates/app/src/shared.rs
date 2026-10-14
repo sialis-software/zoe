@@ -205,6 +205,11 @@ impl Shared {
     /// Add a chapter that was read to the reading log, and to today's note when there is one. The
     /// log is made the first time.
     pub fn log_reading(&mut self, book: Book, chapter: u16, now: &chrono::DateTime<chrono::Local>) -> bool {
+        self.log_reading_in(book, chapter, now).0
+    }
+
+    /// Like [`Shared::log_reading`], and says too whether today's note got the chapter: (logged, in the daily note).
+    pub fn log_reading_in(&mut self, book: Book, chapter: u16, now: &chrono::DateTime<chrono::Local>) -> (bool, bool) {
         let link = format!("[[{} {}]]", book.name(), chapter);
         let log = self.notes.get(READING_LOG).cloned().unwrap_or_else(|| study_core::reading_log::new_log("Reading log", &frontmatter::now()));
         let added = study_core::reading_log::add_entry(&log, &link, now);
@@ -212,15 +217,17 @@ impl Shared {
         if let Some(text) = added {
             self.rewrite_note(READING_LOG, text);
         }
+        let mut daily = false;
         if self.settings.reading_log_daily {
             let today = templates::todays_note(&self.templates(), now, |p| self.notes.contains_key(p));
             if let Some(path) = today
                 && let Some(text) = self.notes.get(&path).and_then(|t| study_core::reading_log::add_to_day(t, &link))
             {
                 self.rewrite_note(&path, text);
+                daily = true;
             }
         }
-        logged
+        (logged, daily)
     }
 
     /// A new mark is a bookmark: with the setting on, today's note (when there is one) gets a link to
@@ -237,6 +244,7 @@ impl Shared {
         let Some(path) = templates::todays_note(&self.templates(), &now, |p| self.notes.contains_key(p)) else { return };
         if let Some(text) = self.notes.get(&path).and_then(|t| study_core::reading_log::add_bullet(t, "Bookmarks", &item, true)) {
             self.rewrite_note(&path, text);
+            self.toast("Added to daily note");
         }
     }
 
@@ -298,17 +306,22 @@ impl Shared {
 
     /// Take the chapter out of the reading log for the day of `now` (and out of that day's note, where
     /// it was put): it was marked by mistake.
-    pub fn unlog_reading(&mut self, book: Book, chapter: u16, now: &chrono::DateTime<chrono::Local>) {
+    /// Says what it was taken out of: (the reading log, the day's note).
+    pub fn unlog_reading(&mut self, book: Book, chapter: u16, now: &chrono::DateTime<chrono::Local>) -> (bool, bool) {
         let link = Self::chapter_link(book, chapter);
+        let mut gone = (false, false);
         if let Some(text) = self.notes.get(READING_LOG).and_then(|log| study_core::reading_log::remove_entry(log, &link, now)) {
             self.rewrite_note(READING_LOG, text);
+            gone.0 = true;
         }
         let today = templates::todays_note(&self.templates(), now, |p| self.notes.contains_key(p));
         if let Some(path) = today
             && let Some(text) = self.notes.get(&path).and_then(|t| study_core::reading_log::remove_bullet(t, &link))
         {
             self.rewrite_note(&path, text);
+            gone.1 = true;
         }
+        gone
     }
 
     /// Give the note at `path` this text, and tell the tabs showing it.
@@ -446,6 +459,11 @@ impl Shared {
         self.notes.keys().find(|p| !p.starts_with("margins/") && !p.starts_with("library/") && !templates::is_template(p) && p.as_str() != READING_LOG).cloned().unwrap_or_default()
     }
 
+    /// The note a new note tab opens on: today's, when there is one, else the first ordinary note.
+    pub fn default_note(&self, now: &chrono::DateTime<chrono::Local>) -> String {
+        templates::todays_note(&self.templates(), now, |p| self.notes.contains_key(p)).unwrap_or_else(|| self.first_ordinary_note())
+    }
+
     /// The kinds of note there are: the templates in the vault, by name.
     pub fn templates(&self) -> Vec<Template> {
         templates::all(self.notes.iter())
@@ -564,6 +582,21 @@ impl Shared {
         }
         let path = self.marks.remove(index).path();
         self.notes.remove(&path);
+        // A bookmark of it in a daily note goes too (in whichever day's it was put).
+        let target = path.trim_end_matches(".md");
+        let bookmarked: Vec<(String, String)> = self
+            .notes
+            .iter()
+            .filter(|(p, _)| !p.starts_with("margins/") && !templates::is_template(p))
+            .filter_map(|(p, text)| study_core::reading_log::remove_link_bullet(text, target).map(|t| (p.clone(), t)))
+            .collect();
+        let was_bookmarked = !bookmarked.is_empty();
+        for (p, text) in bookmarked {
+            self.rewrite_note(&p, text);
+        }
+        if was_bookmarked {
+            self.toast("Removed from daily note");
+        }
         self.events.push(Event::MarkRemoved { by });
         let next = self.first_ordinary_note();
         self.events.push(Event::NoteRemoved { old: path, next });

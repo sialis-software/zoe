@@ -113,7 +113,7 @@ pub fn remove_entry(log: &str, link: &str, now: &DateTime<Local>) -> Option<Stri
     let heading = day_heading(now);
     let mut in_day = false;
     let mut removed = false;
-    let kept: Vec<&str> = log
+    let mut kept: Vec<&str> = log
         .lines()
         .filter(|line| {
             if line.starts_with("## ") {
@@ -124,6 +124,18 @@ pub fn remove_entry(log: &str, link: &str, now: &DateTime<Local>) -> Option<Stri
             !gone
         })
         .collect();
+    if removed
+        && let Some(at) = kept.iter().position(|l| *l == heading)
+    {
+        // The day's last chapter taken out: the day goes with it (its heading and the space under it).
+        let end = kept[at + 1..].iter().position(|l| l.starts_with("## ")).map_or(kept.len(), |n| at + 1 + n);
+        if kept[at + 1..end].iter().all(|l| l.trim().is_empty()) {
+            kept.drain(at..end);
+            while kept.last().is_some_and(|l| l.trim().is_empty()) {
+                kept.pop();
+            }
+        }
+    }
     removed.then(|| {
         let mut text = kept.join("\n");
         text.push('\n');
@@ -139,6 +151,29 @@ pub fn remove_bullet(note: &str, item: &str) -> Option<String> {
         .lines()
         .filter(|line| {
             let gone = !removed && line.trim() == bullet;
+            removed |= gone;
+            !gone
+        })
+        .collect();
+    removed.then(|| {
+        let mut text = kept.join("\n");
+        if note.ends_with('\n') {
+            text.push('\n');
+        }
+        text
+    })
+}
+
+/// `note` without the bullet that links to the note `target` (a path with no `.md`), whatever it is
+/// called there (`- [[target]]` or `- [[target|its name]]`); `None` when it has none.
+pub fn remove_link_bullet(note: &str, target: &str) -> Option<String> {
+    let (bare, aliased) = (format!("- [[{target}]]"), format!("- [[{target}|"));
+    let mut removed = false;
+    let kept: Vec<&str> = note
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            let gone = !removed && (line == bare || (line.starts_with(&aliased) && line.ends_with("]]")));
             removed |= gone;
             !gone
         })
@@ -195,6 +230,15 @@ pub fn add_bullet(note: &str, heading: &str, item: &str, make: bool) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bullet_linking_to_a_note_goes_whatever_it_is_called() {
+        let note = "## Bookmarks\n\n- [[margins/a|John 3:3]]\n- [[margins/ab|John 3:4]]\n- [[margins/a]]\n";
+        let once = remove_link_bullet(note, "margins/a").unwrap();
+        assert_eq!(once, "## Bookmarks\n\n- [[margins/ab|John 3:4]]\n- [[margins/a]]\n");
+        assert_eq!(remove_link_bullet(&once, "margins/a").unwrap(), "## Bookmarks\n\n- [[margins/ab|John 3:4]]\n");
+        assert!(remove_link_bullet("nothing", "margins/a").is_none());
+    }
     use chrono::TimeZone;
 
     fn at(day: u32, h: u32, m: u32) -> DateTime<Local> {
@@ -276,5 +320,24 @@ mod tests {
         assert_eq!(remove_entry(&taken, "[[John 3]]", &at(12, 20, 0)), None);
         assert_eq!(remove_bullet("## Reading\n\n- [[John 3]]\n- [[John 4]]\n", "[[John 3]]").unwrap(), "## Reading\n\n- [[John 4]]\n");
         assert_eq!(remove_bullet("x\n", "[[John 3]]"), None);
+    }
+
+    #[test]
+    fn taking_back_a_days_last_chapter_takes_its_heading_with_it() {
+        let mut log = new_log("Reading log", "x");
+        for (day, link) in [(10, "[[John 3]]"), (11, "[[John 4]]"), (11, "[[John 5]]"), (12, "[[Psalm 1]]")] {
+            log = add_entry(&log, link, &at(day, 9, 0)).unwrap();
+        }
+        // The last day: its heading goes, and the log ends with the day before.
+        let last = remove_entry(&log, "[[Psalm 1]]", &at(12, 20, 0)).unwrap();
+        assert!(!last.contains("2025-10-12") && last.ends_with("- [[John 5]]\n"), "{last}");
+        // A day in the middle: the days around it stay, one blank line apart.
+        let one = remove_entry(&log, "[[John 4]]", &at(11, 20, 0)).unwrap();
+        assert!(one.contains("## 2025-10-11\n\n- [[John 5]]\n\n## 2025-10-12"), "{one}");
+        let middle = remove_entry(&one, "[[John 5]]", &at(11, 20, 0)).unwrap();
+        assert!(middle.contains("- [[John 3]]\n\n## 2025-10-12\n\n- [[Psalm 1]]\n") && !middle.contains("2025-10-11"), "{middle}");
+        // The only day: nothing but the log's own title is left.
+        let only = remove_entry(&add_entry(&new_log("Reading log", "x"), "[[John 3]]", &at(10, 9, 0)).unwrap(), "[[John 3]]", &at(10, 9, 0)).unwrap();
+        assert!(only.ends_with("# Reading log\n"), "{only}");
     }
 }

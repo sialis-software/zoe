@@ -34,6 +34,13 @@ pub enum Icon {
     History,
     /// Say it aloud.
     Speaker,
+    /// Fill the window with the text alone.
+    Expand,
+    /// Give the window its tools back.
+    Collapse,
+    /// A page with a margin either side, shown / not shown.
+    MarginsOn,
+    MarginsOff,
 }
 
 impl Icon {
@@ -57,6 +64,10 @@ impl Icon {
             Icon::Search => include_bytes!("../assets/icons/search.svg"),
             Icon::History => include_bytes!("../assets/icons/history.svg"),
             Icon::Speaker => include_bytes!("../assets/icons/speaker.svg"),
+            Icon::Expand => include_bytes!("../assets/icons/expand.svg"),
+            Icon::Collapse => include_bytes!("../assets/icons/collapse.svg"),
+            Icon::MarginsOn => include_bytes!("../assets/icons/margins-on.svg"),
+            Icon::MarginsOff => include_bytes!("../assets/icons/margins-off.svg"),
         }
     }
 
@@ -84,7 +95,7 @@ impl Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 18] = [
+    const ALL: [Icon; 22] = [
         Icon::Link,
         Icon::Quote,
         Icon::Trash,
@@ -103,6 +114,10 @@ mod tests {
         Icon::Search,
         Icon::History,
         Icon::Speaker,
+        Icon::Expand,
+        Icon::Collapse,
+        Icon::MarginsOn,
+        Icon::MarginsOff,
     ];
 
     #[test]

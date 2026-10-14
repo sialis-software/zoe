@@ -118,8 +118,6 @@ pub struct CardSpec<'a, Message> {
     /// The card belongs to the link at its anchor (a footnote marker, a Strong's word):
     /// hovering that link emphasises the card, and hovering the card lights up the link.
     pub follows_link: bool,
-    /// Not a note: the margin's own control, at the top of it (no connector, never in a stack).
-    pub header: bool,
     pub element: CardElement<'a, Message>,
 }
 
@@ -143,21 +141,23 @@ impl<'a, Message> CardElement<'a, Message> {
 
 /// Space between the text column and the card column.
 const CARD_GAP: f32 = 28.0;
+/// The same with margins on both sides: wider, so the cards do not crowd a text that has no
+/// room of its own to spare.
+const BOTH_GAP: f32 = 64.0;
+/// With margins on both sides, how far the bar at the end of a connector stands from the text.
+const HANDLE_OFFSET: f32 = 14.0;
+/// Whether the margin is drawn as a faintly different panel (off to see how it looks without).
+const SHOW_MARGIN_PANEL: bool = false;
 /// Narrowest and widest a card in the column may be.
 const CARD_MIN: f32 = 220.0;
 const CARD_MAX: f32 = 560.0;
 /// The share of the reader's width the margin takes (2 parts in 7), within those limits.
 const MARGIN_SHARE: f32 = 2.0 / 7.0;
-/// Space between the margin's panel and the cards: its left side is half of `CARD_GAP`, and
-/// the same is kept at the right, above the first card and below the last.
-const MARGIN_PAD: f32 = CARD_GAP / 2.0;
 /// Corner radius of the margin's panel.
 const MARGIN_RADIUS: f32 = 10.0;
 /// How far below the first note of a stack the marks of the others may be: about three lines of
 /// text, whatever the notes' own heights (which would regroup them as other ones came up).
 const STACK_REACH: f32 = 96.0;
-/// Height of the margin's menu button, which is all the room the menu takes in the column.
-const MENU_BUTTON: f32 = 26.0;
 /// How far what is not pointed at fades toward the background (0 is not at all).
 const FADE: f32 = 0.45;
 /// How opaque the veil over a card that is not pointed at is.
@@ -607,6 +607,8 @@ pub struct ReaderText<'a, L, Message> {
     toolbar_kind: FloatKind,
     cards: Vec<CardSpec<'a, Message>>,
     text_width: Option<f32>,
+    both_sides: bool,
+    dim_cards: bool,
     on_layout: Option<Box<dyn Fn(bool) -> Message + 'a>>,
     /// A link pressed and then dragged away: the link, and where the pointer is (in the window).
     on_link_drag: Option<Box<dyn Fn(L, Point) -> Message + 'a>>,
@@ -641,6 +643,8 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
             toolbar_kind: FloatKind::UnderSelection,
             cards: Vec::new(),
             text_width: None,
+            both_sides: false,
+            dim_cards: false,
             on_layout: None,
             on_press: None,
             on_link_menu: None,
@@ -752,6 +756,19 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
         self
     }
 
+    /// Put margins on both sides of the text (with room for them): each card goes to the side its
+    /// mark is nearer to, the two sides kept roughly even.
+    pub fn both_sides(mut self, both: bool) -> Self {
+        self.both_sides = both;
+        self
+    }
+
+    /// Veil every card, and fade its connector, until it (or its mark) is pointed at.
+    pub fn dim_cards(mut self, dim: bool) -> Self {
+        self.dim_cards = dim;
+        self
+    }
+
     /// Called with whether the margin is showing, whenever that changes (and once at first).
     pub fn on_link_drag(mut self, f: impl Fn(L, Point) -> Message + 'a) -> Self {
         self.on_link_drag = Some(Box::new(f));
@@ -801,16 +818,6 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
 }
 
 impl<L: Clone + 'static, Message> ReaderText<'_, L, Message> {
-    /// Whether the pointer is on the margin's menu (open, it is over the cards): what is under it
-    /// is then not pointed at.
-    fn on_menu(&self, state: &State<L>, bounds: Rectangle, cursor: mouse::Cursor) -> bool {
-        self.cards
-            .iter()
-            .position(|c| c.header)
-            .and_then(|h| state.cards.get(h))
-            .is_some_and(|laid| cursor.is_over(laid.absolute(bounds)))
-    }
-
     /// The layers peeking out below the top card of a stack, and its bar of arrows.
     #[allow(clippy::too_many_arguments)]
     fn draw_stack_behind(
@@ -1012,6 +1019,37 @@ fn text_layout(width: f32, text_width: Option<f32>, has_cards: bool) -> (bool, f
     };
     let card = (width * MARGIN_SHARE).clamp(CARD_MIN, CARD_MAX).min(width - base - CARD_GAP);
     (true, width - CARD_GAP - card, card)
+}
+
+/// Margins on both sides of the text, centred: the width of the left margin (its panel, the gap
+/// and the cards in it), of the text, and of a card, when there is room for the text's base column
+/// and a card of least width on each side; else none.
+pub fn text_layout_both(width: f32, text_width: Option<f32>) -> Option<(f32, f32, f32)> {
+    let base = text_width.filter(|tw| width >= tw + 2.0 * (BOTH_GAP + CARD_MIN))?;
+    let card = (width * MARGIN_SHARE * 0.7).clamp(CARD_MIN, CARD_MAX).min((width - base) / 2.0 - BOTH_GAP);
+    Some((card + BOTH_GAP, width - 2.0 * (card + BOTH_GAP), card))
+}
+
+/// Which side of the text each card goes on (true: left), given where its mark's first line is: the
+/// side the mark is nearer to, `middle` being the middle of the text. A side is not let to take
+/// much more than its share, though: the marks nearest the middle go to the other side instead.
+fn sides_by_nearness(lines: &[Option<Rectangle>], middle: f32) -> Vec<bool> {
+    // How far left of the middle each mark is (negative: right of it).
+    let offset: Vec<Option<f32>> = lines.iter().map(|l| l.map(|r| middle - (r.x + r.width / 2.0))).collect();
+    let mut left: Vec<bool> = offset.iter().map(|o| o.is_some_and(|o| o > 0.0)).collect();
+    let total = offset.iter().flatten().count();
+    let most = (total * 3).div_ceil(5).max(1);
+    for side in [true, false] {
+        let mut crowd: Vec<usize> = (0..left.len()).filter(|&i| offset[i].is_some() && left[i] == side).collect();
+        if crowd.len() <= most {
+            continue;
+        }
+        crowd.sort_by(|&a, &b| offset[a].unwrap_or(0.0).abs().total_cmp(&offset[b].unwrap_or(0.0).abs()));
+        for &i in crowd.iter().take(crowd.len() - most) {
+            left[i] = !side;
+        }
+    }
+    left
 }
 
 /// Where on its card (from the top) the connector arrives.
@@ -1258,6 +1296,12 @@ struct State<L> {
     reported_mode: Option<bool>,
     /// Right edge of the text column (where the margin starts, less the gap).
     text_right: f32,
+    /// Where the text starts: after the left margin, when there is one.
+    text_left: f32,
+    /// The space between the text and the cards.
+    gap: f32,
+    /// Whether there is a margin on the left (cards that follow a link are put there).
+    both_sides: bool,
     /// Visible area as of the last event; operations (which get no viewport) use it.
     viewport: Rectangle,
     pieces: BTreeMap<u16, Vec<Piece>>,
@@ -1296,6 +1340,9 @@ impl<L> State<L> {
             column_mode: false,
             reported_mode: None,
             text_right: 0.0,
+            text_left: 0.0,
+            gap: CARD_GAP,
+            both_sides: false,
             viewport: Rectangle::with_size(Size::ZERO),
             pieces: BTreeMap::new(),
             published: None,
@@ -1463,12 +1510,26 @@ where
 
         // A margin appears beside the text when there is room for one; otherwise the cards
         // are not laid out at all (the app floats one under a clicked mark instead).
-        let (column_mode, text_w, card_w) = text_layout(width, self.text_width, !self.cards.is_empty());
+        let has_cards = !self.cards.is_empty();
+        let (column_mode, text_left, text_w, card_w) = // (Margins asked for on both sides stay when a chapter has nothing for them: the text does not move.)
+        match self.both_sides.then(|| text_layout_both(width, self.text_width)).flatten() {
+            Some((left, text, card)) => (true, left, text, card),
+            None => {
+                let (column, text, card) = text_layout(width, self.text_width, has_cards);
+                (column, 0.0, text, card)
+            }
+        };
+        let both_sides = text_left > 0.0;
+        let gap = if both_sides { BOTH_GAP } else { CARD_GAP };
+        let pad = gap / 2.0;
+        state.gap = gap;
         state.column_mode = column_mode;
-        state.text_right = text_w;
+        state.both_sides = both_sides;
+        state.text_left = text_left;
+        state.text_right = text_left + text_w;
 
         // Cards are laid out below, once the text is, and only the ones that show.
-        let card_limits = layout::Limits::new(Size::ZERO, Size::new((card_w - MARGIN_PAD).max(1.0), f32::INFINITY));
+        let card_limits = layout::Limits::new(Size::ZERO, Size::new((card_w - pad).max(1.0), f32::INFINITY));
         let mut nodes: Vec<layout::Node> =
             if column_mode { vec![layout::Node::new(Size::ZERO); self.cards.len()] } else { Vec::new() };
         if !column_mode {
@@ -1542,7 +1603,7 @@ where
             }
 
             let laid = &mut state.laid[i];
-            laid.x = block.indent;
+            laid.x = text_left + block.indent;
             laid.y = y;
             laid.w = w;
             laid.h = laid.para.min_height();
@@ -1560,9 +1621,6 @@ where
                 .cards
                 .iter()
                 .map(|spec| {
-                    if spec.header {
-                        return None;
-                    }
                     let marker = spec.follows_link.then(|| state.link_by_slice.get(&spec.anchor).copied()).flatten().and_then(|(b, j)| {
                         let laid = state.laid.get(b)?;
                         let seg = span_segments(&laid.para, j).into_iter().next()?;
@@ -1574,8 +1632,11 @@ where
             // Notes whose cards would run into each other (marks within `STACK_REACH` of the first
             // of them, a few lines) are layered into a stack: one slot, with the top card shown.
             let at = |ci: usize| lines[ci].map_or(0.0, |l| l.y);
-            let header = self.cards.iter().position(|c| c.header);
-            let mut by_place: Vec<usize> = (0..nodes.len()).filter(|&c| !self.cards[c].header).collect();
+            let on_left: Vec<bool> = if both_sides { sides_by_nearness(&lines, text_left + text_w / 2.0) } else { vec![false; lines.len()] };
+            let mut shown: BTreeSet<u64> = BTreeSet::new();
+            state.groups.clear();
+            for left in [false, true] {
+            let mut by_place: Vec<usize> = (0..nodes.len()).filter(|&c| on_left[c] == left).collect();
             by_place.sort_by(|&a, &b| at(a).total_cmp(&at(b)).then(a.cmp(&b)));
             let mut groups: Vec<Vec<usize>> = Vec::new();
             let mut reach = f32::NEG_INFINITY;
@@ -1604,7 +1665,7 @@ where
                 })
                 .collect();
             // Only the card on top of each stack is built and laid out (and the margin's own menu).
-            for ci in tops.iter().copied().chain(header) {
+            for ci in tops.iter().copied() {
                 let spec = &mut self.cards[ci];
                 let element = spec.element.build();
                 match state.card_trees.get_mut(&spec.key) {
@@ -1617,8 +1678,7 @@ where
                     nodes[ci] = element.as_widget_mut().layout(card_tree, renderer, &card_limits);
                 }
             }
-            let shown: BTreeSet<u64> = tops.iter().copied().chain(header).map(|c| self.cards[c].key).collect();
-            state.card_trees.retain(|key, _| shown.contains(key));
+            shown.extend(tops.iter().copied().map(|c| self.cards[c].key));
             let slots: Vec<Slot> = groups
                 .iter()
                 .zip(&tops)
@@ -1633,18 +1693,16 @@ where
                 })
                 .collect();
             let mut ys = place_column(&slots, STACK_GAP);
-            // Not against the top of the panel, and below the margin's own control if it has one.
-            // (Its choice, when open, goes over the cards rather than pushing them down.)
-            let below = header.map_or(MARGIN_PAD, |_| MARGIN_PAD + MENU_BUTTON + STACK_GAP);
-            let shift = ys.iter().copied().reduce(f32::min).map_or(0.0, |top| (below - top).max(0.0));
+            // Not against the top of the panel.
+            let shift = ys.iter().copied().reduce(f32::min).map_or(0.0, |top| (pad - top).max(0.0));
             ys.iter_mut().for_each(|y| *y += shift);
-            if let Some(h) = header {
-                placed[h] = Some(Rectangle::new(Point::new(text_w + CARD_GAP, MARGIN_PAD), nodes[h].size()));
-            }
+            let card_x = text_left + text_w + gap;
             for (gi, group) in groups.iter().enumerate() {
                 let top = tops[gi];
                 let shown = nodes[top].size().height;
-                let rect = Rectangle::new(Point::new(text_w + CARD_GAP, ys[gi]), Size::new(nodes[top].size().width, shown));
+                // On the left the cards sit against the text, so the connectors have the same length either side.
+                let x = if left { text_left - gap - nodes[top].size().width } else { card_x };
+                let rect = Rectangle::new(Point::new(x, ys[gi]), Size::new(nodes[top].size().width, shown));
                 let stack = (group.len() > 1).then(|| StackBar {
                     id: id_of(group),
                     keys: group.iter().map(|&c| self.cards[c].key).collect(),
@@ -1660,7 +1718,9 @@ where
                     }
                 }
             }
-            state.groups = groups.iter().map(|g| g.iter().map(|&c| self.cards[c].key).collect()).collect();
+            state.groups.extend(groups.iter().map(|g| g.iter().map(|&c| self.cards[c].key).collect::<Vec<_>>()));
+            }
+            state.card_trees.retain(|key, _| shown.contains(key));
             anchors = lines;
         }
 
@@ -1691,7 +1751,7 @@ where
         let cards_bottom =
             state.cards.iter().map(|c| c.rect.y + c.rect.height + if c.stack.is_some() { STACK_BAR } else { 0.0 }).fold(0.0, f32::max);
         // Room below the last card too, so the panel does not end against it.
-        let y = if cards_bottom > 0.0 { y.max(cards_bottom + MARGIN_PAD) } else { y };
+        let y = if cards_bottom > 0.0 { y.max(cards_bottom + pad) } else { y };
 
         let width_limit = Size::new(width, f32::INFINITY);
         state.toolbar_node = match (self.toolbar.as_mut(), tree.children.get_mut(0)) {
@@ -1885,8 +1945,8 @@ where
         // The margin: a faintly different panel, without an edge line, alongside the text from its top to
         // its bottom, so it reads as a place even when it is empty.
         let bounds = layout.bounds();
-        if state.column_mode {
-            let edge = bounds.x + state.text_right + CARD_GAP / 2.0;
+        if SHOW_MARGIN_PANEL && state.column_mode {
+            let edge = bounds.x + state.text_right + state.gap / 2.0;
             let bottom = bounds.y + bounds.height;
             renderer.fill_quad(
                 Quad {
@@ -1899,6 +1959,19 @@ where
                 },
                 self.margin_colors.0,
             );
+            if state.both_sides {
+                renderer.fill_quad(
+                    Quad {
+                        bounds: Rectangle::new(
+                            Point::new(bounds.x, bounds.y),
+                            Size::new((state.text_left - state.gap / 2.0).max(0.0), bottom - bounds.y),
+                        ),
+                        border: iced::Border { radius: MARGIN_RADIUS.into(), ..iced::Border::default() },
+                        ..Quad::default()
+                    },
+                    self.margin_colors.0,
+                );
+            }
         }
 
         // Margin cards, with a connector from each marked line. Connectors use the mark's own
@@ -1908,8 +1981,7 @@ where
         // While something is pointed at, everything else steps back: the other connectors fade
         // toward the background (still opaque, so where they cross they do not blend), and the
         // other notes are veiled, so what is pointed at can be followed.
-        let on_menu = self.on_menu(state, bounds, cursor);
-        let lit = self.cards.iter().zip(&state.cards).any(|(spec, laid)| !spec.header && !laid.hidden && laid.is_hot(spec.key, &emphasised));
+        let lit = self.dim_cards || self.cards.iter().zip(&state.cards).any(|(spec, laid)| !laid.hidden && laid.is_hot(spec.key, &emphasised));
         let backdrop = theme.extended_palette().background.base.color;
         for hovered_pass in [false, true] {
             for (spec, laid) in self.cards.iter().zip(&state.cards) {
@@ -1921,20 +1993,21 @@ where
                 // Drawn if any of it is in view: one end may be off screen (its mark above or
                 // its note below) while the stretch between still crosses what is showing.
                 let (top, bottom) = (line.y.min(laid.rect.y), (line.y + line.height).max(laid.rect.y + CONNECTOR_CARD_OFFSET));
-                let extent = Rectangle::new(
-                    Point::new(bounds.x + laid.rect.x - CARD_GAP, bounds.y + top),
-                    Size::new(CARD_GAP + 1.0, (bottom - top).max(1.0)),
-                );
+                let on_left = state.both_sides && laid.rect.x < state.text_left;
+                // The stretch between the card and the text: on the card's left when the card is
+                // on the right, else on its right.
+                let gap_x = if on_left { bounds.x + laid.rect.x + laid.rect.width } else { bounds.x + laid.rect.x - state.gap };
+                let extent = Rectangle::new(Point::new(gap_x, bounds.y + top), Size::new(state.gap + 1.0, (bottom - top).max(1.0)));
                 if !extent.intersects(viewport) {
                     continue;
                 }
-                let weight = if hot { 2.5 } else { 1.5 };
-                let gutter = bounds.x + laid.rect.x - CARD_GAP;
+                let weight = if hot && !self.dim_cards { 2.5 } else { 1.5 };
+                let gutter = gap_x;
                 let (mid, card_mid) =
                     (bounds.y + line.y + line.height / 2.0, bounds.y + laid.rect.y + CONNECTOR_CARD_OFFSET);
                 // The elbow sits in the middle of the gap; a connector sharing its stretch with
                 // another steps aside to its own lane.
-                let elbow = gutter + CARD_GAP / 2.0 + lane_offset(laid.lane);
+                let elbow = gutter + state.gap / 2.0 + lane_offset(laid.lane);
                 let card_x = bounds.x + laid.rect.x;
                 // Rounded ends: where two segments meet at a right angle their ends overlap, which
                 // rounds the outer corner instead of leaving a stair-stepped square one.
@@ -1949,10 +2022,20 @@ where
                         ink,
                     );
                 };
-                bar(gutter + 2.0, bounds.y + line.y, 3.0, line.height);
-                bar(gutter + 2.0, mid - weight / 2.0, elbow - gutter - 2.0, weight);
-                bar(elbow - weight / 2.0, mid.min(card_mid), weight, (card_mid - mid).abs());
-                bar(elbow, card_mid - weight / 2.0, card_x - elbow, weight);
+                if on_left {
+                    // Mirrored: the mark's bar at the text's left edge, the card to its left.
+                    let handle = gutter + state.gap - HANDLE_OFFSET - 3.0;
+                    bar(handle, bounds.y + line.y, 3.0, line.height);
+                    bar(elbow, mid - weight / 2.0, handle - elbow, weight);
+                    bar(elbow - weight / 2.0, mid.min(card_mid), weight, (card_mid - mid).abs());
+                    bar(gutter, card_mid - weight / 2.0, elbow - gutter, weight);
+                } else {
+                    let handle = gutter + if state.both_sides { HANDLE_OFFSET } else { 2.0 };
+                    bar(handle, bounds.y + line.y, 3.0, line.height);
+                    bar(handle, mid - weight / 2.0, elbow - handle, weight);
+                    bar(elbow - weight / 2.0, mid.min(card_mid), weight, (card_mid - mid).abs());
+                    bar(elbow, card_mid - weight / 2.0, card_x - elbow, weight);
+                }
             }
         }
         for (spec, laid) in self.cards.iter().zip(&state.cards) {
@@ -1962,14 +2045,12 @@ where
             let abs = laid.absolute(bounds);
             if let Some(stack) = &laid.stack {
                 let dim = lit && !laid.is_hot(spec.key, &emphasised);
-                let cursor = if on_menu && !spec.header { mouse::Cursor::Unavailable } else { cursor };
                 self.draw_stack_behind(renderer, theme, viewport, bounds, abs, stack, cursor, dim);
             }
             // Only the part of a card inside what is visible is drawn: the layer's clip is its
             // own, so without this a card past the edge of the pane would spill into the next.
             let Some(visible) = abs.intersection(viewport) else { continue };
             if let (Some(card_tree), Some(element)) = (state.card_trees.get(&spec.key), spec.element.built.as_ref()) {
-                let cursor = if on_menu && !spec.header { mouse::Cursor::Unavailable } else { cursor };
                 renderer.with_layer(visible, |renderer| {
                     element.as_widget().draw(
                         card_tree,
@@ -1987,7 +2068,7 @@ where
             let edge = Rectangle::new(Point::new(abs.x - 2.0, abs.y - 2.0), Size::new(abs.width + 4.0, abs.height + 4.0));
             if let Some(clip) = edge.intersection(viewport) {
                 renderer.with_layer(clip, |renderer| {
-                    if lit && !spec.header && !laid.is_hot(spec.key, &emphasised) {
+                    if lit && !laid.is_hot(spec.key, &emphasised) {
                         // Something else is pointed at: this note steps back.
                         renderer.fill_quad(
                             Quad { bounds: abs, border: iced::Border { radius: 6.0.into(), ..iced::Border::default() }, ..Quad::default() },
@@ -1999,7 +2080,8 @@ where
                             Color::TRANSPARENT,
                         );
                     }
-                    if laid.is_hot(spec.key, &emphasised) {
+                    // (Dimmed cards just come back to normal when pointed at, with no lit edge.)
+                    if !self.dim_cards && laid.is_hot(spec.key, &emphasised) {
                         // The pointer is on the card, or on what it is about: its edge lights up.
                         renderer.fill_quad(
                             Quad {
@@ -2121,7 +2203,7 @@ where
         // Margin cards come next; whatever they use never reaches the text.
         if !self.cards.is_empty() {
             // The arrows of a stack of notes.
-            if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))) && !self.on_menu(state, bounds, cursor) {
+            if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))) {
                 let pressed = state.cards.iter().filter_map(|c| c.stack.as_ref()).find_map(|stack| {
                     let (prev, next) = stack.zones(bounds);
                     let forward = cursor.is_over(next);
@@ -2135,42 +2217,29 @@ where
                     return;
                 }
             }
-            // A press anywhere in the margin but on its menu counts as a press in the reader (it puts
-            // away what is open, like the menus).
+            // A press anywhere in the margin counts as a press in the reader (it puts away what is
+            // open, like the menus).
             if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)))
                 && cursor.is_over(bounds)
-                && !self.on_menu(state, bounds, cursor)
                 && let Some(f) = &self.on_press
             {
                 shell.publish(f());
             }
             let mut over_card = None;
             let mut over_note = None;
-            // The margin's menu comes first: when open it is over the cards, so it has the pointer
-            // before they do, and they do not see it while it is over them.
-            let header = self.cards.iter().position(|c| c.header);
-            let header_area = header.and_then(|h| state.cards.get(h)).map(|laid| laid.absolute(bounds));
-            let order: Vec<usize> = header.into_iter().chain((0..self.cards.len()).filter(|&i| Some(i) != header)).collect();
-            for ci in order {
+            for ci in 0..self.cards.len() {
                 let Some(laid) = state.cards.get(ci).cloned() else { continue };
                 let spec = &mut self.cards[ci];
                 if laid.hidden {
                     continue;
                 }
                 let abs = laid.absolute(bounds);
-                if cursor.is_over(abs) && (spec.header || !header_area.is_some_and(|area| cursor.is_over(area))) {
+                if cursor.is_over(abs) {
                     over_card = Some(spec.key);
-                    if !spec.header {
-                        over_note = Some(spec.key);
-                    }
+                    over_note = Some(spec.key);
                 }
                 let Some(card_tree) = state.card_trees.get_mut(&spec.key) else { continue };
                 let Some(element) = spec.element.built.as_mut() else { continue };
-                let cursor = if !spec.header && header_area.is_some_and(|area| cursor.is_over(area)) {
-                    mouse::Cursor::Unavailable
-                } else {
-                    cursor
-                };
                 element.as_widget_mut().update(
                     card_tree,
                     event,
@@ -2565,19 +2634,15 @@ where
         renderer: &iced::Renderer,
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State<L>>();
-        let on_menu = self.on_menu(state, layout.bounds(), cursor);
         for laid in &state.cards {
-            if let Some(stack) = laid.stack.as_ref().filter(|_| !on_menu) {
+            if let Some(stack) = laid.stack.as_ref() {
                 let (prev, next) = stack.zones(layout.bounds());
                 if cursor.is_over(prev) || cursor.is_over(next) {
                     return mouse::Interaction::Pointer;
                 }
             }
         }
-        // (The margin's menu first: when open it is over the cards.)
-        let menu_first = self.cards.iter().zip(&state.cards).filter(|(spec, _)| spec.header);
-        let the_rest = self.cards.iter().zip(&state.cards).filter(|(spec, _)| !spec.header);
-        for (spec, laid) in menu_first.chain(the_rest) {
+        for (spec, laid) in self.cards.iter().zip(&state.cards) {
             if !laid.hidden
                 && cursor.is_over(laid.absolute(layout.bounds()))
                 && let Some(card_tree) = state.card_trees.get(&spec.key)
@@ -3010,6 +3075,28 @@ mod tests {
         for w in (900..2500).step_by(37) {
             let (m, t, c) = text_layout(w as f32, Some(640.0), true);
             assert!(m && (t + CARD_GAP + c - w as f32).abs() < 0.01 && t >= 640.0 && c >= CARD_MIN, "{w}: {t} + {c}");
+        }
+    }
+
+    #[test]
+    fn cards_go_to_the_side_their_mark_is_nearer_but_not_all_to_one() {
+        let at = |x: f32| Some(Rectangle::new(Point::new(x, 0.0), Size::new(10.0, 10.0)));
+        assert_eq!(sides_by_nearness(&[at(10.0), at(500.0), at(20.0), at(480.0)], 255.0), vec![true, false, true, false]);
+        // Five marks all left of the middle: the ones nearest the middle cross over.
+        let crowded = sides_by_nearness(&[at(10.0), at(50.0), at(90.0), at(130.0), at(170.0)], 255.0);
+        assert_eq!(crowded, vec![true, true, true, false, false]);
+        assert_eq!(sides_by_nearness(&[None], 255.0), vec![false]);
+    }
+
+    #[test]
+    fn margins_on_both_sides_share_the_width_and_need_room_for_each() {
+        assert_eq!(text_layout_both(640.0 + 2.0 * (BOTH_GAP + CARD_MIN) - 1.0, Some(640.0)), None);
+        assert_eq!(text_layout_both(3000.0, None), None);
+        for w in [900.0_f32, 1100.0, 1400.0, 2000.0, 3000.0] {
+            if let Some((left, text, card)) = text_layout_both(w, Some(640.0)) {
+                assert!((left + text + BOTH_GAP + card - w).abs() < 0.01 && text >= 640.0 && card >= CARD_MIN, "{w}");
+                assert!((left - (card + BOTH_GAP)).abs() < 0.01, "the same either side");
+            }
         }
     }
 

@@ -70,6 +70,10 @@ pub struct ViewOptions {
     pub clear_token: u64,
     /// Keep the text this wide and leave the remaining width for margin cards (margins mode).
     pub text_width: Option<f32>,
+    /// Margins on both sides of the text rather than the right only.
+    pub both_sides: bool,
+    /// Every margin card is veiled until it (or its mark) is pointed at.
+    pub dim_cards: bool,
     pub show_strongs: bool,
     /// The kinds of marker in the text, each shown or not (the reader's menu).
     pub show_footnotes: bool,
@@ -240,6 +244,8 @@ pub fn chapter_view<'a, M: 'a>(
         .toolbar(toolbar)
         .cards(cards)
         .text_width(opts.text_width)
+        .both_sides(opts.both_sides)
+        .dim_cards(opts.dim_cards)
         .into()
 }
 
@@ -325,6 +331,8 @@ mod tests {
             marks: Vec::new(),
             clear_token: 0,
             text_width: None,
+            both_sides: false,
+            dim_cards: false,
             show_strongs,
             show_footnotes: true,
             show_refs: true,

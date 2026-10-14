@@ -11,7 +11,7 @@ use crate::reader::{self, Link};
 use crate::reader_text::{CanonSlice, CardElement, CardSpec, FloatKind, MarkDraw, MarkKind};
 use crate::shared::{Shared, TabId};
 use iced::widget::operation::{AbsoluteOffset, RelativeOffset, scroll_by, scroll_to, snap_to};
-use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, space, text};
+use iced::widget::{button, checkbox, column, container, pick_list, row, rule, scrollable, space, text};
 use iced::{Color, Element, Font, Length, Task, Theme, font};
 use md_editor::{Action as EditAction, Document};
 use scripture::{Book, RefRange};
@@ -41,6 +41,10 @@ fn card_body_max(sh: &Shared) -> f32 {
 /// Width of the text column. A reader wider than this plus room for cards shows a margin
 /// beside it; a narrower one has no margin and floats a card under a clicked mark instead.
 pub const TEXT_COLUMN: f32 = 640.0;
+/// The widest the text goes in reading mode.
+const READING_WIDTH: f32 = 960.0;
+/// The most a reading mode dropdown (module, book, chapter) grows to before it scrolls.
+const MENU_HEIGHT: f32 = 280.0;
 
 /// What a card opened from the text shows.
 pub enum NoteContent {
@@ -73,7 +77,6 @@ pub const FOOTNOTE_KEY: u64 = 1 << 40;
 pub const WORD_KEY: u64 = 1 << 41;
 /// Keys of the cards of the chapter's cross reference markers: this plus the marker's number.
 const CROSSREF_KEY: u64 = 1 << 43;
-const MARGIN_MENU_KEY: u64 = 1 << 42;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChapterChoice(pub Book, pub u16);
@@ -132,6 +135,8 @@ pub enum BibleMsg {
     SearchSelection,
     /// Open the search tab.
     OpenSearch,
+    /// Fill the window with this chapter's text alone.
+    ReadingMode,
     /// Mark this chapter as read today, or take the mark back.
     LogChapter,
     /// Show or put away the card with the days the chapter was read.
@@ -183,7 +188,6 @@ pub enum BibleMsg {
     /// The reader's menu (the hamburger): open or close it.
     ToggleMenu,
     /// The margin's menu, and its choice, for each kind of note, of whether it sits in the margin.
-    ToggleMarginMenu,
     SetInMargin(NoteKind, bool),
     CloseMenu,
     /// The tag box of the card being written in, and its changes.
@@ -213,6 +217,8 @@ pub enum Request {
     Search(String),
     /// The search tab, to type in.
     OpenSearch,
+    /// Show this tab's text alone, filling the window.
+    ReadingMode,
 }
 
 /// A book and chapter number.
@@ -290,8 +296,6 @@ pub struct BibleTab {
     /// Which kinds of note show in the margin, when the reader is wide enough for one; the rest
     /// pop over the text where clicked.
     pub in_margin: crate::state::MarginKinds,
-    /// The margin's own menu (the choice just above) is open.
-    pub margin_menu_open: bool,
     /// What is typed in the tag box of the card being written in.
     pub card_tag_draft: String,
     pub note_card: Option<NoteCard>,
@@ -565,7 +569,6 @@ impl BibleTab {
             show_refs: false,
             menu_open: false,
             in_margin: crate::state::MarginKinds::default(),
-            margin_menu_open: false,
             card_tag_draft: String::new(),
             note_card: None,
             words: Vec::new(),
@@ -1035,6 +1038,7 @@ impl BibleTab {
                 | BibleMsg::ToggleMarks(_)
                 | BibleMsg::ToggleFootnotes(_)
                 | BibleMsg::ToggleRefs(_)
+                | BibleMsg::SetInMargin(..)
                 | BibleMsg::MarginChanged(_)
                 | BibleMsg::AutoScroll(_)
                 | BibleMsg::Scrolled(_)
@@ -1043,18 +1047,6 @@ impl BibleTab {
         ) {
             self.menu_open = false;
             self.history_open = false;
-        }
-        // So is the margin's menu: it stays for what is done in it, and goes for anything else.
-        if !matches!(
-            message,
-            BibleMsg::ToggleMarginMenu
-                | BibleMsg::SetInMargin(..)
-                | BibleMsg::MarginChanged(_)
-                | BibleMsg::AutoScroll(_)
-                | BibleMsg::Scrolled(_)
-                | BibleMsg::SelectionChanged(None)
-        ) {
-            self.margin_menu_open = false;
         }
         let before = (self.book, self.chapter_no);
         let mut request = None;
@@ -1126,9 +1118,19 @@ impl BibleTab {
             BibleMsg::LogChapter => {
                 let now = chrono::Local::now();
                 if sh.read_on(self.book, self.chapter_no, &now) {
-                    sh.unlog_reading(self.book, self.chapter_no, &now);
+                    match sh.unlog_reading(self.book, self.chapter_no, &now) {
+                        (true, true) => sh.toast("Removed from reading log and daily note"),
+                        (true, false) => sh.toast("Removed from reading log"),
+                        (false, true) => sh.toast("Removed from daily note"),
+                        (false, false) => {}
+                    }
                 } else {
-                    let _ = sh.log_reading(self.book, self.chapter_no, &now);
+                    match sh.log_reading_in(self.book, self.chapter_no, &now) {
+                        (true, true) => sh.toast("Added to reading log and daily note"),
+                        (true, false) => sh.toast("Added to reading log"),
+                        (false, true) => sh.toast("Added to daily note"),
+                        (false, false) => {}
+                    }
                 }
                 Task::none()
             }
@@ -1142,6 +1144,10 @@ impl BibleTab {
             }
             BibleMsg::OpenSearch => {
                 request = Some(Request::OpenSearch);
+                Task::none()
+            }
+            BibleMsg::ReadingMode => {
+                request = Some(Request::ReadingMode);
                 Task::none()
             }
             BibleMsg::SearchSelection => {
@@ -1312,10 +1318,6 @@ impl BibleTab {
                 }
                 Task::none()
             }
-            BibleMsg::ToggleMarginMenu => {
-                self.margin_menu_open = !self.margin_menu_open;
-                Task::none()
-            }
             BibleMsg::SetInMargin(kind, on) => {
                 match kind {
                     NoteKind::Strongs => self.in_margin.strongs = on,
@@ -1398,8 +1400,13 @@ impl BibleTab {
 
     // ---- view ----------------------------------------------------------------------
 
+    /// The text alone, as wide as the window: no toolbar, no margin of cards.
+    pub fn reading_view<'a>(&'a self, sh: &'a Shared, margins: bool) -> Element<'a, BibleMsg> {
+        self.reader_pane(sh, Some(margins))
+    }
+
     pub fn view<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
-        let content = column![self.toolbar(sh), iced::widget::rule::horizontal(1), self.reader_pane(sh)];
+        let content = column![self.toolbar(sh), iced::widget::rule::horizontal(1), self.reader_pane(sh, None)];
         // A pop-up (the history list or the reader's menu) hangs from its button; a click anywhere
         // else puts it away. The layers are always in the tree, empty when there is no pop-up, so
         // that opening one does not rebuild the reader beneath (which would lose its scroll).
@@ -1448,6 +1455,9 @@ impl BibleTab {
                 item("Marks", self.show_marks, BibleMsg::ToggleMarks),
                 item("Footnotes", self.show_footnotes, BibleMsg::ToggleFootnotes),
                 item("References", self.show_refs, BibleMsg::ToggleRefs),
+                rule::horizontal(1),
+                self.where_notes_show(),
+                rule::horizontal(1),
                 button(text("Commentary\u{2026}").size(14)).padding([2, 0]).style(button::text).on_press(BibleMsg::OpenCommentary),
             ]
             .spacing(10),
@@ -1515,7 +1525,7 @@ impl BibleTab {
     }
 
     /// Previous and next chapter, to put at the top and bottom of the text.
-    fn chapter_links<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
+    fn chapter_links<'a>(&'a self, sh: &'a Shared, reading: bool) -> Element<'a, BibleMsg> {
         let (prev, next) = self.neighbours(sh);
         let size = sh.settings.bible_size * 0.7;
         let link = |label: String, msg: BibleMsg, target: Option<ChapterId>| {
@@ -1524,12 +1534,45 @@ impl BibleTab {
         };
         let prev_label = prev.map_or("\u{2190} Previous".to_string(), |(b, c)| format!("\u{2190} {b} {c}"));
         let next_label = next.map_or("Next \u{2192}".to_string(), |(b, c)| format!("{b} {c} \u{2192}"));
-        row![link(prev_label, BibleMsg::PrevChapter, prev), space::horizontal(), link(next_label, BibleMsg::NextChapter, next)]
+        // Reading, there is no toolbar: the module, book and chapter are chosen here, between the two.
+        let middle: Element<'a, BibleMsg> = if reading { self.quiet_pickers(sh, size) } else { space::horizontal().into() };
+        row![link(prev_label, BibleMsg::PrevChapter, prev), space::horizontal(), middle, space::horizontal(), link(next_label, BibleMsg::NextChapter, next)]
             .align_y(iced::Center)
             .into()
     }
 
-    fn toolbar<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
+    /// The module, book and chapter to read, as quiet words with no boxes (for reading mode).
+    fn quiet_pickers<'a>(&'a self, sh: &'a Shared, size: f32) -> Element<'a, BibleMsg> {
+        let (modules, books, chapters) = self.choices(sh);
+        let module = modules.iter().find(|m| m.0 == self.module).cloned();
+        let quiet = |theme: &Theme, status: pick_list::Status| {
+            let p = theme.extended_palette();
+            let lit = matches!(status, pick_list::Status::Hovered | pick_list::Status::Opened { .. });
+            let color = Color { a: if lit { 0.95 } else { 0.55 }, ..p.background.base.text };
+            pick_list::Style {
+                text_color: color,
+                placeholder_color: color,
+                handle_color: color,
+                background: Color::TRANSPARENT.into(),
+                border: iced::Border { radius: 6.0.into(), width: 0.0, color: Color::TRANSPARENT },
+            }
+        };
+        // A menu's height is fixed rather than a most, so it is worked out from how many options
+        // there are (a row is the text's line plus the picker's padding, nothing more), up to a limit.
+        let height = |options: usize| Length::Fixed((options as f32 * (size * 1.3 + 4.0)).min(MENU_HEIGHT));
+        let (m, b, c) = (height(modules.len()), height(books.len()), height(chapters.len()));
+        row![
+            pick_list(modules, module, BibleMsg::PickModule).text_size(size).padding([2, 6]).menu_height(m).style(quiet),
+            pick_list(books, Some(BookChoice(self.book)), BibleMsg::PickBook).text_size(size).padding([2, 6]).menu_height(b).style(quiet),
+            pick_list(chapters, Some(ChapterChoice(self.book, self.chapter_no)), BibleMsg::PickChapter).text_size(size).padding([2, 6]).menu_height(c).style(quiet),
+        ]
+        .spacing(16)
+        .align_y(iced::Center)
+        .into()
+    }
+
+    /// What the module, book and chapter pickers offer.
+    fn choices(&self, sh: &Shared) -> (Vec<ModuleChoice>, Vec<BookChoice>, Vec<ChapterChoice>) {
         let available = sh.backend.available_chapters(&self.module);
         let mut books: Vec<BookChoice> = Vec::new();
         for (b, _) in &available {
@@ -1537,14 +1580,14 @@ impl BibleTab {
                 books.push(BookChoice(*b));
             }
         }
-        let chapters: Vec<ChapterChoice> = available
-            .into_iter()
-            .filter(|(b, _)| *b == self.book)
-            .map(|(b, c)| ChapterChoice(b, c))
-            .collect();
+        let chapters = available.into_iter().filter(|(b, _)| *b == self.book).map(|(b, c)| ChapterChoice(b, c)).collect();
+        let modules = sh.backend.modules().into_iter().map(|m| ModuleChoice(m.id, m.abbreviation)).collect();
+        (modules, books, chapters)
+    }
+
+    fn toolbar<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
+        let (modules, books, chapters) = self.choices(sh);
         let current = ChapterChoice(self.book, self.chapter_no);
-        let modules: Vec<ModuleChoice> =
-            sh.backend.modules().into_iter().map(|m| ModuleChoice(m.id, m.abbreviation)).collect();
         let module = modules.iter().find(|m| m.0 == self.module).cloned();
         let menu = button(container(crate::icons::Icon::Menu.view(18.0)).center(Length::Fill))
             .width(31)
@@ -1558,6 +1601,12 @@ impl BibleTab {
             .padding(0)
             .style(button::secondary)
             .on_press(BibleMsg::OpenSearch);
+        let reading = button(container(crate::icons::Icon::Expand.view(18.0)).center(Length::Fill))
+            .width(31)
+            .height(31)
+            .padding(0)
+            .style(button::secondary)
+            .on_press(BibleMsg::ReadingMode);
         let arrow = |icon: crate::icons::Icon, on: bool, msg: BibleMsg| {
             let b = button(container(icon.view(18.0)).center(Length::Fill)).width(31).height(31).padding(0).style(button::secondary);
             if on { b.on_press(msg) } else { b }
@@ -1577,7 +1626,7 @@ impl BibleTab {
             pick_list(books, Some(BookChoice(self.book)), BibleMsg::PickBook),
             pick_list(chapters, Some(current), BibleMsg::PickChapter),
             space::horizontal(),
-            row![search, menu].spacing(4),
+            row![reading, search, menu].spacing(4),
         ]
         .spacing(12)
         .align_y(iced::Center);
@@ -1594,6 +1643,8 @@ impl BibleTab {
             marks: self.mark_draws(sh),
             clear_token: self.clear_token,
             text_width: Some(TEXT_COLUMN),
+            both_sides: false,
+            dim_cards: false,
             show_strongs: self.show_strongs,
             show_footnotes: self.show_footnotes,
             show_refs: self.show_refs,
@@ -1624,7 +1675,6 @@ impl BibleTab {
                 color: hex_color(mark.shown_color(), 1.0).unwrap_or(Color::WHITE),
                 pinned: writing,
                 follows_link: false,
-                header: false,
                 element: CardElement::new(move || self.card_view(sh, index, false)),
             });
         }
@@ -1645,7 +1695,6 @@ impl BibleTab {
                     color,
                     pinned: false,
                     follows_link: true,
-                        header: false,
                     element: {
                         let text = note.text.clone();
                         CardElement::new(move || reference_card(sh, "Footnote", footnote_body(sh, &text, color), false, false, None))
@@ -1669,7 +1718,6 @@ impl BibleTab {
                     color,
                     pinned: false,
                     follows_link: true,
-                        header: false,
                     element: {
                         let refs = marker.refs.clone();
                         CardElement::new(move || reference_card(sh, "References", self.reference_list(sh, &refs), false, false, None))
@@ -1688,7 +1736,6 @@ impl BibleTab {
                     color,
                     pinned: false,
                     follows_link: true,
-                    header: false,
                     element: CardElement::new(move || {
                         reference_card(
                             sh,
@@ -1701,18 +1748,6 @@ impl BibleTab {
                     }),
                 });
             }
-        }
-        // The margin's own menu, at the top of it, once there is something to put in one.
-        {
-            out.push(CardSpec {
-                key: MARGIN_MENU_KEY,
-                anchor: CanonSlice { verse: 1, start: 0, end: 0 },
-                color: Color::TRANSPARENT,
-                pinned: false,
-                follows_link: false,
-                header: true,
-                element: CardElement::new(move || self.margin_menu()),
-            });
         }
         out
     }
@@ -1760,35 +1795,21 @@ impl BibleTab {
         out.into()
     }
 
-    /// The button at the top of the margin and, when open, its choice.
-    fn margin_menu<'a>(&self) -> Element<'a, BibleMsg> {
-        let button = button(container(crate::icons::Icon::Menu.view(16.0)).center(Length::Fill))
-            .width(26)
-            .height(26)
-            .padding(0)
-            .style(button::secondary)
-            .on_press(BibleMsg::ToggleMarginMenu);
-        let mut column = column![row![space::horizontal(), button]].spacing(4).width(Length::Fill);
-        if self.margin_menu_open {
-            column = column.push(
-                container(self.where_notes_show()).padding(12).width(Length::Fill).style(crate::popup_style),
-            );
-        }
-        column.into()
-    }
-
-    /// The same list as the reader's menu, but of which kinds of note sit in the margin: the
-    /// reader's menu says whether a kind shows at all, this says where its cards go.
+    /// The menu's section of which kinds of note sit in the margin: the checkboxes above say
+    /// whether a kind shows at all, this says where its cards go.
     fn where_notes_show<'a>(&self) -> Element<'a, BibleMsg> {
-        let item = |label: &'static str, on: bool, kind: NoteKind| {
-            checkbox(on).label(label).on_toggle(move |on| BibleMsg::SetInMargin(kind, on)).size(16).text_size(14)
+        // A kind that is not shown has nothing to put in the margin: its box is empty and cannot
+        // be changed (what was chosen is kept, for when the kind is shown again).
+        let item = |label: &'static str, shown: bool, in_margin: bool, kind: NoteKind| {
+            let box_ = checkbox(shown && in_margin).label(label).size(16).text_size(14);
+            if shown { box_.on_toggle(move |on| BibleMsg::SetInMargin(kind, on)) } else { box_ }
         };
         column![
-            text("In the margin").size(12).style(text::secondary),
-            item("Strong's numbers", self.in_margin.strongs, NoteKind::Strongs),
-            item("Marks", self.in_margin.marks, NoteKind::Marks),
-            item("Footnotes", self.in_margin.footnotes, NoteKind::Footnotes),
-            item("References", self.in_margin.refs, NoteKind::Refs),
+            text("Margin").size(12).style(text::secondary),
+            item("Strong's numbers in the margin", self.show_strongs, self.in_margin.strongs, NoteKind::Strongs),
+            item("Marks in the margin", self.show_marks, self.in_margin.marks, NoteKind::Marks),
+            item("Footnotes in the margin", self.show_footnotes, self.in_margin.footnotes, NoteKind::Footnotes),
+            item("References in the margin", self.show_refs, self.in_margin.refs, NoteKind::Refs),
         ]
         .spacing(10)
         .into()
@@ -1978,12 +1999,46 @@ impl BibleTab {
         self.text_selection.is_some().then(|| (FloatKind::UnderSelection, pen_toolbar(sh, self.selection_has_backlinks(sh))))
     }
 
-    fn reader_pane<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
+    fn reader_pane<'a>(&'a self, sh: &'a Shared, reading: Option<bool>) -> Element<'a, BibleMsg> {
+        if reading == Some(true) {
+            // With margins either side the title and buttons keep to the text between them, which
+            // takes its place from the width there is.
+            iced::widget::responsive(move |size| self.reader_page(sh, reading, Some(size.width))).into()
+        } else {
+            self.reader_page(sh, reading, None)
+        }
+    }
+
+    /// The chapter's page. `width` is the window's, when the margins either side need it.
+    fn reader_page<'a>(&'a self, sh: &'a Shared, reading: Option<bool>, width: Option<f32>) -> Element<'a, BibleMsg> {
+        // How far in from each side what is not in the text itself (title, links) goes.
+        let mut inset = iced::Padding::ZERO;
         let body: Element<'_, BibleMsg> = match &self.chapter {
             Ok(chapter) => {
                 // The toolbar is only offered while some text is selected; the reader floats
-                // it under that selection.
-                reader::chapter_view(chapter, &self.view_options(sh), self.floating(sh), self.cards(sh), reader_message)
+                // it under that selection. Reading, there are no cards: the text takes the width.
+                let mut options = self.view_options(sh);
+                let cards = match reading {
+                    // Reading with margins: the notes and reference material either side of the
+                    // text, without the margin's own menu (that is for outside reading mode).
+                    Some(true) => {
+                        options.both_sides = true;
+                        options.dim_cards = true;
+                        let cards = self.cards(sh);
+                        // (The page is padded 32 either side of the widget.)
+                        let room = width.map(|w| w - 64.0);
+                        if let Some((left, text, _)) = room.and_then(|w| crate::reader_text::text_layout_both(w, options.text_width)) {
+                            inset = iced::Padding { left, right: room.unwrap_or(0.0) - left - text, ..iced::Padding::ZERO };
+                        }
+                        cards
+                    }
+                    Some(false) => {
+                        options.text_width = None;
+                        Vec::new()
+                    }
+                    None => self.cards(sh),
+                };
+                reader::chapter_view(chapter, &options, self.floating(sh), cards, reader_message)
             }
             Err(_) if sh.backend.modules().iter().all(|m| m.id != self.module) => text("This module is not installed. Add modules in Modules, or pick another above.").style(text::secondary).into(),
             Err(e) => text(e.clone()).into(),
@@ -1991,7 +2046,13 @@ impl BibleTab {
         let bold = Font { weight: font::Weight::Bold, ..sh.settings.text_font() };
         let title = text(format!("{} {}", self.book, self.chapter_no)).size(sh.settings.bible_size * 1.6).font(bold);
 
-        let scroller = scrollable(container(column![self.chapter_links(sh), title, body, self.chapter_links(sh), self.log_button(sh), space::vertical().height(20)].spacing(16)).padding(32).width(Length::Fill))
+        let inside = |e: Element<'a, BibleMsg>| -> Element<'a, BibleMsg> { container(e).padding(inset).width(Length::Fill).into() };
+        let page = container(column![inside(self.chapter_links(sh, reading.is_some())), inside(title.into()), body, inside(self.chapter_links(sh, reading.is_some())), inside(self.log_button(sh)), space::vertical().height(20)].spacing(16))
+            .padding(32)
+            .width(Length::Fill);
+        // Reading, the page is wide but not without end: a line across a whole screen is hard to follow.
+        let page = if reading == Some(false) { container(page.max_width(READING_WIDTH)).center_x(Length::Fill) } else { page };
+        let scroller = scrollable(page)
             .id(self.reader_id())
             .on_scroll(|v| BibleMsg::Scrolled(v.absolute_offset().y))
             .height(Length::Fill);
