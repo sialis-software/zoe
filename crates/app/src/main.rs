@@ -24,6 +24,8 @@ mod opening;
 mod palette;
 mod panes;
 mod persist;
+mod plan_tab;
+mod plans_window;
 mod reader;
 mod reader_cards;
 mod reader_text;
@@ -38,6 +40,7 @@ mod workspace;
 use backlinks_tab::{BacklinksMsg, BacklinksTab, Target};
 use bible_tab::{BibleMsg, BibleTab};
 use commentary_tab::{CommentaryMsg, CommentaryTab};
+use plan_tab::{PlanMsg, PlanTab};
 use dict_tab::{DictMsg, DictTab};
 use drag::{Drag, Over, Payload, Pressed, Zone};
 use iced::widget::operation::{AbsoluteOffset, RelativeOffset, scroll_to, snap_to};
@@ -79,6 +82,8 @@ enum Tab {
     Commentary(Box<CommentaryTab>),
     /// The notes that link to a passage.
     Backlinks(Box<BacklinksTab>),
+    /// The plans, reading plans and devotionals, read a day at a time.
+    Plan(Box<PlanTab>),
 }
 
 /// A column of tabs, one of them showing.
@@ -183,6 +188,7 @@ enum Choice {
     Commentary,
     Search,
     Note,
+    Plans,
 }
 
 /// A chapter being looked at, and since when.
@@ -233,6 +239,11 @@ struct App {
     /// The module manager's window while it is open, and what it shows.
     manager_window: Option<iced::window::Id>,
     manager: module_manager::Manager,
+    /// The plans window while it is open, and what it shows.
+    plans_window: Option<iced::window::Id>,
+    plans: plans_window::Plans,
+    /// The plans and how far each has got, made again after each message while a plan tab is open.
+    plan_cache: Vec<plans_window::Entry>,
     /// The layouts panel, while it is open.
     panel: Option<Panel>,
     /// The tag typed for a new pen, and the color it will have (an index into `state::PEN_COLORS`).
@@ -301,6 +312,7 @@ enum Message {
     Note(TabId, NoteMsg),
     Dict(TabId, DictMsg),
     Backlinks(TabId, BacklinksMsg),
+    Plan(TabId, PlanMsg),
     Commentary(TabId, CommentaryMsg),
     Search(TabId, SearchMsg),
     /// Open a search tab (or bring the one there is forward), ready to type in.
@@ -344,6 +356,7 @@ enum Message {
     Vault(vault_setup::VaultMsg),
     Modules(module_folders::ModulesMsg),
     Manager(module_manager::ManagerMsg),
+    Plans(plans_window::PlansMsg),
     /// Escape: put away the card that is open.
     EscapeCard,
     /// Ask for a name to save the workspace as a layout under.
@@ -463,6 +476,9 @@ impl App {
             settings_window: None,
             manager_window: None,
             manager: module_manager::Manager::new(),
+            plans_window: None,
+            plans: plans_window::Plans::default(),
+            plan_cache: Vec::new(),
             panel: None,
             pen_draft: String::new(),
             pen_color: state::DEFAULT_PEN_COLOR,
@@ -566,6 +582,7 @@ impl App {
             Tab::Commentary(t) => t.id,
             Tab::Search(t) => t.id,
             Tab::Backlinks(t) => t.id,
+            Tab::Plan(t) => t.id,
         }
     }
 
@@ -580,7 +597,7 @@ impl App {
             Tab::Bible(_) => self.last_bible = Some(id),
             Tab::Note(_) => self.last_note = Some(id),
             Tab::Dict(_) => self.last_dict = Some(id),
-            Tab::Blank(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) => {}
+            Tab::Blank(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) | Tab::Plan(_) => {}
         }
         self.tabs.insert(id, tab);
         let pane = pane.min(self.panes.len() - 1);
@@ -809,9 +826,62 @@ impl App {
         Task::none()
     }
 
+    /// Make the plans and their progress again, if a plan tab is there to show them.
+    fn refresh_plans(&mut self) {
+        if self.tabs.values().any(|t| matches!(t, Tab::Plan(_))) {
+            self.plan_cache = plans_window::entries_of(&self.sh);
+        }
+    }
+
+    /// Show the plan tab (making one in another pane if there is none), at a plan and a day, or at
+    /// the list of plans.
+    fn show_plans(&mut self, select: Option<(String, Option<usize>)>) -> TabId {
+        let existing = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Plan(_)).then_some(*id));
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let from_pane = self.pane_index(self.focus).unwrap_or(self.panes.len() - 1);
+                let pane = self.target_pane(from_pane, Dest::OtherPane);
+                let id = self.take_id();
+                self.add_tab(pane, Tab::Plan(Box::new(PlanTab::new(id))))
+            }
+        };
+        self.activate(id);
+        self.plan_cache = plans_window::entries_of(&self.sh);
+        let entries = std::mem::take(&mut self.plan_cache);
+        if let Some(Tab::Plan(tab)) = self.tabs.get_mut(&id) {
+            match select {
+                Some((key, day)) => tab.update(&self.sh, &entries, PlanMsg::Select(key, day)),
+                None if tab.plan.is_none() => tab.update(&self.sh, &entries, PlanMsg::Back),
+                None => {}
+            }
+        }
+        self.plan_cache = entries;
+        id
+    }
+
+    /// Show a note of the library in the plan tab, at its day; false if it is no plan's.
+    fn show_plan_note(&mut self, path: &str) -> Option<TabId> {
+        let entries = plans_window::entries_of(&self.sh);
+        let found = entries.iter().find_map(|e| {
+            if let Some(i) = e.plan.days.iter().position(|d| d.note.as_deref() == Some(path)) {
+                Some((e.key(), Some(i)))
+            } else {
+                (e.plan.manifest.as_deref() == Some(path)).then(|| (e.key(), None))
+            }
+        })?;
+        Some(self.show_plans(Some(found)))
+    }
+
     /// Show a note in a note tab: the one already holding it, else the one last used (which
     /// follows the link), else a new one in the last pane.
     fn show_note(&mut self, path: String) -> Option<TabId> {
+        // The library's notes are plans' days: they are read in the plan tab.
+        if shared::is_library(&path)
+            && let Some(id) = self.show_plan_note(&path)
+        {
+            return Some(id);
+        }
         let holding = self.tabs.iter().find_map(|(id, t)| match t {
             Tab::Note(n) if n.path == path => Some(*id),
             _ => None,
@@ -864,6 +934,7 @@ impl App {
                 let tab = BibleTab::started(id, &self.sh, module, near.and_then(|n| self.bible_tab(n)));
                 Tab::Bible(Box::new(tab))
             }
+            Choice::Plans => Tab::Plan(Box::new(PlanTab::new(id))),
             Choice::Note => Tab::Note(Box::new(NoteTab::new(id, &self.sh, self.sh.first_ordinary_note()))),
             Choice::Commentary => {
                 let module = self.first_commentary();
@@ -887,6 +958,7 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        self.refresh_plans();
         self.settle();
         self.sh.save();
         self.note_session();
@@ -933,6 +1005,7 @@ impl App {
             Tab::Search(t) => to(t.scroll_id(), t.scroll),
             Tab::Dict(t) => to(t.scroll_id(), t.scroll),
             Tab::Backlinks(t) => to(t.scroll_id(), t.scroll),
+            Tab::Plan(t) => to(t.editor_id(), t.scroll),
             Tab::Blank(_) => None,
         }))
     }
@@ -1018,7 +1091,7 @@ impl App {
                     t.margin_menu_open = false;
                     t.history_open = false;
                 }
-                Tab::Blank(_) | Tab::Dict(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) => {}
+                Tab::Blank(_) | Tab::Dict(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) | Tab::Plan(_) => {}
             }
         }
         match message {
@@ -1182,12 +1255,45 @@ impl App {
                     return Task::none();
                 }
                 // A link in the notes shows its verse in the reader.
+                if let CommentaryMsg::Link(study_core::markdown::LinkTarget::Web(url)) = &msg {
+                    self.open_web(url);
+                    return Task::none();
+                }
                 if let CommentaryMsg::Link(study_core::markdown::LinkTarget::Verse { range, .. }) = &msg {
                     let dest = Dest::from_modifiers(self.modifiers);
                     return self.open_verse(id, *range, dest);
                 }
                 if let Some(Tab::Commentary(tab)) = self.tabs.get_mut(&id) {
                     tab.update(&mut self.sh, msg);
+                }
+                Task::none()
+            }
+            Message::Plan(id, msg) => {
+                self.touch(id);
+                match msg {
+                    PlanMsg::App(m) => return self.plans_message(m),
+                    PlanMsg::Link(study_core::markdown::LinkTarget::Verse { range, .. }) => {
+                        let dest = Dest::from_modifiers(self.modifiers);
+                        return self.open_verse(id, range, dest);
+                    }
+                    PlanMsg::Link(study_core::markdown::LinkTarget::Web(url)) => {
+                        self.open_web(&url);
+                        return Task::none();
+                    }
+                    PlanMsg::Link(study_core::markdown::LinkTarget::Note(name)) => {
+                        let name = name.split_once('#').map_or(name.as_str(), |(n, _)| n).to_string();
+                        if let Some(path) = study_core::markdown::resolve_note(&self.sh.note_paths(), &name).cloned() {
+                            self.show_note(path);
+                        }
+                        return Task::none();
+                    }
+                    msg => {
+                        let entries = std::mem::take(&mut self.plan_cache);
+                        if let Some(Tab::Plan(tab)) = self.tabs.get_mut(&id) {
+                            tab.update(&self.sh, &entries, msg);
+                        }
+                        self.plan_cache = entries;
+                    }
                 }
                 Task::none()
             }
@@ -1404,6 +1510,7 @@ impl App {
             Message::Vault(message) => self.vault_message(message),
             Message::Modules(message) => self.modules_message(message),
             Message::Manager(message) => self.manager_message(message),
+            Message::Plans(message) => self.plans_message(message),
             Message::EscapeCard => {
                 if self.setup.is_some() {
                     self.setup = None;
@@ -1476,6 +1583,9 @@ impl App {
                 }
                 if self.manager_window == Some(id) {
                     self.manager_window = None;
+                }
+                if self.plans_window == Some(id) {
+                    self.plans_window = None;
                 }
                 iced::window::close(id)
             }
@@ -1631,6 +1741,11 @@ impl App {
                 tab.show_in_reader(&mut self.sh, *range);
                 Some(Tab::Bible(Box::new(tab)))
             }
+            // An address is for another program, not a tab.
+            Spec::Web(url) => {
+                self.open_web(url);
+                None
+            }
             Spec::Note(name) => match resolve_note(&self.sh.note_paths(), name).cloned() {
                 Some(path) => Some(self.new_note(path)),
                 None => {
@@ -1713,9 +1828,20 @@ impl App {
         last.filter(|m| modules.iter().any(|i| i.id == *m && i.has_strongs)).or_else(|| modules.into_iter().find(|m| m.has_strongs).map(|m| m.id))
     }
 
+    /// Open an address in the browser (or the mail program), and say if that was not possible.
+    fn open_web(&mut self, url: &str) {
+        if !native::open_external(url) {
+            self.sh.toast(format!("Could not open {url}"));
+        }
+    }
+
     fn open_spec(&mut self, from: TabId, spec: Spec, dest: Dest) -> Task<Message> {
         match spec {
             Spec::Verse { range, .. } => self.open_verse(from, range, dest),
+            Spec::Web(url) => {
+                self.open_web(&url);
+                Task::none()
+            }
             Spec::Note(name) => {
                 self.open_note_link(from, &name, dest);
                 Task::none()
@@ -1922,6 +2048,8 @@ impl App {
             "Settings".into()
         } else if Some(window) == self.manager_window {
             "Manage modules".into()
+        } else if Some(window) == self.plans_window {
+            "Plans".into()
         } else {
             "Zoe".into()
         }
@@ -1932,6 +2060,8 @@ impl App {
             self.settings_panel()
         } else if Some(window) == self.manager_window {
             self.manager_panel()
+        } else if Some(window) == self.plans_window {
+            self.plans_panel()
         } else {
             self.view()
         }
@@ -2360,7 +2490,8 @@ impl App {
         };
         let settings = button(text("Settings").size(13)).padding([2, 8]).style(button::text).on_press(Message::OpenSettings);
         let modules = button(text("Modules").size(13)).padding([2, 8]).style(button::text).on_press(Message::Manager(module_manager::ManagerMsg::Open));
-        bar = bar.push(row![tool("Layouts", Panel::Layouts), modules, settings].spacing(4));
+        let plans = button(text("Plans").size(13)).padding([2, 8]).style(button::text).on_press(Message::Plans(plans_window::PlansMsg::Open));
+        bar = bar.push(row![tool("Layouts", Panel::Layouts), plans, modules, settings].spacing(4));
         container(bar).padding([6, 16]).into()
     }
 
@@ -2387,6 +2518,10 @@ impl App {
             Some(Tab::Backlinks(tab)) => {
                 let id = tab.id;
                 tab.view(&self.sh).map(move |m| Message::Backlinks(id, m))
+            }
+            Some(Tab::Plan(tab)) => {
+                let id = tab.id;
+                tab.view(&self.sh, &self.plan_cache, self.plans.confirm_remove.as_ref()).map(move |m| Message::Plan(id, m))
             }
             Some(Tab::Note(tab)) => {
                 let id = tab.id;
@@ -2475,6 +2610,7 @@ impl App {
                 Some(Tab::Commentary(t)) => t.title(&self.sh),
                 Some(Tab::Search(t)) => t.title(&self.sh),
                 Some(Tab::Backlinks(t)) => t.title(&self.sh),
+                Some(Tab::Plan(t)) => t.title(&self.plan_cache),
                 _ => "New tab".to_string(),
             },
             Payload::Link(spec) => spec.label(),
@@ -2564,6 +2700,7 @@ impl App {
                     kind("Dictionary", "Look up a Strong's number or a word.", Choice::Dict, has_dictionary),
                     kind("Commentary", "Read a commentary, or write your own.", Choice::Commentary, true),
                     kind("Search", "Find words in the Bible.", Choice::Search, has_bible),
+                    kind("Plans", "Follow a reading plan or a devotional.", Choice::Plans, true),
                     kind("Notes", "Write and read your notes.", Choice::Note, true),
                 ]
                 .spacing(8),
@@ -2593,6 +2730,7 @@ impl App {
                 Tab::Commentary(t) => t.title(&self.sh),
                 Tab::Search(t) => t.title(&self.sh),
                 Tab::Backlinks(t) => t.title(&self.sh),
+                Tab::Plan(t) => t.title(&self.plan_cache),
             };
             let title: String = if title.chars().count() > 24 {
                 title.chars().take(23).chain(['…']).collect()
@@ -4202,6 +4340,46 @@ mod tests {
         let id = app.bid();
         let _ = app.update(Message::Bible(id, BibleMsg::Speak("hello".into())));
         assert!(app.sh.toast.as_ref().is_some_and(|t| t.text.contains("no Greek or Hebrew")));
+    }
+
+    #[test]
+    fn a_note_of_the_library_is_read_selected_and_linked_to_but_not_written_in() {
+        let mut app = App::new();
+        let path = "library/Morning and Evening/01-01.md";
+        let text = "---\ntype: plan-day\n---\n# January 1\n\nIsrael's weary wanderings.\n";
+        app.sh.notes.insert(path.into(), text.into());
+        let id = app.nid();
+        app.open_note(path.into());
+        assert!(app.note().read_only());
+        // Typing, pasting, deleting, bold, tags, properties, renaming and deleting do nothing.
+        let at = app.note().doc.source().len();
+        let _ = app.update(Message::Note(id, NoteMsg::Action(EditAction::SetCaret { offset: at, extend: false })));
+        for action in [EditAction::Insert("x".into()), EditAction::Paste("y".into()), EditAction::Backspace, EditAction::Newline, EditAction::Wrap(md_editor::Wrap::Bold), EditAction::Undo] {
+            let _ = app.update(Message::Note(id, NoteMsg::Action(action)));
+        }
+        for message in [NoteMsg::AddTag, NoteMsg::TagDraft("t".into()), NoteMsg::AddProperties, NoteMsg::StartRename, NoteMsg::AskDelete, NoteMsg::ConfirmDelete, NoteMsg::ToggleProps] {
+            let _ = app.update(Message::Note(id, message));
+        }
+        assert_eq!(app.note().doc.source(), text);
+        assert_eq!(app.sh.notes[path], text);
+        assert!(app.note().renaming.is_none() && !app.note().confirm_delete);
+        // Selecting works, and the link menu and copy link are there.
+        let _ = app.update(Message::Note(id, NoteMsg::Action(EditAction::SelectAll)));
+        assert!(app.note().doc.selected_text().is_some());
+        let _ = app.update(Message::Note(id, NoteMsg::CopyLink));
+        assert!(app.sh.toast.as_ref().is_some_and(|t| t.text.contains("[[")), "linked to like any note");
+        // An ordinary note is written in as ever.
+        app.open_note("notes/Nicodemus.md".into());
+        assert!(!app.note().read_only());
+        let _ = app.update(Message::Note(id, NoteMsg::Action(EditAction::SelectAll)));
+        let _ = app.update(Message::Note(id, NoteMsg::Action(EditAction::Insert("changed".into()))));
+        assert!(app.note().doc.source().ends_with("changed"), "{}", app.note().doc.source());
+        // The menu of a library note has no Rename or Delete.
+        app.open_note(path.into());
+        let mut h = Harness::new(app);
+        let _ = h.app.update(Message::Note(id, NoteMsg::ToggleMenu));
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.center_of("Copy link").is_some() && h.center_of("Rename").is_none() && h.center_of("Delete").is_none());
     }
 
     #[test]
@@ -5920,6 +6098,37 @@ mod tests {
             let _ = h.app.update(Message::TabPressed(reader));
             frames(&mut h);
         }
+        if let Ok(which) = std::env::var("SNAP_PLANS") {
+            let today = chrono::Local::now().date_naive();
+            let start = (today - chrono::Duration::days(2)).format("%Y-%m-%d").to_string();
+            let gospels = format!("---\ntype: reading-plan\nname: The Gospels in 30 days\nstart: {start}\n---\n\n## Day 1\n\n- Matthew 1-2\n\n## Day 2\n\n- Matthew 3-4\n\n## Day 3 — Sermon on the Mount\n\n- Matthew 5\n\n## Day 4\n\n- Matthew 6\n");
+            h.app.sh.notes.insert("library/Plans/Gospels.md".into(), gospels);
+            h.app.sh.notes.insert("library/Plans/Psalms.md".into(), "---\ntype: reading-plan\nname: Psalms in a month\n---\n\n## Day 1\n\n- Psalm 1-5\n".into());
+            let m = Book::from_osis("Matt").unwrap();
+            let _ = h.app.sh.log_reading(m, 1, &(chrono::Local::now() - chrono::Duration::days(1)));
+            let _ = h.app.sh.log_reading(m, 2, &(chrono::Local::now() - chrono::Duration::days(1)));
+            let _ = h.app.sh.log_reading(m, 3, &chrono::Local::now());
+            if which == "window" {
+                h.app.plans_window = Some(iced::window::Id::unique());
+                h.app.plans.devotionals = vec![("SME".into(), "C. H. Spurgeon's Morning and Evening: Daily Readings".into())];
+            }
+            h.size = if which == "window" { Size::new(620.0, 660.0) } else { Size::new(900.0, 640.0) };
+            let first = match which.as_str() {
+                "detail" => Some(("library/Plans/Gospels.md".to_string(), None)),
+                "day" => {
+                    let plan = study_core::plan::Plan::parse(h.app.sh.notes.get("library/Plans/Gospels.md").map_or("", String::as_str));
+                    h.app.sh.notes.remove("library/Plans/Gospels.md");
+                    let files = plan.to_files();
+                    let manifest = files[0].0.clone();
+                    for (path, text) in files {
+                        h.app.sh.notes.insert(path, text);
+                    }
+                    Some((manifest, Some(0)))
+                }
+                _ => None,
+            };
+            let _ = h.app.show_plans(first);
+        }
         if let Ok(words) = std::env::var("SNAP_SEARCH") {
             let home = tempfile::tempdir().unwrap();
             h.app = live_app(home.path()).expect("real modules");
@@ -6030,7 +6239,7 @@ mod tests {
             h.click_scan(|a| a.bible().text_selection.is_some());
         }
         let theme = h.app.theme();
-        let shown = match h.app.settings_window {
+        let shown = match h.app.settings_window.or(h.app.plans_window) {
             Some(id) => h.app.window_view(id),
             None => h.app.view(),
         };

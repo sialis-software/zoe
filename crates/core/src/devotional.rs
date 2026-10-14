@@ -1,12 +1,14 @@
-//! The markdown standard for a daily devotional (docs/08): one file for each day, in the vault at
-//! `library/<Work>/<MM-DD>.md`, made from the OSIS entries a SWORD devotional keeps (`MM.DD`).
+//! A daily devotional as a calendar plan (docs/08, docs/09): the folder `library/<Work>/` holds a
+//! manifest note and one note for each day of the year, `library/<Work>/<MM-DD>.md`, made from the OSIS
+//! entries a SWORD devotional keeps (`MM.DD`).
 //!
 //! ```text
 //! ---
-//! type: devotional
-//! work: Morning and Evening
+//! type: plan-day
+//! plan: Morning and Evening
 //! date: 01-01
-//! tags: [devotional]
+//! readings: [Joshua 5:12, Song of Solomon 1:4]
+//! tags: [plan-day]
 //! ---
 //! # January 1
 //!
@@ -18,6 +20,7 @@
 //! ```
 
 use crate::commentary::{self, Paragraph, markdown, paragraphs};
+use crate::plan::{DayKey, Kind, Plan, day_front};
 use scripture::RefRange;
 
 /// One day of a devotional, ready to be written into the vault.
@@ -62,7 +65,7 @@ pub fn folder_name(work: &str) -> String {
 }
 
 /// A value for frontmatter, quoted when it would not read back as it is.
-fn scalar(value: &str) -> String {
+pub(crate) fn scalar(value: &str) -> String {
     let plain = !value.is_empty()
         && !value.starts_with(['"', '\'', '[', '{', '#', '&', '*', '!', '|', '>', '%', '@', '`', ' '])
         && !value.contains(": ")
@@ -126,7 +129,7 @@ fn link(span: &commentary::Span) -> Option<String> {
 
 /// What a section's paragraphs are as markdown. The key verse, which comes first as the quotation
 /// and then the reference, is a blockquote.
-fn body(mut paras: Vec<Paragraph>) -> Vec<String> {
+fn body(mut paras: Vec<Paragraph>, refs_out: &mut Vec<String>) -> Vec<String> {
     let passage_only = |p: &Paragraph| !p.is_empty() && p.iter().all(|s| s.passage.is_some() || s.text.trim().is_empty());
     let mut out = Vec::new();
     // The quotation and then the reference on a line of its own (`<lb/>`), or both in one paragraph.
@@ -142,6 +145,12 @@ fn body(mut paras: Vec<Paragraph>) -> Vec<String> {
             .iter()
             .filter_map(|s| link(s).or_else(|| Some(commentary::escape(s.text.trim()))))
             .collect();
+        for found in refs.iter().filter_map(link) {
+            let reading = found.trim_start_matches("[[").trim_end_matches("]]").to_string();
+            if crate::plan::is_reading(&reading) && !refs_out.contains(&reading) {
+                refs_out.push(reading);
+            }
+        }
         let mut line = format!("> {}", markdown(&quote).trim_start_matches('\\'));
         if !links.is_empty() {
             line.push_str(" \u{2014} ");
@@ -162,23 +171,25 @@ pub fn day_markdown(work: &str, key: &str, raw: &str) -> Option<Day> {
     let name = MONTHS[usize::from(month) - 1].0;
     let date = format!("{name} {day}");
     let mut parts: Vec<(String, Vec<String>)> = Vec::new();
+    let mut readings: Vec<String> = Vec::new();
     let found = sections(raw);
     if found.is_empty() {
         // An entry that is not divided: one section, named by its title if it has one.
         let (title, rest) = split_title(raw);
         let heading = title.map(|t| heading_of(&t, &date)).filter(|t| !t.is_empty()).unwrap_or_else(|| "Today".to_string());
-        parts.push((heading, body(paragraphs(&rest))));
+        parts.push((heading, body(paragraphs(&rest), &mut readings)));
     }
     for section in found {
         let (title, rest) = split_title(&section);
         let heading = title.map(|t| heading_of(&t, &date)).filter(|t| !t.is_empty()).unwrap_or_else(|| "Today".to_string());
-        parts.push((heading, body(paragraphs(&rest))));
+        parts.push((heading, body(paragraphs(&rest), &mut readings)));
     }
     if parts.iter().all(|(_, paras)| paras.is_empty()) {
         return None;
     }
     let folder = folder_name(work);
-    let mut text = format!("---\ntype: devotional\nwork: {}\ndate: {month:02}-{day:02}\ntags: [devotional]\n---\n# {date}\n", scalar(work.trim()));
+    let mut text = day_front(work.trim(), DayKey::MonthDay(u32::from(month), u32::from(day)), None, &readings);
+    text.push_str(&format!("# {date}\n"));
     for (heading, paras) in parts {
         text.push_str(&format!("\n## {}\n", commentary::escape(&heading)));
         for p in paras {
@@ -188,6 +199,26 @@ pub fn day_markdown(work: &str, key: &str, raw: &str) -> Option<Day> {
         }
     }
     Some(Day { path: format!("library/{folder}/{month:02}-{day:02}.md"), text })
+}
+
+/// The files of a devotional as a calendar plan: its manifest (with `description`, from the module) and
+/// the note of each day that can be written, as `(path, text)`. Entries that are not days of the year
+/// are left out.
+pub fn plan_files(work: &str, description: &str, entries: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+    let plan = Plan {
+        name: work.trim().to_string(),
+        description: description.to_string(),
+        kind: Kind::Calendar,
+        source: None,
+        start: None,
+        days: Vec::new(),
+        problems: Vec::new(),
+        folder: None,
+        manifest: None,
+    };
+    let mut files = vec![plan.manifest_file()];
+    files.extend(import(work, entries).into_iter().map(|d| (d.path, d.text)));
+    files
 }
 
 /// Every day of a devotional that can be written: the entries as `(key, raw)`, those that are not
@@ -208,16 +239,16 @@ mod tests {
     fn a_day_is_a_file_with_a_heading_for_each_section_and_the_key_verse_quoted() {
         let day = day_markdown("Morning and Evening", "01.01", JAN_1).unwrap();
         assert_eq!(day.path, "library/Morning and Evening/01-01.md");
-        let expected = "---\ntype: devotional\nwork: Morning and Evening\ndate: 01-01\ntags: [devotional]\n---\n# January 1\n\n## Morning\n\n> *\u{201c}They did eat of the fruit.\u{201d}* \u{2014} [[Joshua 5:12]]\n\nIsrael\u{2019}s weary *wanderings* were over, \\*not\\* a \\[list\\].\n\n## Evening\n\n> *\u{201c}Glad.\u{201d}* \u{2014} [[Song of Solomon 1:4]]\n\nWe will.\n";
+        let expected = "---\ntype: plan-day\nplan: Morning and Evening\ndate: 01-01\nreadings: [Joshua 5:12, Song of Solomon 1:4]\ntags: [plan-day]\n---\n# January 1\n\n## Morning\n\n> *\u{201c}They did eat of the fruit.\u{201d}* \u{2014} [[Joshua 5:12]]\n\nIsrael\u{2019}s weary *wanderings* were over, \\*not\\* a \\[list\\].\n\n## Evening\n\n> *\u{201c}Glad.\u{201d}* \u{2014} [[Song of Solomon 1:4]]\n\nWe will.\n";
         assert_eq!(day.text, expected);
     }
 
     #[test]
-    fn the_file_reads_back_as_a_devotional_with_links_the_app_follows() {
+    fn the_file_reads_back_as_a_plan_day_with_links_the_app_follows() {
         let day = day_markdown("Morning and Evening", "02.29", JAN_1).unwrap();
         let parsed = frontmatter::parse(&day.text);
-        assert_eq!(parsed.front.kind.as_deref(), Some("devotional"));
-        assert_eq!(parsed.front.tags, ["devotional"]);
+        assert_eq!(parsed.front.kind.as_deref(), Some("plan-day"));
+        assert_eq!(parsed.front.tags, ["plan-day"]);
         assert_eq!(day.path, "library/Morning and Evening/02-29.md");
         let links: Vec<_> = day.text.lines().flat_map(find_links).collect();
         assert_eq!(links.len(), 2);
@@ -256,8 +287,33 @@ mod tests {
         assert_eq!(folder_name("Spurgeon: Morning/Evening?"), "Spurgeon MorningEvening");
         assert_eq!(folder_name(".. x"), "x");
         let day = day_markdown("Faith: a day", "01.01", JAN_1).unwrap();
-        assert!(day.text.contains("work: \"Faith: a day\"\n"));
+        assert!(day.text.contains("plan: \"Faith: a day\"\n"));
         assert_eq!(day.path, "library/Faith a day/01-01.md");
+    }
+
+    #[test]
+    fn a_devotional_is_a_calendar_plan_with_a_manifest_and_a_note_for_each_day() {
+        let entries = (1..=366u32)
+            .map(|n| {
+                let date = chrono::NaiveDate::from_yo_opt(2024, n).unwrap();
+                (date.format("%m.%d").to_string(), JAN_1.to_string())
+            })
+            .chain([("junk".to_string(), JAN_1.to_string())]);
+        let files = plan_files("Morning and Evening", "Spurgeon's daily readings.", entries);
+        assert_eq!(files.len(), 367, "a manifest and 366 days");
+        assert_eq!(files[0].0, "library/Morning and Evening/Morning and Evening.md");
+        assert!(files[0].1.contains("type: plan\nname: Morning and Evening\ndescription: Spurgeon's daily readings.\nkind: calendar\n"), "{}", files[0].1);
+        let notes: std::collections::BTreeMap<_, _> = files.into_iter().collect();
+        let plans = crate::plan::find_plans(&notes);
+        assert_eq!(plans.len(), 1);
+        let plan = &plans[0];
+        assert_eq!((plan.name.as_str(), plan.kind, plan.days.len()), ("Morning and Evening", Kind::Calendar, 366));
+        assert_eq!(plan.description, "Spurgeon's daily readings.");
+        assert!(plan.problems.is_empty(), "{:?}", plan.problems);
+        assert_eq!(plan.days[0].key, DayKey::MonthDay(1, 1));
+        assert_eq!(plan.days[0].note.as_deref(), Some("library/Morning and Evening/01-01.md"));
+        assert_eq!(plan.days[0].passages.len(), 2, "the key verses are the day's readings");
+        assert_eq!(plan.days[365].key, DayKey::MonthDay(12, 31));
     }
 
     #[test]

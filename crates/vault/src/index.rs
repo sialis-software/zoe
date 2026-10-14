@@ -247,6 +247,8 @@ fn put(tx: &rusqlite::Transaction<'_>, path: &str, text: &str) -> rusqlite::Resu
                 LinkTarget::Sword { module, key } => {
                     insert.execute(params![id, "sword", format!("{module}/{key}"), None::<i64>, None::<i64>, None::<i64>, None::<i64>, Some(module), n + 1])?;
                 }
+                // Web links are not written in `[[ ]]`, so none is found here.
+                LinkTarget::Web(_) => {}
             }
         }
     }

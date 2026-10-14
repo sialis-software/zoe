@@ -190,6 +190,16 @@ impl App {
                     Tab::Commentary(Box::new(crate::commentary_tab::CommentaryTab::new(id, &self.sh, module, book, (*chapter).max(1), None)))
                 })
             }
+            TabSave::Plan { plan, day } => {
+                let id = self.take_id();
+                let mut tab = crate::plan_tab::PlanTab::new(id);
+                let entries = crate::plans_window::entries_of(&self.sh);
+                // What was shown is shown again if it is still there.
+                if let Some(key) = plan.as_ref().filter(|k| entries.iter().any(|e| &e.key() == *k)) {
+                    tab.show(&self.sh, &entries, Some(key.clone()), *day);
+                }
+                Some(Tab::Plan(Box::new(tab)))
+            }
             TabSave::Dict { module, key } => {
                 let module = ModuleId(module.clone());
                 self.sh.backend.dictionaries().iter().any(|d| d.id == module).then(|| {
@@ -239,6 +249,7 @@ fn save_tab(tab: &Tab) -> TabSave {
         Tab::Dict(t) => TabSave::Dict { module: t.module.0.clone(), key: t.key.clone() },
         Tab::Search(t) => TabSave::Search { module: t.module.0.clone(), query: t.draft.clone(), case: t.options.case, stem: t.options.stem, best: t.options.by_relevance },
         Tab::Commentary(t) => TabSave::Commentary { module: t.module.0.clone(), book: t.book.osis().to_string(), chapter: t.chapter },
+        Tab::Plan(t) => TabSave::Plan { plan: t.plan.clone(), day: t.day },
         Tab::Backlinks(t) => match &t.target {
             crate::backlinks_tab::Target::Passage(range) => TabSave::Backlinks { passage: range.osis() },
             crate::backlinks_tab::Target::Note(path) => TabSave::NoteBacklinks { path: path.clone() },

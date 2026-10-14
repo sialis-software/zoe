@@ -445,6 +445,8 @@ struct State {
     modifiers: keyboard::Modifiers,
     /// Where the caret was when we last made sure it was in view.
     last_head: Option<usize>,
+    /// The person moved the caret (a click, a drag, a key): a text that is read does not jump to it.
+    moved_by_hand: bool,
     preedit: Option<String>,
     /// The last moment something happened that should show the caret solid.
     activity: Option<Instant>,
@@ -782,8 +784,11 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
             if let Some(rect) = self.caret_rect(state, head) {
                 let (top, bottom) = (rect.y + self.padding.top, rect.y + rect.height + self.padding.top);
                 if self.reading {
-                    // A text that is read goes to the place asked for with it at the top.
-                    state.scroll = (top - self.padding.top).max(0.0);
+                    // A text that is read goes to the place asked for with it at the top, but not
+                    // to where the person clicked or dragged.
+                    if !state.moved_by_hand {
+                        state.scroll = (top - self.padding.top).max(0.0);
+                    }
                 } else if top < state.scroll {
                     state.scroll = top;
                 } else if bottom > state.scroll + view_h {
@@ -792,6 +797,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
                 state.scroll = state.scroll.clamp(0.0, (content_h - view_h).max(0.0));
             }
         }
+        state.moved_by_hand = false;
         let width = if self.width == Length::Shrink {
             (widest + self.padding.x()).ceil().clamp(1.0, width)
         } else {
@@ -1015,6 +1021,9 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
+        if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_) | mouse::Event::CursorMoved { .. }) | Event::Keyboard(_)) {
+            state.moved_by_hand = true;
+        }
         let bounds = layout.bounds();
 
         if let Some(f) = &self.on_scroll
@@ -1378,6 +1387,7 @@ impl<Message> LiveEditor<'_, Message> {
                 LinkTarget::Verse { range, .. } => range.to_string(),
                 LinkTarget::Note(n) => n.clone(),
                 LinkTarget::Sword { module, key } => format!("{module}/{key}"),
+                LinkTarget::Web(url) => url.clone(),
             },
             body: "Not available in this module.".to_string(),
         });

@@ -171,9 +171,37 @@ mod imp {
     }
 }
 
+/// Ask the system to open an address in the program that handles it (the browser for a web page,
+/// the mail program for a mail address). Only web and mail addresses are passed on; false if it
+/// was not one or the system could not be asked.
+pub fn open_external(address: &str) -> bool {
+    let address = address.trim();
+    if !md_editor::is_external(address) {
+        return false;
+    }
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("rundll32");
+        c.arg("url.dll,FileProtocolHandler");
+        c
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    command.arg(address).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_web_and_mail_addresses_are_handed_to_other_apps() {
+        assert!(!open_external("file:///etc/passwd"));
+        assert!(!open_external("-a Calculator"));
+        assert!(!open_external("https://x.org/a b"));
+        assert!(!open_external(""));
+    }
 
     #[test]
     fn the_icon_is_a_square_picture_with_clear_corners() {

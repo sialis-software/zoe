@@ -2,7 +2,8 @@
 
 Some works are imported into the vault as markdown instead of being read from a SWORD module. This
 document is the one standard those files follow, so that every imported work is an ordinary note:
-it opens in the editor, links to Scripture, is found by search and sync, and can be edited.
+it opens in the viewer, links to Scripture, is found by search and sync, and can be linked to like any
+note. Library notes are read-only in the app (see "Read-only" below).
 
 ## What is imported and what is not
 
@@ -11,13 +12,14 @@ it opens in the editor, links to Scripture, is found by search and sync, and can
 | Bibles | SWORD modules, read in place. |
 | Strong's lexicons (and other dictionaries) | SWORD modules, read in place. |
 | Commentaries | SWORD modules, read in place. |
-| Daily devotionals (`Feature=DailyDevotion`) | Imported to markdown. |
-| Reading plans | Imported to markdown (the shape is in docs/09-reading-plans.md). |
+| Daily devotionals (`Feature=DailyDevotion`) | Imported to markdown, as a plan. |
+| Reading plans | Imported to markdown, as a plan. |
 
 Bibles and the Strong's lexicons stay as SWORD modules because the app reads them by verse and by
 number, with Strong's tagging, versification and the module manager that installs them. A devotional
-or a reading plan is prose or a list for a day. It gains from being a note, and a person may want to
-change it.
+or a reading plan is prose or a list for a day. It gains from being a note that other notes can link to.
+Reading plans and devotionals are the same thing, a **plan**: a note for each day, a completion log, optional
+passages to read and optional text to read (docs/09-reading-plans.md).
 
 A devotional is told apart from a dictionary by its conf, not by its driver: SWORD stores a devotional
 as a `zLD` or `RawLD` dictionary keyed by day, and `sword::Module::kind()` answers `Kind::Devotional`
@@ -30,33 +32,41 @@ when the conf has `Feature=DailyDevotion` (checked before the driver).
 ```
 
 `<Work>` is the work's name with what a file name cannot hold (`/ \ : * ? " < > |`) removed, such as
-`library/Morning and Evening/`. Importing writes only inside `library/<Work>/`. The files are plain
-notes, so changing one is allowed; importing again replaces them.
+`library/Morning and Evening/`. Importing writes only inside `library/<Work>/`. Importing again replaces
+the files.
+
+## Read-only
+
+Everything under `library/` is read-only in the app: it is shown, searched and linked to (`[[library/Morning and
+Evening/01-01]]`, or by its name), but not edited. What a person writes about a day goes in a note of their own that
+links to it. Completion of a plan's days is kept in the plan log, a note outside the library (docs/09).
 
 ## Every library file
 
 Frontmatter first, as in docs/02, with at least these properties:
 
-- `type`: what shape the work is (`devotional`).
-- `work`: the work's name, as the person knows it.
-- `tags`: a list holding the type, such as `[devotional]`.
+- `type`: what the note is (`plan` for a work's manifest, `plan-day` for a day).
+- `tags`: a list holding the type, such as `[plan-day]`.
 
 Then a `# ` title and the body. Scripture is a `[[Book 1:1]]` link the verse-link parser reads
 (`study_core::markdown::find_links`). Text is markdown with the marks a note's text may not use
 written literally with a backslash (`\*`, `\_`, `\[`, `\]`, `` \` ``, `\<`, `\>`, `\~`, `\|`,
 `\\`), as the commentary tab does. No markup from the source (OSIS, ThML) is left in.
 
-## The devotional shape
+## The plan shape
 
-One file for each day of the year, named `<MM-DD>.md`, from the entry key `MM.DD`. February 29 is a
-day.
+A work with a note for each day, devotional or reading plan, is a folder with a manifest and the days. The
+shape is described in full in docs/09-reading-plans.md; for a devotional it is a calendar plan: the manifest
+`library/Morning and Evening/Morning and Evening.md` (`kind: calendar`, the module's description) and
+`library/Morning and Evening/<MM-DD>.md` for each day of the year, from the entry key `MM.DD`. February 29 is a day.
 
 ```
 ---
-type: devotional
-work: Morning and Evening
+type: plan-day
+plan: Morning and Evening
 date: 01-01
-tags: [devotional]
+readings: [Joshua 5:12, Song of Solomon 1:4]
+tags: [plan-day]
 ---
 # January 1
 
@@ -73,7 +83,8 @@ Israel’s weary wanderings …
 We will be glad and rejoice in thee. …
 ```
 
-- `date` is `MM-DD`.
+- `date` is `MM-DD`. `readings` lists the key verses that the plan reader can read; a devotional day has no `## Reading`
+  section, the key verse blockquote is its link.
 - The `# ` title is the month and day in words, from the key.
 - Each part of the day (an OSIS `<div type="section">`) is a `## ` heading from its title, without the
   date the source repeats in it ("Morning, January 1" is `Morning`). An entry that is not divided
@@ -86,11 +97,23 @@ We will be glad and rejoice in thee. …
   commentary tab writes them (`**bold**`, `*italic*`, `[[John 2:23|Joh 2:23,24]]`). Lines of verse are
   paragraphs of their own.
 - Keys that are not a day of the year (`MM.DD`) are not imported.
+- Older imports wrote `type: devotional`, `work:` and `date: MM-DD` with no manifest. They are still read: a folder
+  of such notes is a calendar plan named by `work`. Importing again writes the new shape.
 
 ## In code
 
 - `sword::Module::devotional()` opens a devotional; `Devotional::keys()` and `raw(key)` read it.
-- `study_core::devotional::day_markdown(work, key, raw)` makes one `Day { path, text }`;
-  `import(work, entries)` makes all of them.
+- `study_core::devotional::plan_files(work, description, entries)` makes the files (the manifest and each day) as
+  `(path, text)`; `day_markdown(work, key, raw)` makes one `Day { path, text }`; `import(work, entries)` all the days.
+- `study_core::plan::find_plans(&notes)` reads every plan, devotional or reading, from the vault's notes.
 - `study_core::commentary::{markdown, escape, plain_text, passage_range}` is the shared
   OSIS-to-markdown writing, which the commentary tab will use as well.
+
+## Importing a devotional
+
+In the module manager (the Modules button in the top bar), a devotional that is installed has *Import to library*.
+It writes the plan's files (`plan_files`) for each day the app can read (the work's name is its description without
+the author and the subtitle: *Morning and Evening*), and says how many days it made. Importing again replaces them,
+so the library holds what the module says. The library is out of the plain list of notes, out of the tag chips and out
+of what opens first; it is found by searching (the notes selector has a *Library* group while there is a search), by
+link, and in the Plans window, where the devotional appears as a plan like any other.

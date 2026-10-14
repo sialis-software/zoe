@@ -1,7 +1,18 @@
-//! Reading plans: one markdown standard, with importers from other formats (docs/09).
+//! Plans: reading plans and devotionals under one standard (docs/08, docs/09).
 //!
-//! A plan is an ordinary note. Each level 2 heading is a day, each bullet under it holds readings,
-//! written as links or as plain text.
+//! A plan is a folder in the library, `library/<Plan name>/`, with a manifest note named like the
+//! folder and one note for each day. Both parts of a day are optional: passages to read (the
+//! `readings` property, and `[[links]]` under `## Reading`) and text of its own (a devotional).
+//!
+//! ```text
+//! library/Gospels in 30 days/Gospels in 30 days.md   type: plan, name, kind, start, description
+//! library/Gospels in 30 days/Day 01.md               type: plan-day, plan, day: 1, readings: [Matthew 1-2]
+//! ```
+//!
+//! [`find_plans`] reads every plan in a set of notes, and [`Plan::to_files`] writes one. The importers
+//! make a [`Plan`] and the app writes its files. A plan written as one note, with a `## Day N` heading
+//! for each day and a bullet of readings under it (`type: reading-plan`), is still read, and is the
+//! shape [`Plan::parse`] and [`Plan::render`] work in:
 //!
 //! ```text
 //! ---
@@ -16,18 +27,17 @@
 //!
 //! - [[Matthew 1]]
 //! - [[Matthew 2]]
-//!
-//! ## Day 2
-//!
-//! - Matthew 3-4; Psalm 1
 //! ```
 //!
-//! A day's heading is `Day N` (sequential), `2026-01-01` (dated) or `January 1` / `Jan 1` / `01-01`
+//! A day's key is `Day N` (sequential), `2026-01-01` (dated) or `January 1` / `Jan 1` / `01-01`
 //! (a day of the year, repeating). Chapter ranges are expanded to one passage per chapter, and a
 //! verse range across chapters is split by chapter, so that progress can be counted in chapters.
 
+use crate::devotional::{folder_name, scalar};
+use crate::frontmatter::{self, Frontmatter, Value};
 use chrono::{Datelike, Days, NaiveDate};
 use scripture::{Book, RefRange};
+use std::collections::{BTreeMap, HashMap};
 
 /// The verse a range that runs to the end of its chapter stops at. The number of verses in a
 /// chapter is not known here; no chapter has this many.
@@ -49,7 +59,7 @@ pub fn chapter_count(book: Book) -> u16 {
 }
 
 /// Which day of a plan a heading names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum DayKey {
     /// The nth day since the plan was started.
     Number(u32),
@@ -76,6 +86,8 @@ pub struct Day {
     pub title: Option<String>,
     /// The chapters (and verse ranges) of the day, in the order written.
     pub passages: Vec<RefRange>,
+    /// The path of the day's own note in the vault, when the day has one.
+    pub note: Option<String>,
 }
 
 impl Day {
@@ -95,7 +107,7 @@ impl Day {
     }
 
     /// Whether the day has come by `date`, given the plan's start.
-    fn is_due(&self, date: NaiveDate, start: Option<NaiveDate>) -> bool {
+    pub fn is_due(&self, date: NaiveDate, start: Option<NaiveDate>) -> bool {
         match self.key {
             DayKey::Number(n) => start.is_some_and(|s| (date - s).num_days() + 1 >= i64::from(n)),
             DayKey::Date(d) => d <= date,
@@ -104,29 +116,92 @@ impl Day {
     }
 }
 
+/// What a plan's days are keyed by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// `Day N`, counted from the date the plan is started.
+    Sequential,
+    /// One date each.
+    Dated,
+    /// A day of the year (`MM-DD`), every year.
+    Calendar,
+}
+
+impl Kind {
+    /// The word the manifest's `kind` property holds.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Sequential => "sequential",
+            Kind::Dated => "dated",
+            Kind::Calendar => "calendar",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Kind> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "sequential" => Some(Kind::Sequential),
+            "dated" => Some(Kind::Dated),
+            "calendar" => Some(Kind::Calendar),
+            _ => None,
+        }
+    }
+
+    fn of(key: DayKey) -> Kind {
+        match key {
+            DayKey::Number(_) => Kind::Sequential,
+            DayKey::Date(_) => Kind::Dated,
+            DayKey::MonthDay(..) => Kind::Calendar,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     pub name: String,
+    pub description: String,
+    pub kind: Kind,
+    /// Where it came from, when the manifest says.
+    pub source: Option<String>,
     /// The date day 1 falls on, set when a sequential plan is started.
     pub start: Option<NaiveDate>,
     pub days: Vec<Day>,
-    /// What could not be read, each with the line (or row) it was on.
+    /// What could not be read, each with the line (or row, or note) it was on.
     pub problems: Vec<String>,
+    /// The plan's folder in the vault (`library/<name>`); `None` for a plan written as one note.
+    pub folder: Option<String>,
+    /// The path of the note that describes the plan (its manifest, or the single note).
+    pub manifest: Option<String>,
+}
+
+/// How far a plan has got on a day.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanProgress {
+    /// The date from which completion counts; `None` when the plan has none yet (not started).
+    pub baseline: Option<NaiveDate>,
+    pub days_done: usize,
+    /// The index in `days` of the next day that is not done (`None` when all are).
+    pub today: Option<usize>,
+    pub total: usize,
 }
 
 impl Plan {
-    /// Whether the note's properties say it is a reading plan (`type: reading-plan`).
+    /// Whether the note's properties say it is a plan written as one note (`type: reading-plan`).
     pub fn is_plan(text: &str) -> bool {
         let lines: Vec<&str> = text.lines().collect();
         let (front, _) = split_front(&lines);
         front.iter().filter_map(|l| front_value(l)).any(|(k, v)| k == "type" && v.eq_ignore_ascii_case("reading-plan"))
     }
 
+    /// Whether the note's properties say it is the manifest of a plan folder (`type: plan`).
+    pub fn is_manifest(text: &str) -> bool {
+        frontmatter::parse(text).front.kind.is_some_and(|k| k.eq_ignore_ascii_case("plan"))
+    }
+
     /// Read a plan from a note. Lenient: what cannot be read is left out and named in `problems`.
     pub fn parse(text: &str) -> Plan {
         let lines: Vec<&str> = text.lines().collect();
         let (front, first_body) = split_front(&lines);
-        let mut plan = Plan { name: String::new(), start: None, days: Vec::new(), problems: Vec::new() };
+        let mut plan = new_plan("");
         for (k, v) in front.iter().filter_map(|l| front_value(l)) {
             match k {
                 "name" => plan.name = v,
@@ -144,7 +219,7 @@ impl Plan {
             if let Some(heading) = trimmed.strip_prefix("## ") {
                 match parse_heading(heading) {
                     Some((key, title)) => {
-                        plan.days.push(Day { key, title, passages: Vec::new() });
+                        plan.days.push(Day { key, title, passages: Vec::new(), note: None });
                         current = true;
                     }
                     None => current = false,
@@ -162,6 +237,7 @@ impl Plan {
                 }
             }
         }
+        plan.kind = plan.days.first().map_or(Kind::Sequential, |d| Kind::of(d.key));
         plan
     }
 
@@ -196,16 +272,263 @@ impl Plan {
             DayKey::MonthDay(m, x) => (m, x) == (date.month(), date.day()),
         })
     }
+}
 
-    /// The first day that has come by `date` with a chapter `read` says is not read: where to
-    /// catch up from.
-    pub fn next_unread(&self, date: NaiveDate, started: Option<NaiveDate>, read: impl Fn(&RefRange) -> bool) -> Option<&Day> {
-        let start = self.start.or(started);
-        self.days.iter().filter(|d| d.is_due(date, start)).find(|d| {
-            let (done, all) = d.progress(&read);
-            done < all
-        })
+impl Plan {
+    /// The date from which a day's completion counts: the start of a sequential plan, the first date of
+    /// a dated plan, January 1 of `today`'s year for a calendar plan. `None` for a plan not started.
+    pub fn baseline(&self, today: NaiveDate) -> Option<NaiveDate> {
+        match self.kind {
+            Kind::Sequential => self.start,
+            Kind::Dated => self.days.iter().filter_map(|d| if let DayKey::Date(x) = d.key { Some(x) } else { None }).min(),
+            Kind::Calendar => NaiveDate::from_ymd_opt(today.year(), 1, 1),
+        }
     }
+
+    /// Whether the plan can be followed: only a sequential plan needs to be started.
+    pub fn is_started(&self) -> bool {
+        self.kind != Kind::Sequential || self.start.is_some()
+    }
+
+    /// Whether `day` is done: its note has an entry in the completion log (`completed`, by the path of the
+    /// day's note, holding the latest date) on or after the baseline. A plan has no pace: a day is done or
+    /// it is not, and none is ever behind.
+    pub fn day_done(&self, day: &Day, today: NaiveDate, completed: &HashMap<String, String>) -> bool {
+        let Some(from) = self.baseline(today).map(|b| b.format("%Y-%m-%d").to_string()) else { return false };
+        day.note.as_ref().and_then(|n| completed.get(n)).is_some_and(|date| *date >= from)
+    }
+
+    /// How far the plan has got on `today`.
+    pub fn progress(&self, today: NaiveDate, completed: &HashMap<String, String>) -> PlanProgress {
+        let baseline = self.baseline(today);
+        let days_done = self.days.iter().filter(|day| self.day_done(day, today, completed)).count();
+        // Today is the next day not done, whatever the date: a plan waits for its reader.
+        let on_today = self.days.iter().position(|day| !self.day_done(day, today, completed));
+        PlanProgress { baseline, days_done, today: on_today, total: self.days.len() }
+    }
+
+    /// The plan as the files of its folder: the manifest, then a note for each day, as
+    /// `(path, text)`. Each day note has its passages as `readings` and as links under `## Reading`.
+    pub fn to_files(&self) -> Vec<(String, String)> {
+        let folder = plan_folder(&self.name);
+        let width = self.days.len().max(self.days.iter().filter_map(|d| if let DayKey::Number(n) = d.key { Some(n as usize) } else { None }).max().unwrap_or(0)).to_string().len();
+        let mut files = vec![self.manifest_file()];
+        for day in &self.days {
+            let readings = spans(&day.passages, true);
+            let heading = day.title.as_ref().map_or_else(|| day.key.to_string(), |t| t.replace('\n', " "));
+            let mut text = day_front(&self.name, day.key, day.title.as_deref(), &readings);
+            text.push_str(&format!("# {heading}\n"));
+            let links = spans(&day.passages, false);
+            if !links.is_empty() {
+                text.push_str("\n## Reading\n\n");
+                for link in links {
+                    text.push_str(&format!("- [[{link}]]\n"));
+                }
+            }
+            files.push((format!("{folder}/{}.md", file_key(day.key, width)), text));
+        }
+        files
+    }
+
+    /// The plans in `files` as `(path, text)`, as [`find_plans`] reads them.
+    pub fn from_files(files: &[(String, String)]) -> Vec<Plan> {
+        find_plans(&files.iter().cloned().collect())
+    }
+
+    /// The path and text of the plan's manifest note.
+    pub(crate) fn manifest_file(&self) -> (String, String) {
+        let name = self.name.replace('\n', " ");
+        let folder = plan_folder(&self.name);
+        let mut text = format!("---\ntype: plan\nname: {}\n", scalar(&name));
+        let description = self.description.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !description.is_empty() {
+            text.push_str(&format!("description: {}\n", scalar(&description)));
+        }
+        text.push_str(&format!("kind: {}\n", self.kind.as_str()));
+        if let Some(start) = self.start {
+            text.push_str(&format!("start: {}\n", start.format("%Y-%m-%d")));
+        }
+        if let Some(source) = self.source.as_ref().map(|s| s.replace('\n', " ")).filter(|s| !s.trim().is_empty()) {
+            text.push_str(&format!("source: {}\n", scalar(source.trim())));
+        }
+        text.push_str(&format!("tags: [plan]\n---\n# {name}\n"));
+        if !self.description.trim().is_empty() {
+            text.push_str(&format!("\n{}\n", self.description.trim()));
+        }
+        (format!("{folder}/{}.md", folder.rsplit('/').next().unwrap_or(&folder)), text)
+    }
+}
+
+/// `library/<name>`, the folder of a plan.
+fn plan_folder(name: &str) -> String {
+    let clean = folder_name(name);
+    format!("library/{}", if clean.is_empty() { "Plan" } else { &clean })
+}
+
+/// The file name (without `.md`) of a day: `Day 001`, `2026-02-18` or `01-01`.
+fn file_key(key: DayKey, width: usize) -> String {
+    match key {
+        DayKey::Number(n) => format!("Day {n:0width$}"),
+        DayKey::Date(d) => d.format("%Y-%m-%d").to_string(),
+        DayKey::MonthDay(m, d) => format!("{m:02}-{d:02}"),
+    }
+}
+
+/// The properties of a day note, through the closing fence.
+pub(crate) fn day_front(plan: &str, key: DayKey, title: Option<&str>, readings: &[String]) -> String {
+    let mut out = String::from("---\ntype: plan-day\n");
+    out.push_str(&format!("plan: {}\n", scalar(&plan.replace('\n', " "))));
+    match key {
+        DayKey::Number(n) => out.push_str(&format!("day: {n}\n")),
+        DayKey::Date(d) => out.push_str(&format!("date: {}\n", d.format("%Y-%m-%d"))),
+        DayKey::MonthDay(m, d) => out.push_str(&format!("date: {m:02}-{d:02}\n")),
+    }
+    if let Some(title) = title.map(|t| t.replace('\n', " ")).filter(|t| !t.trim().is_empty()) {
+        out.push_str(&format!("title: {}\n", scalar(title.trim())));
+    }
+    if !readings.is_empty() {
+        out.push_str(&format!("readings: [{}]\n", readings.iter().map(|r| scalar(r)).collect::<Vec<_>>().join(", ")));
+    }
+    out.push_str("tags: [plan-day]\n---\n");
+    out
+}
+
+/// Whether `reading` is a passage the plan reader can read.
+pub(crate) fn is_reading(reading: &str) -> bool {
+    parse_item(reading).is_some()
+}
+
+// ---- finding plans in the vault ----
+
+/// The text of a property as one string; a list is its items joined by `; `.
+fn prop_text(front: &Frontmatter, key: &str) -> Option<String> {
+    let prop = front.props.iter().find(|p| p.key == key)?;
+    match &prop.value {
+        Value::Text(s) | Value::Number(s) | Value::Date(s) => Some(s.clone()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::List(items) => Some(items.join("; ")),
+        Value::Raw(lines) => {
+            let items: Vec<String> = lines.iter().skip(1).map(|l| l.trim().trim_start_matches("- ").trim().trim_matches(['"', '\'']).to_string()).filter(|l| !l.is_empty()).collect();
+            (!items.is_empty()).then(|| items.join("; "))
+        }
+    }
+}
+
+fn parent(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(p, _)| p)
+}
+
+fn stem(path: &str) -> &str {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    file.strip_suffix(".md").unwrap_or(file)
+}
+
+/// The date a property holds, `2026-02-18` with or without a time after it.
+fn date_prop(text: &str) -> Option<NaiveDate> {
+    parse_date(text.get(..10).filter(|_| frontmatter::is_date(text)).unwrap_or(text))
+}
+
+/// A day from its note: its key from `day`, `date`, or else the file's name.
+fn read_day(path: &str, front: &Frontmatter, problems: &mut Vec<String>) -> Option<Day> {
+    let key = if let Some(n) = prop_text(front, "day").and_then(|d| d.trim().parse::<u32>().ok()).filter(|n| *n >= 1) {
+        Some(DayKey::Number(n))
+    } else if let Some(date) = prop_text(front, "date") {
+        date_prop(&date).map(DayKey::Date).or_else(|| parse_key(&date))
+    } else {
+        None
+    };
+    let Some(key) = key.or_else(|| parse_key(stem(path))) else {
+        problems.push(format!("{path}: could not tell which day it is"));
+        return None;
+    };
+    let passages = match prop_text(front, "readings") {
+        Some(list) => readings(&list, path, problems),
+        None => Vec::new(),
+    };
+    Some(Day { key, title: front.title.clone().filter(|t| !t.trim().is_empty()), passages, note: Some(path.to_string()) })
+}
+
+/// Every plan in `notes` (path to text): each manifest (`type: plan`) with the day notes of its
+/// folder (`type: plan-day`, or a devotional's `type: devotional`), sorted by day; a folder of
+/// devotional days with no manifest; and a plan written as one note (`type: reading-plan`). Sorted by
+/// name. What cannot be read is left out and named in the plan's `problems`.
+pub fn find_plans(notes: &BTreeMap<String, String>) -> Vec<Plan> {
+    let mut manifests: Vec<(&str, &str, Frontmatter)> = Vec::new();
+    let mut singles: Vec<(&str, &str)> = Vec::new();
+    let mut day_notes: BTreeMap<&str, Vec<(&str, &str, Frontmatter)>> = BTreeMap::new();
+    for (path, text) in notes {
+        if !text.starts_with("---") {
+            continue;
+        }
+        let front = frontmatter::parse(text).front;
+        match front.kind.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            Some("plan") => manifests.push((path, text, front)),
+            Some("reading-plan") => singles.push((path, text)),
+            Some("plan-day" | "devotional") => day_notes.entry(parent(path)).or_default().push((path, text, front)),
+            _ => {}
+        }
+    }
+    let mut plans = Vec::new();
+    for (path, text, front) in manifests {
+        let folder = parent(path);
+        let mut plan = new_plan(&prop_text(&front, "name").or_else(|| front.title.clone()).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| stem(path).to_string()));
+        plan.folder = Some(folder.to_string());
+        plan.manifest = Some(path.to_string());
+        plan.description = prop_text(&front, "description").unwrap_or_default();
+        plan.source = prop_text(&front, "source").filter(|s| !s.trim().is_empty());
+        if let Some(start) = prop_text(&front, "start") {
+            match date_prop(&start) {
+                Some(d) => plan.start = Some(d),
+                None => plan.problems.push(format!("{path}: start: could not read the date {start:?}")),
+            }
+        }
+        if plan.description.is_empty() {
+            // The body's text after the title, for a manifest written by hand.
+            let body = &text[frontmatter::parse(text).range.map_or(0, |r| r.end)..];
+            plan.description = body.lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n").trim().to_string();
+        }
+        let mut problems = std::mem::take(&mut plan.problems);
+        for (day_path, _, day_front) in day_notes.get(folder).into_iter().flatten() {
+            plan.days.extend(read_day(day_path, day_front, &mut problems));
+        }
+        plan.problems = problems;
+        plan.days.sort_by_key(|d| d.key);
+        let declared = prop_text(&front, "kind");
+        plan.kind = declared.as_deref().and_then(Kind::parse).or_else(|| plan.days.first().map(|d| Kind::of(d.key))).unwrap_or(Kind::Sequential);
+        if let Some(word) = declared.filter(|w| Kind::parse(w).is_none()) {
+            plan.problems.push(format!("{path}: kind: {word:?} is not sequential, dated or calendar"));
+        }
+        plans.push(plan);
+    }
+    // Devotional days in a folder with no manifest are a calendar plan of their own.
+    let has_manifest: Vec<String> = plans.iter().filter_map(|p| p.folder.clone()).collect();
+    for (folder, found) in &day_notes {
+        let orphans: Vec<_> = found.iter().filter(|(_, _, f)| f.kind.as_deref().is_some_and(|k| k.eq_ignore_ascii_case("devotional"))).collect();
+        if folder.is_empty() || orphans.is_empty() || has_manifest.iter().any(|f| f == folder) {
+            continue;
+        }
+        let name = orphans.iter().find_map(|(_, _, f)| prop_text(f, "work").or_else(|| prop_text(f, "plan"))).unwrap_or_else(|| folder.rsplit('/').next().unwrap_or(folder).to_string());
+        let mut plan = new_plan(&name);
+        plan.kind = Kind::Calendar;
+        plan.folder = Some(folder.to_string());
+        let mut problems = Vec::new();
+        for (path, _, front) in orphans {
+            plan.days.extend(read_day(path, front, &mut problems));
+        }
+        plan.problems = problems;
+        plan.days.sort_by_key(|d| d.key);
+        plans.push(plan);
+    }
+    for (path, text) in singles {
+        let mut plan = Plan::parse(text);
+        if plan.name.trim().is_empty() {
+            plan.name = stem(path).to_string();
+        }
+        plan.manifest = Some(path.to_string());
+        plans.push(plan);
+    }
+    plans.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.manifest.cmp(&b.manifest)));
+    plans
 }
 
 // ---- reading the standard ----
@@ -439,7 +762,23 @@ fn spans(passages: &[RefRange], compact: bool) -> Vec<String> {
 // ---- importers ----
 
 fn new_plan(name: &str) -> Plan {
-    Plan { name: name.to_string(), start: None, days: Vec::new(), problems: Vec::new() }
+    Plan {
+        name: name.to_string(),
+        description: String::new(),
+        kind: Kind::Sequential,
+        source: None,
+        start: None,
+        days: Vec::new(),
+        problems: Vec::new(),
+        folder: None,
+        manifest: None,
+    }
+}
+
+/// `plan` with its kind taken from its first day.
+fn finished(mut plan: Plan) -> Plan {
+    plan.kind = plan.days.first().map_or(Kind::Sequential, |d| Kind::of(d.key));
+    plan
 }
 
 /// A plan from CSV: a day in the first column (`1`, `2026-01-01`, `Jan 1`, `01-01`) and readings in
@@ -453,9 +792,9 @@ pub fn plan_from_csv(name: &str, text: &str) -> Plan {
         let Some(key) = key else { continue };
         let text = row[1..].iter().map(|c| c.trim()).filter(|c| !c.is_empty()).collect::<Vec<_>>().join("; ");
         let passages = readings(&text, &format!("row {}", i + 1), &mut plan.problems);
-        plan.days.push(Day { key, title: None, passages });
+        plan.days.push(Day { key, title: None, passages, note: None });
     }
-    plan
+    finished(plan)
 }
 
 /// [`plan_from_csv`] as canonical markdown.
@@ -525,7 +864,7 @@ pub fn plan_from_ics(name: &str, text: &str) -> Plan {
         }
     }
     plan.days.sort_by_key(|d| d.key_date());
-    plan
+    finished(plan)
 }
 
 fn add_event(plan: &mut Plan, date: Option<NaiveDate>, summary: &str, description: &str) {
@@ -548,7 +887,7 @@ fn add_event(plan: &mut Plan, date: Option<NaiveDate>, summary: &str, descriptio
     plan.problems.extend(problems);
     match plan.days.iter_mut().find(|d| d.key == DayKey::Date(date)) {
         Some(day) => day.passages.extend(found),
-        None => plan.days.push(Day { key: DayKey::Date(date), title: None, passages: found }),
+        None => plan.days.push(Day { key: DayKey::Date(date), title: None, passages: found, note: None }),
     }
 }
 
@@ -666,9 +1005,9 @@ pub fn plan_from_sword_lines(name: &str, text: &str) -> Plan {
                 None => plan.problems.push(format!("{at}: could not read {item:?}")),
             }
         }
-        plan.days.push(Day { key: DayKey::Number(n), title: None, passages });
+        plan.days.push(Day { key: DayKey::Number(n), title: None, passages, note: None });
     }
-    plan
+    finished(plan)
 }
 
 /// The day number and the readings of a line: `N:readings` or `N=readings`.
@@ -861,23 +1200,7 @@ mod tests {
         let read = |r: &RefRange| r.verses.is_none() && (r.book == Book::GENESIS && r.chapter != 2 || r.book == Book::PSALMS);
         assert_eq!(plan.days[0].progress(read), (3, 4));
         assert_eq!(plan.days[0].progress(|_| false), (0, 4));
-        assert_eq!(Day { key: DayKey::Number(1), title: None, passages: vec![] }.progress(|_| true), (0, 0));
-    }
-
-    #[test]
-    fn catching_up_finds_the_first_day_that_has_come_with_a_chapter_unread() {
-        let plan = Plan::parse(SEQUENTIAL);
-        let nothing = |_: &RefRange| false;
-        assert_eq!(plan.next_unread(d(2026, 1, 2), None, nothing).unwrap().key, DayKey::Number(1));
-        let day_one = |r: &RefRange| r.book == Book::parse("Matthew").unwrap() && r.chapter <= 2;
-        assert_eq!(plan.next_unread(d(2026, 1, 2), None, day_one).unwrap().key, DayKey::Number(2));
-        assert!(plan.next_unread(d(2026, 1, 1), None, day_one).is_none(), "day 2 has not come");
-        assert!(plan.next_unread(d(2025, 12, 1), None, nothing).is_none(), "not started yet");
-        let dated = Plan::parse("# D\n\n## 2026-03-01\n\n- John 1\n\n## 2026-03-05\n\n- John 2\n");
-        assert_eq!(dated.next_unread(d(2026, 3, 4), None, |_| false).unwrap().key, DayKey::Date(d(2026, 3, 1)));
-        let yearly = Plan::parse("# Y\n\n## Mar 1\n\n- John 1\n\n## Mar 5\n\n- John 2\n");
-        assert!(yearly.next_unread(d(2026, 2, 28), None, |_| false).is_none());
-        assert_eq!(yearly.next_unread(d(2026, 3, 5), None, |r| r.chapter == 1).unwrap().key, DayKey::MonthDay(3, 5));
+        assert_eq!(Day { key: DayKey::Number(1), title: None, passages: vec![], note: None }.progress(|_| true), (0, 0));
     }
 
     #[test]
@@ -958,5 +1281,165 @@ mod tests {
         let parsed = Plan::parse(&from_sword_lines("Sword", text));
         assert_eq!(all_passages(&parsed), all_passages(&imported));
         assert_eq!(keys(&parsed), keys(&imported));
+    }
+
+    fn plans_of(files: Vec<(String, String)>) -> Vec<Plan> {
+        Plan::from_files(&files)
+    }
+
+    fn comparable(plan: &Plan) -> Plan {
+        let mut plan = plan.clone();
+        plan.folder = None;
+        plan.manifest = None;
+        for day in &mut plan.days {
+            day.note = None;
+        }
+        plan
+    }
+
+    #[test]
+    fn every_shape_of_plan_round_trips_through_its_files() {
+        let mut sequential = Plan::parse(SEQUENTIAL);
+        sequential.description = "Four chapters\na day.".to_string();
+        sequential.source = Some("Somewhere: a book".to_string());
+        let dated = Plan::parse("# Dated: one\n\n## 2026-03-01\n\n- John 1\n\n## 2026-03-02 \u{2014} Light: the first\n\n- Psalm 119:1-88\n- John 3:16-4:3\n");
+        let calendar = Plan::parse("# Year\n\n## Jan 1\n\n- Gen 1-3; Jude\n\n## Feb 29\n\n## 12-31\n\n- Rev 22\n");
+        for plan in [sequential, dated, calendar] {
+            let files = plan.to_files();
+            let found = plans_of(files.clone());
+            assert_eq!(found.len(), 1, "{files:?}");
+            let mut expected = comparable(&plan);
+            expected.description = plan.description.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(comparable(&found[0]), expected, "{files:?}");
+            assert_eq!(found[0].folder.as_deref(), Some(&*plan_folder(&plan.name)));
+            assert!(found[0].days.iter().all(|d| d.note.is_some()));
+        }
+    }
+
+    #[test]
+    fn day_notes_follow_the_standard_for_their_shape() {
+        let plan = Plan::parse(SEQUENTIAL);
+        let files = plan.to_files();
+        assert_eq!(files[0].0, "library/Gospels in 30 days/Gospels in 30 days.md");
+        assert_eq!(files[0].1, "---\ntype: plan\nname: Gospels in 30 days\nkind: sequential\nstart: 2026-01-01\ntags: [plan]\n---\n# Gospels in 30 days\n");
+        assert_eq!(files[1].0, "library/Gospels in 30 days/Day 1.md");
+        assert_eq!(files[1].1, "---\ntype: plan-day\nplan: Gospels in 30 days\nday: 1\nreadings: [Matthew 1-2]\ntags: [plan-day]\n---\n# Day 1\n\n## Reading\n\n- [[Matthew 1]]\n- [[Matthew 2]]\n");
+        let long = Plan::parse(&(1..=12).map(|n| format!("## Day {n}\n\n- Gen {n}\n\n")).collect::<String>());
+        let paths: Vec<String> = long.to_files().into_iter().skip(1).map(|f| f.0).collect();
+        assert_eq!(paths[0], "library/Plan/Day 01.md");
+        assert_eq!(paths[11], "library/Plan/Day 12.md");
+        let dated = Plan::parse("# D\n\n## 2026-02-18\n\n- John 1\n");
+        assert_eq!(dated.to_files()[1].0, "library/D/2026-02-18.md");
+        assert!(dated.to_files()[1].1.contains("date: 2026-02-18\n"));
+        let calendar = Plan::parse("# C\n\n## Jan 1\n\n- John 1\n");
+        assert_eq!(calendar.to_files()[1].0, "library/C/01-01.md");
+        assert!(calendar.to_files()[1].1.contains("date: 01-01\n"));
+    }
+
+    #[test]
+    fn days_are_found_in_order_whatever_the_order_of_the_notes() {
+        let mut files = Plan::parse(&(1..=12).map(|n| format!("## Day {n}\n\n- Gen {n}\n\n")).collect::<String>()).to_files();
+        files.reverse();
+        let found = plans_of(files);
+        let numbers: Vec<_> = found[0].days.iter().map(|d| d.key).collect();
+        assert_eq!(numbers, (1..=12).map(DayKey::Number).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_day_note_with_unreadable_readings_is_a_problem_and_the_rest_is_kept() {
+        let mut files = Plan::parse("# P\n\n## Day 1\n\n- Gen 1\n").to_files();
+        files.push(("library/P/Day 2.md".to_string(), "---\ntype: plan-day\nplan: P\nday: 2\nreadings: [Genesis 2, Nonsense 9]\n---\n# Day 2\n".to_string()));
+        files.push(("library/P/stray.md".to_string(), "---\ntype: plan-day\nplan: P\n---\n# ?\n".to_string()));
+        files.push(("library/P/bad start.md".to_string(), "---\ntype: plan-day\nplan: P\nday: 3\nreadings:\n  - Exodus 1\n  - Exodus 99\n---\n".to_string()));
+        let found = plans_of(files);
+        let plan = &found[0];
+        assert_eq!(plan.days.len(), 3);
+        assert_eq!(plan.days[1].passages, [ch("Genesis 2")]);
+        assert_eq!(plan.days[2].passages, [ch("Exodus 1")], "a list written over lines");
+        assert_eq!(plan.problems.len(), 3, "{:?}", plan.problems);
+        assert!(plan.problems.iter().any(|p| p.starts_with("library/P/Day 2.md: could not read \"Nonsense 9\"")));
+        assert!(plan.problems.iter().any(|p| p.starts_with("library/P/stray.md")));
+    }
+
+    #[test]
+    fn a_plan_written_as_one_note_and_old_devotional_days_are_still_found() {
+        let mut notes = BTreeMap::new();
+        notes.insert("library/Plans/Gospels.md".to_string(), SEQUENTIAL.to_string());
+        notes.insert("Notes/random.md".to_string(), "---\ntype: prayer\n---\n# x\n".to_string());
+        for (md, text) in [("01-01", "Joshua 5:12"), ("01-02", "Psalm 1")] {
+            notes.insert(format!("library/Old/{md}.md"), format!("---\ntype: devotional\nwork: Old Book\ndate: {md}\ntags: [devotional]\n---\n# Day\n\n## Morning\n\n> *q* \u{2014} [[{text}]]\n"));
+        }
+        let found = find_plans(&notes);
+        assert_eq!(found.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Gospels in 30 days", "Old Book"]);
+        let single = &found[0];
+        assert_eq!((single.folder.clone(), single.manifest.as_deref(), single.kind), (None, Some("library/Plans/Gospels.md"), Kind::Sequential));
+        assert!(single.days.iter().all(|d| d.note.is_none()));
+        let old = &found[1];
+        assert_eq!((old.kind, old.folder.as_deref(), old.manifest.clone()), (Kind::Calendar, Some("library/Old"), None));
+        assert_eq!(old.days.iter().map(|d| d.key).collect::<Vec<_>>(), [DayKey::MonthDay(1, 1), DayKey::MonthDay(1, 2)]);
+        assert_eq!(old.days[0].note.as_deref(), Some("library/Old/01-01.md"));
+        assert!(old.days[0].passages.is_empty(), "no readings property, no readings");
+        // With a manifest in its folder, the same notes are that plan's days.
+        notes.insert("library/Old/Old.md".to_string(), "---\ntype: plan\nname: Old Book\nkind: calendar\n---\n# Old Book\n\nThe description.\n".to_string());
+        let found = find_plans(&notes);
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[1].days.len(), found[1].description.as_str()), (2, "The description."));
+    }
+
+    fn done(paths: &[(&str, &str)]) -> HashMap<String, String> {
+        paths.iter().map(|(p, d)| (p.to_string(), d.to_string())).collect()
+    }
+
+    #[test]
+    fn a_day_is_done_by_a_completion_entry_on_or_after_the_baseline() {
+        let plan = plans_of(Plan::parse(SEQUENTIAL).to_files()).remove(0);
+        let today = d(2026, 1, 3);
+        assert!(!plan.day_done(&plan.days[0], today, &HashMap::new()));
+        assert!(plan.day_done(&plan.days[0], today, &done(&[("library/Gospels in 30 days/Day 1.md", "2026-01-02")])));
+        assert!(!plan.day_done(&plan.days[0], today, &done(&[("library/Gospels in 30 days/Day 1.md", "2025-12-31")])), "before the start");
+        assert!(!plan.day_done(&plan.days[0], today, &done(&[("library/Gospels in 30 days/Day 2.md", "2026-01-02")])), "another day");
+    }
+
+    #[test]
+    fn progress_counts_the_days_done_from_the_baseline_and_nothing_is_behind() {
+        let plan = plans_of(Plan::parse(SEQUENTIAL).to_files()).remove(0);
+        let log = done(&[("library/Gospels in 30 days/Day 2.md", "2026-01-02")]);
+        let p = plan.progress(d(2026, 1, 2), &log);
+        assert_eq!(p, PlanProgress { baseline: Some(d(2026, 1, 1)), days_done: 1, today: Some(0), total: 2 }, "the next day not done, not the one the date falls on");
+        let all = done(&[("library/Gospels in 30 days/Day 1.md", "2026-01-02"), ("library/Gospels in 30 days/Day 2.md", "2026-01-02")]);
+        assert_eq!(plan.progress(d(2026, 1, 2), &all).today, None, "nothing left");
+        let unstarted = Plan { start: None, ..plan.clone() };
+        assert!(!unstarted.is_started());
+        let p = unstarted.progress(d(2026, 1, 2), &log);
+        assert_eq!((p.baseline, p.days_done, p.today), (None, 0, Some(0)), "nothing is done before the start, so the first day is next");
+        assert!(plan.is_started());
+    }
+
+    #[test]
+    fn a_calendar_plans_completion_from_last_year_does_not_count() {
+        let plan = plans_of(Plan::parse("# Y\n\n## Jan 1\n\n- Gen 1\n\n## Jan 2\n\n- Gen 2\n").to_files()).remove(0);
+        assert_eq!(plan.kind, Kind::Calendar);
+        let log = done(&[("library/Y/01-01.md", "2025-12-30"), ("library/Y/01-02.md", "2026-01-02")]);
+        let p = plan.progress(d(2026, 1, 3), &log);
+        assert_eq!((p.baseline, p.days_done), (Some(d(2026, 1, 1)), 1));
+        let next_year = plan.progress(d(2027, 1, 3), &log);
+        assert_eq!((next_year.baseline, next_year.days_done), (Some(d(2027, 1, 1)), 0));
+    }
+
+    #[test]
+    fn a_dated_plans_baseline_is_its_first_date() {
+        let plan = Plan::parse("# D\n\n## 2026-03-05\n\n- John 1\n\n## 2026-03-01\n\n- John 2\n");
+        assert_eq!(plan.kind, Kind::Dated);
+        assert_eq!(plan.baseline(d(2030, 1, 1)), Some(d(2026, 3, 1)));
+        assert!(plan.is_started());
+    }
+
+    #[test]
+    fn plans_found_by_the_importers_are_of_the_shape_of_their_days() {
+        assert_eq!(plan_from_csv("S", "1,Gen 1\n").kind, Kind::Sequential);
+        assert_eq!(plan_from_csv("D", "2026-01-01,Gen 1\n").kind, Kind::Dated);
+        assert_eq!(plan_from_csv("Y", "Jan 1,Gen 1\n").kind, Kind::Calendar);
+        assert_eq!(plan_from_ics("C", ICS).kind, Kind::Dated);
+        assert_eq!(plan_from_sword_lines("W", "1:Gen.1\n").kind, Kind::Sequential);
     }
 }

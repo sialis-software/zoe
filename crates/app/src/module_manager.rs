@@ -66,6 +66,8 @@ pub enum ManagerMsg {
     ImportPicked(Option<PathBuf>),
     Inspected(Result<Package, String>),
     Export(usize),
+    /// Make the days of a devotional (by its place in the list) notes in the vault's library.
+    ToLibrary(usize),
     ExportTo { name: String, root: PathBuf, dest: Option<PathBuf> },
     Finished(Result<Done, String>),
     FetchList,
@@ -392,6 +394,13 @@ impl App {
                     Task::none()
                 }
             }
+            ManagerMsg::ToLibrary(i) => {
+                let Some(module) = self.manager.installed.get(i).cloned() else { return Task::none() };
+                match self.import_devotional(&module.name, &module.description) {
+                    Ok(note) | Err(note) => self.sh.toast(note),
+                }
+                Task::none()
+            }
             ManagerMsg::Export(i) => {
                 let Some(m) = self.manager.installed.get(i) else { return Task::none() };
                 let (name, root) = (m.name.clone(), m.root.clone());
@@ -609,11 +618,14 @@ impl App {
                 Some(why) => text(format!("The app cannot read it: {why}")).size(11).style(text::danger),
                 None => text("The app can read it").size(11).style(text::success),
             });
-            let buttons = column![act("Export\u{2026}", ManagerMsg::Export(i)), {
+            let mut buttons = column![act("Export\u{2026}", ManagerMsg::Export(i)), {
                 let b = button(text("Remove").size(12)).padding([3, 10]).style(button::danger);
                 if idle { b.on_press(mm(ManagerMsg::AskRemove(i))) } else { b }
             }]
             .spacing(4);
+            if module.kind == sword::Kind::Devotional && module.is_readable() {
+                buttons = buttons.push(act("Import to library", ManagerMsg::ToLibrary(i)));
+            }
             list = list.push(card(row![body, buttons].spacing(10).align_y(iced::Center).into()));
         }
         list.into()
@@ -911,5 +923,92 @@ mod tests {
         assert_eq!(app.manager_window, Some(id));
         let _ = app.update(Message::CloseRequested(id));
         assert_eq!(app.manager_window, None);
+    }
+}
+
+/// What a devotional is called as a work: its description without the author before it and the
+/// subtitle after it (`C. H. Spurgeon's Morning and Evening: Daily Readings` is `Morning and Evening`).
+pub fn work_title(description: &str) -> String {
+    let main = description.split(':').next().unwrap_or(description).trim();
+    let title = match main.split_once("'s ").or_else(|| main.split_once("\u{2019}s ")) {
+        Some((author, rest)) if author.chars().count() <= 24 && !rest.trim().is_empty() => rest.trim(),
+        _ => main,
+    };
+    if title.is_empty() { description.trim().to_string() } else { title.to_string() }
+}
+
+impl App {
+    /// Make the devotional module `name` a plan in the vault's library (a manifest and a note for
+    /// each day), and show today's. Says what was done.
+    pub fn import_devotional(&mut self, name: &str, description: &str) -> Result<String, String> {
+        let config = self.config_dir().map(|dir| crate::state::Config::load(&dir)).unwrap_or_default();
+        let library = sword::Library::open(&live::module_roots(&config.module_folders));
+        let module = library.modules().find(|m| m.name() == name).ok_or_else(|| format!("{name} is not installed"))?;
+        let devotional = module.devotional().map_err(|e| e.to_string())?;
+        let keys = devotional.keys().map_err(|e| e.to_string())?;
+        let entries: Vec<(String, String)> = keys.into_iter().filter_map(|k| devotional.raw(&k).ok().flatten().map(|raw| (k, raw))).collect();
+        let work = work_title(description);
+        let files = study_core::devotional::plan_files(&work, description, entries);
+        let days = files.len().saturating_sub(1);
+        if days == 0 {
+            return Err(format!("{work} has no days the app can read (only ones kept by month and day)"));
+        }
+        // Importing again replaces the notes of the plan: the library is read-only, so nothing was written in them.
+        for (path, text) in files {
+            self.sh.notes.insert(path, text);
+        }
+        let today = format!("library/{}/{}.md", study_core::devotional::folder_name(&work), chrono::Local::now().format("%m-%d"));
+        if self.sh.notes.contains_key(&today) {
+            self.show_note(today);
+        }
+        Ok(format!("Imported {days} days of {work} as a plan"))
+    }
+}
+
+#[cfg(test)]
+mod library_tests {
+    use super::*;
+
+    #[test]
+    fn a_work_is_named_by_its_description_without_the_author_and_the_subtitle() {
+        assert_eq!(work_title("C. H. Spurgeon's Morning and Evening: Daily Readings"), "Morning and Evening");
+        assert_eq!(work_title("Streams in the Desert"), "Streams in the Desert");
+        assert_eq!(work_title("Daily Light on the Daily Path: Devotions"), "Daily Light on the Daily Path");
+        assert_eq!(work_title("A very long author name here\u{2019}s Book"), "A very long author name here\u{2019}s Book", "a long first part is not an author");
+    }
+
+    #[test]
+    fn a_devotional_is_imported_into_the_library_once_and_what_was_written_in_it_is_left_alone() {
+        let library = sword::Library::open(&live::module_roots(&[]));
+        let Some(description) = library.modules().find(|m| m.name() == "SME").map(|m| m.description().to_string()) else {
+            return eprintln!("skipped: Morning and Evening is not installed");
+        };
+        let mut app = App::new();
+        let before = app.sh.notes.len();
+        let made = app.import_devotional("SME", &description).unwrap();
+        assert_eq!(made, "Imported 366 days of Morning and Evening as a plan");
+        assert_eq!(app.sh.notes.len(), before + 367);
+        let path = "library/Morning and Evening/01-01.md";
+        let text = app.sh.notes[path].clone();
+        assert!(text.contains("type: plan-day") && text.contains("## Morning") && text.contains("## Evening"), "{text}");
+        // Today's is shown in the writer.
+        let today = chrono::Local::now().format("library/Morning and Evening/%m-%d.md").to_string();
+        let shown = app.tabs.values().any(|t| matches!(t, crate::Tab::Plan(p) if p.day.is_some() && p.plan.is_some()));
+        assert!(shown, "today's is shown in the plan tab");
+        let _ = today;
+        // Imported again: the plan is replaced, not made twice.
+        let _ = app.import_devotional("SME", &description).unwrap();
+        assert_eq!(app.sh.notes.len(), before + 367);
+        // It is a plan with 366 days, none done.
+        let plans = app.plan_entries();
+        let spurgeon = plans.iter().find(|p| p.plan.name == "Morning and Evening").expect("found as a plan");
+        assert_eq!(spurgeon.progress.total, 366);
+        // It is out of the plain list of notes and found by searching, and does not crowd the tags.
+        let none = std::collections::BTreeSet::new();
+        assert!(crate::note_tab::groups(&app.sh, "", &none).iter().all(|g| g.key != "library"));
+        let found = crate::note_tab::groups(&app.sh, "Israel", &none);
+        assert!(found.iter().any(|g| g.key == "library" && !g.notes.is_empty()));
+        assert!(app.sh.tag_counts().iter().all(|(tag, _)| tag != "plan-day"));
+        assert!(!app.sh.first_ordinary_note().starts_with("library/"));
     }
 }

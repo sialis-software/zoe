@@ -10,6 +10,7 @@ pub mod markdown;
 pub mod mock;
 pub mod own_commentary;
 pub mod plan;
+pub mod plan_log;
 pub mod reading_log;
 pub mod search;
 pub mod templates;

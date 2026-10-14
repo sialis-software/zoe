@@ -11,6 +11,8 @@ pub enum LinkTarget {
     Sword { module: String, key: String },
     /// `[[Nicodemus]]`, resolved against note names.
     Note(String),
+    /// `[text](https://example.org)`: an address for another app (the browser, the mail program).
+    Web(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -31,6 +33,7 @@ impl WikiLink {
             LinkTarget::Verse { range, .. } => range.to_string(),
             LinkTarget::Sword { module, key } => format!("{module}/{key}"),
             LinkTarget::Note(n) => n.clone(),
+            LinkTarget::Web(url) => url.clone(),
         }
     }
 }

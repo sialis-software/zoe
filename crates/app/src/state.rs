@@ -227,6 +227,8 @@ pub enum TabSave {
     Backlinks { passage: String },
     /// The notes that link to a note.
     NoteBacklinks { path: String },
+    /// The plans: the plan (its key) and the day shown.
+    Plan { plan: Option<String>, day: Option<usize> },
 }
 
 /// Which kinds of note sit in a reader's margin (the rest pop over the text where clicked).

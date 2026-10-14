@@ -61,6 +61,8 @@ pub enum Spec {
     Dict { module: String, key: String },
     /// A note by name.
     Note(String),
+    /// A web page or a mail address, opened by the program that handles it.
+    Web(String),
 }
 
 impl Spec {
@@ -69,6 +71,7 @@ impl Spec {
             LinkTarget::Verse { range, module } => Spec::Verse { range: *range, module: module.clone() },
             LinkTarget::Sword { module, key } => Spec::Dict { module: module.clone(), key: key.clone() },
             LinkTarget::Note(name) => Spec::Note(name.clone()),
+            LinkTarget::Web(url) => Spec::Web(url.clone()),
         }
     }
 
@@ -79,6 +82,7 @@ impl Spec {
             Spec::Word { key } => key.clone(),
             Spec::Dict { module, key } => format!("{key} \u{b7} {module}"),
             Spec::Note(name) => name.clone(),
+            Spec::Web(url) => url.clone(),
         }
     }
 
@@ -90,6 +94,7 @@ impl Spec {
             Spec::Word { key } => format!("[[sword:Strongs/{key}]]"),
             Spec::Dict { module, key } => format!("[[sword:{module}/{key}]]"),
             Spec::Note(name) => format!("[[{name}]]"),
+            Spec::Web(url) => url.clone(),
         }
     }
 }

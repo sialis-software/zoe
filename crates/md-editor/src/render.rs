@@ -445,6 +445,12 @@ fn detect(rest: &str, before: Option<char>) -> Option<Found> {
     }
 }
 
+/// Whether an address is one to hand to another app: a web page or a mail address.
+pub fn is_external(address: &str) -> bool {
+    let lower = address.to_ascii_lowercase();
+    (lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")) && !address.contains(char::is_whitespace)
+}
+
 fn emit(out: &mut Out, text: &str, base: usize, at: usize, found: &Found, reveal: &Reveal, style: &Style) {
     let abs = |k: usize| base + at + k;
     // Each element decides for itself, so a line can have one bold span open and the rest shut.
@@ -463,7 +469,9 @@ fn emit(out: &mut Out, text: &str, base: usize, at: usize, found: &Found, reveal
             &Style { mono: true, role: Role::Code, ..style.clone() },
         ),
         Delim::Link => {
-            let link = Style { underline: true, role: Role::LinkWeb, ..style.clone() };
+            // The address is what follows `](`, when it is one an app outside can be asked to open.
+            let address = text[inner_end..at + found.len].strip_prefix("](").and_then(|a| a.strip_suffix(')')).map(str::trim).filter(|a| is_external(a));
+            let link = Style { underline: true, role: Role::LinkWeb, link: address.map(|a| LinkTarget::Web(a.to_string())), raw: revealed, ..style.clone() };
             if revealed {
                 out.same(inner, base + inner_start..base + inner_end, &link);
             } else {
@@ -505,6 +513,7 @@ fn link_style(target: &LinkTarget, style: &Style) -> Style {
         LinkTarget::Verse { .. } => Role::LinkVerse,
         LinkTarget::Note(_) => Role::LinkNote,
         LinkTarget::Sword { .. } => Role::LinkModule,
+        LinkTarget::Web(_) => Role::LinkWeb,
     };
     Style { underline: true, role, link: Some(target.clone()), ..style.clone() }
 }
@@ -869,5 +878,15 @@ mod tests {
         let d = r.text.find("καί").unwrap();
         let s = r.display_to_source(d);
         assert_eq!(&"**ἀγαπάω** καί"[s..], "καί");
+    }
+
+    #[test]
+    fn a_web_link_goes_to_its_address_but_only_when_it_is_one_another_app_can_open() {
+        let r = rendered("[docs](https://x.org/a?b=1) ok", false);
+        assert_eq!(r.runs[0].style.link, Some(LinkTarget::Web("https://x.org/a?b=1".into())));
+        assert_eq!(rendered("[mail](mailto:a@b.org)", false).runs[0].style.link, Some(LinkTarget::Web("mailto:a@b.org".into())));
+        assert_eq!(rendered("[x](file:///etc/passwd)", false).runs[0].style.link, None);
+        assert_eq!(rendered("[x](notes/other.md)", false).runs[0].style.link, None);
+        assert!(is_external("HTTPS://X.ORG") && !is_external("javascript:alert(1)") && !is_external("https://a b"));
     }
 }

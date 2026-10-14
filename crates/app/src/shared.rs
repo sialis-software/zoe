@@ -245,6 +245,46 @@ impl Shared {
         format!("[[{} {}]]", book.name(), chapter)
     }
 
+    /// The days of the plans that have been completed: the path of each day's note, and the latest date.
+    pub fn completed_days(&self) -> std::collections::HashMap<String, String> {
+        self.notes.get(PLAN_LOG).map_or_else(Default::default, |log| study_core::plan_log::completed(log))
+    }
+
+    /// Record that the day whose note is at `day_path` was completed on the day of `now`.
+    pub fn complete_day(&mut self, day_path: &str, label: &str, now: &chrono::DateTime<chrono::Local>) {
+        let log = self.notes.get(PLAN_LOG).cloned().unwrap_or_else(|| study_core::plan_log::new_log("Plan log", &frontmatter::now()));
+        if let Some(text) = study_core::plan_log::add(&log, day_path, label, now) {
+            self.rewrite_note(PLAN_LOG, text);
+        }
+    }
+
+    /// Take back the completion of the day whose note is at `day_path` (on whatever day it was).
+    pub fn uncomplete_day(&mut self, day_path: &str) {
+        if let Some(text) = self.notes.get(PLAN_LOG).and_then(|log| study_core::plan_log::uncomplete(log, day_path)) {
+            self.rewrite_note(PLAN_LOG, text);
+        }
+    }
+
+    /// The readings ticked in the plans: by day note path, then reading, the latest date.
+    pub fn ticked_readings(&self) -> std::collections::HashMap<String, std::collections::HashMap<String, String>> {
+        self.notes.get(PLAN_LOG).map_or_else(Default::default, |log| study_core::plan_log::ticked(log))
+    }
+
+    /// Record that `reading` of the day whose note is at `day_path` was done on the day of `now`.
+    pub fn tick_reading(&mut self, day_path: &str, reading: &str, label: &str, now: &chrono::DateTime<chrono::Local>) {
+        let log = self.notes.get(PLAN_LOG).cloned().unwrap_or_else(|| study_core::plan_log::new_log("Plan log", &frontmatter::now()));
+        if let Some(text) = study_core::plan_log::tick(&log, day_path, reading, label, now) {
+            self.rewrite_note(PLAN_LOG, text);
+        }
+    }
+
+    /// Take back that `reading` of the day whose note is at `day_path` was done.
+    pub fn untick_reading(&mut self, day_path: &str, reading: &str) {
+        if let Some(text) = self.notes.get(PLAN_LOG).and_then(|log| study_core::plan_log::untick(log, day_path, reading)) {
+            self.rewrite_note(PLAN_LOG, text);
+        }
+    }
+
     /// The days a chapter is in the reading log, as `2025-10-13`, the latest first.
     pub fn days_read(&self, book: Book, chapter: u16) -> Vec<String> {
         self.notes.get(READING_LOG).map_or_else(Vec::new, |log| study_core::reading_log::dates_read(log, &Self::chapter_link(book, chapter)))
@@ -351,7 +391,7 @@ impl Shared {
         let mut cache = self.tag_cache.borrow_mut();
         if cache.0 != revision {
             let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-            for (path, text) in self.notes.iter().filter(|(path, _)| !templates::is_template(path)) {
+            for (path, text) in self.notes.iter().filter(|(path, _)| !templates::is_template(path) && !path.starts_with("library/")) {
                 let _ = path;
                 for tag in frontmatter::parse(text).front.tags {
                     *counts.entry(frontmatter::normalize_tag(&tag)).or_default() += 1;
@@ -400,7 +440,7 @@ impl Shared {
 
     /// The first note that is not a margin file: what a note tab opens when it has nothing.
     pub fn first_ordinary_note(&self) -> String {
-        self.notes.keys().find(|p| !p.starts_with("margins/") && !templates::is_template(p)).cloned().unwrap_or_default()
+        self.notes.keys().find(|p| !p.starts_with("margins/") && !p.starts_with("library/") && !templates::is_template(p)).cloned().unwrap_or_default()
     }
 
     /// The kinds of note there are: the templates in the vault, by name.
@@ -693,6 +733,15 @@ impl Shared {
             }
         }
     }
+}
+
+/// The note that records which days of the plans were completed.
+pub const PLAN_LOG: &str = "Plan log.md";
+
+/// Whether a note is part of the library (an imported plan or devotional): kept as it was imported, to be read
+/// and linked to, not written in.
+pub fn is_library(path: &str) -> bool {
+    path.starts_with("library/")
 }
 
 /// The note chapters read are added to.

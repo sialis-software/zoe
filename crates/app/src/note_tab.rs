@@ -461,13 +461,29 @@ pub fn groups(sh: &Shared, query: &str, tags: &BTreeSet<String>) -> Vec<Group> {
         if templates::is_template(path) {
             continue;
         }
-        let (key, group_label) = if path.starts_with("margins/") { ("margins", "Margin notes") } else { ("notes", "Notes") };
+        // What was imported into the library (a devotional's days, the reading plans) is far too many
+        // for the plain list: it is found by searching, or by its tags.
+        let in_library = path.starts_with("library/");
+        if in_library && words.is_empty() && wanted_tags.is_empty() && tags.is_empty() {
+            continue;
+        }
+        let (key, group_label) = if path.starts_with("margins/") {
+            ("margins", "Margin notes")
+        } else if in_library {
+            ("library", "Library")
+        } else {
+            ("notes", "Notes")
+        };
         match out.iter_mut().find(|g| g.key == key) {
             Some(g) => g.notes.push((path.clone(), label)),
             None => out.push(Group { key: key.into(), label: group_label.into(), notes: vec![(path.clone(), label)] }),
         }
     }
-    out.sort_by_key(|g| g.key == "margins");
+    out.sort_by_key(|g| match g.key.as_str() {
+        "notes" => 0,
+        "library" => 1,
+        _ => 2,
+    });
     for g in &mut out {
         // Margin notes keep their order in the canon; the rest go by name. When searching,
         // notes whose name matches come before those that only mention it.
@@ -640,7 +656,55 @@ impl NoteTab {
         sh.mark_index_of(&self.path)
     }
 
+    /// Whether the note is one that is only read: the library's.
+    pub fn read_only(&self) -> bool {
+        crate::shared::is_library(&self.path)
+    }
+
     pub fn update(&mut self, sh: &mut Shared, message: NoteMsg) -> (Task<NoteMsg>, Option<Request>) {
+        // A note of the library is not written in: only what moves or selects, follows links and
+        // scrolls is let through.
+        if self.read_only() {
+            let selects = |a: &EditAction| {
+                matches!(
+                    a,
+                    EditAction::Move { .. }
+                        | EditAction::SetCaret { .. }
+                        | EditAction::Select(_)
+                        | EditAction::SelectBetween { .. }
+                        | EditAction::SelectAll
+                        | EditAction::SelectWord(_)
+                        | EditAction::SelectLine(_)
+                )
+            };
+            let changes = match &message {
+                NoteMsg::Action(a) => !selects(a),
+                NoteMsg::Vim(_)
+                | NoteMsg::AskDelete
+                | NoteMsg::ConfirmDelete
+                | NoteMsg::StartRename
+                | NoteMsg::CommitRename
+                | NoteMsg::MarkStyle(_)
+                | NoteMsg::MarkColor(_)
+                | NoteMsg::TagDraft(_)
+                | NoteMsg::PickTag(_)
+                | NoteMsg::AddTag
+                | NoteMsg::RemoveTag(_)
+                | NoteMsg::AddProperties
+                | NoteMsg::ToggleProps
+                | NoteMsg::SetKind(_)
+                | NoteMsg::PropEdit(..)
+                | NoteMsg::PropBool(..)
+                | NoteMsg::PropRemove(_)
+                | NoteMsg::NewKey(_)
+                | NoteMsg::NewType(_)
+                | NoteMsg::AddProp => true,
+                _ => false,
+            };
+            if changes {
+                return (Task::none(), None);
+            }
+        }
         let mut task = Task::none();
         match message {
             NoteMsg::Action(action) => {
@@ -966,7 +1030,13 @@ impl NoteTab {
         if let Some(mark) = self.open_mark_index(sh).and_then(|i| sh.marks.get(i)) {
             pane = pane.push(self.passage_block(sh, mark, reference));
         }
-        pane = pane.push(self.properties(sh));
+        if self.read_only() {
+            pane = pane.push(
+                container(text("Part of the library: it is kept as it was imported, to read and link to.").size(12).style(text::secondary)).padding([6, 16]),
+            );
+        } else {
+            pane = pane.push(self.properties(sh));
+        }
 
             let module = reference.map(|b| b.module.clone()).or_else(|| sh.backend.modules().first().map(|m| m.id.clone()));
             let module = module.unwrap_or(ModuleId(String::new()));
@@ -985,11 +1055,14 @@ impl NoteTab {
                 .font(sh.settings.text_font())
                 .padding(16)
                 .height(Length::Fill);
-            if sh.settings.vim_mode {
+            if self.read_only() {
+                // Read, selected and copied, not written in: no raw source is shown and no caret.
+                editor = editor.reading(true).copy_as(crate::commentary_tab::plain_text);
+            } else if sh.settings.vim_mode {
                 editor = editor.vim(&self.vim, NoteMsg::Vim);
             }
             pane = pane.push(editor);
-            if sh.settings.vim_mode {
+            if sh.settings.vim_mode && !self.read_only() {
                 pane = pane.push(self.vim_status());
             }
             pane.into()
@@ -1059,9 +1132,13 @@ impl NoteTab {
         items = items.push(item(crate::icons::Icon::Link, "Copy link", NoteMsg::CopyLink));
         if self.open_mark_index(sh).is_none() {
             items = items.push(item(crate::icons::Icon::Backlinks, "Backlinks", NoteMsg::OpenBacklinks));
-            items = items.push(item(crate::icons::Icon::Pencil, "Rename", NoteMsg::StartRename));
+            if !self.read_only() {
+                items = items.push(item(crate::icons::Icon::Pencil, "Rename", NoteMsg::StartRename));
+            }
         }
-        items = items.push(item(crate::icons::Icon::Trash, "Delete", NoteMsg::AskDelete));
+        if !self.read_only() {
+            items = items.push(item(crate::icons::Icon::Trash, "Delete", NoteMsg::AskDelete));
+        }
         container(items).padding(6).width(170).style(crate::popup_style).into()
     }
 
