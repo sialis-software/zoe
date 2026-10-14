@@ -3,8 +3,8 @@
 //!
 //! The files are plain strokes on a 24 unit square; the colour in them is replaced when drawn.
 
-use iced::widget::svg;
-use iced::{Element, Length, Theme};
+use iced::widget::{button, container, svg};
+use iced::{Color, Element, Length, Theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -79,6 +79,54 @@ impl Icon {
     /// The selector's arrow: up while its panel is open.
     pub fn chevron(open: bool) -> Icon {
         if open { Icon::ChevronUp } else { Icon::ChevronDown }
+    }
+
+    /// The icon `size` pixels square, in the dropdowns' text color, `alpha` as opaque.
+    fn view_text<'a, M: 'a>(self, size: f32, alpha: f32) -> Element<'a, M> {
+        svg(svg::Handle::from_memory(self.source()))
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .style(move |theme: &Theme, _status| {
+                let color = theme.extended_palette().background.weak.text;
+                svg::Style { color: Some(Color { a: color.a * alpha, ..color }) }
+            })
+            .into()
+    }
+
+    /// A history button (back, forward), dressed like the dropdowns beside it. When there is nowhere
+    /// to go it is plainly off: no fill, only a faint outline, and the arrow faint, so it does not
+    /// look like the ones that work.
+    pub fn arrow_button<'a, M: Clone + 'a>(self, on: bool, message: M) -> Element<'a, M> {
+        let size = |b: button::Button<'a, M>| b.width(31).height(31).padding(0);
+        if on {
+            return size(button(container(self.view_text(18.0, 1.0)).center(Length::Fill)))
+                .style(|theme: &Theme, status| {
+                    let p = theme.extended_palette();
+                    let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(p.background.weak.color.into()),
+                        text_color: p.background.weak.text,
+                        border: iced::Border {
+                            color: if lit { p.primary.strong.color } else { p.background.strong.color },
+                            width: 1.0,
+                            radius: 2.0.into(),
+                        },
+                        ..button::Style::default()
+                    }
+                })
+                .on_press(message)
+                .into();
+        }
+        size(button(container(self.view_text(18.0, 0.28)).center(Length::Fill)))
+            .style(|theme: &Theme, _status| {
+                let line = theme.extended_palette().background.weak.text;
+                button::Style {
+                    background: None,
+                    border: iced::Border { color: Color { a: 0.18, ..line }, width: 1.0, radius: 2.0.into() },
+                    ..button::Style::default()
+                }
+            })
+            .into()
     }
 
     /// The icon `size` pixels square.

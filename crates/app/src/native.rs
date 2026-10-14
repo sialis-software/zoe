@@ -4,6 +4,7 @@
 //! travels with it, stays above it, and shows over it in a full screen space. That takes the
 //! native window; everywhere else the settings are an ordinary small window.
 
+use crate::commands::{Command, MenuState};
 use iced::window::Id;
 use iced::{Subscription, Task};
 
@@ -40,9 +41,14 @@ fn icon_pixels() -> Option<(Vec<u8>, u32, u32)> {
 /// Dock or taskbar shows what it is given as it is.
 const ICON: &[u8] = include_bytes!("../assets/app/zoe-rounded.png");
 
-/// The menu bar's Settings… item being chosen.
-pub fn settings_chosen() -> Subscription<()> {
-    imp::settings_chosen()
+/// A menu bar item being chosen.
+pub fn commands_chosen() -> Subscription<Command> {
+    imp::commands_chosen()
+}
+
+/// Grey out the menu items that do nothing just now and tick the ones that are on.
+pub fn sync_menu(window: Id, state: MenuState) -> Task<()> {
+    imp::sync_menu(window, state)
 }
 
 #[cfg(target_os = "macos")]
@@ -62,14 +68,50 @@ mod imp {
         view.window()
     }
 
-    use iced::futures::StreamExt;
     use iced::futures::channel::mpsc;
     use muda::accelerator::{Accelerator, Code, Modifiers};
-    use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+    use crate::commands::Shortcut;
+    use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+    use std::cell::RefCell;
     use std::sync::Mutex;
 
-    const SETTINGS: &str = "settings";
-    static CHOSEN: Mutex<Option<mpsc::UnboundedSender<()>>> = Mutex::new(None);
+    static CHOSEN: Mutex<Option<mpsc::UnboundedSender<Command>>> = Mutex::new(None);
+
+    /// A menu item kept to be changed later.
+    enum Item {
+        Plain(MenuItem),
+        Check(CheckMenuItem),
+    }
+
+    thread_local! {
+        /// The items, on the main thread (they belong to it).
+        static ITEMS: RefCell<Vec<(Command, Item)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn accelerator(shortcut: Shortcut) -> Option<Accelerator> {
+        let code = match shortcut.key {
+            't' => Code::KeyT,
+            'n' => Code::KeyN,
+            'w' => Code::KeyW,
+            'f' => Code::KeyF,
+            '[' => Code::BracketLeft,
+            ']' => Code::BracketRight,
+            ',' => Code::Comma,
+            '1' => Code::Digit1,
+            '2' => Code::Digit2,
+            '3' => Code::Digit3,
+            '4' => Code::Digit4,
+            _ => return None,
+        };
+        let mut mods = Modifiers::META;
+        if shortcut.shift {
+            mods |= Modifiers::SHIFT;
+        }
+        if shortcut.alt {
+            mods |= Modifiers::ALT;
+        }
+        Some(Accelerator::new(mods, code))
+    }
 
     /// What the system's About panel shows: the name, version and credits, with the app's picture.
     /// (In a bundle the panel would also read them from the bundle: this makes it the same outside one.)
@@ -97,7 +139,18 @@ mod imp {
             }
             let menu = Menu::new();
             let app = Submenu::new("Zoe", true);
-            let settings = MenuItem::with_id(SETTINGS, "Settings\u{2026}", true, Some(Accelerator::new(Modifiers::META, Code::Comma)));
+            let mut kept: Vec<(Command, Item)> = Vec::new();
+            let mut item = |command: Command| -> MenuItem {
+                let made = MenuItem::with_id(command.id(), command.label(), true, command.shortcut().and_then(accelerator));
+                kept.push((command, Item::Plain(made.clone())));
+                made
+            };
+            let settings = item(Command::Settings);
+            let (new_tab, new_pane, close_tab) = (item(Command::NewTab), item(Command::NewPane), item(Command::CloseTab));
+            let (back, forward) = (item(Command::Back), item(Command::Forward));
+            let (previous, next, search) = (item(Command::PreviousTab), item(Command::NextTab), item(Command::Search));
+            let reader = CheckMenuItem::with_id(Command::ReaderMode.id(), Command::ReaderMode.label(), true, false, None);
+            kept.push((Command::ReaderMode, Item::Check(reader.clone())));
             let _ = app.append_items(&[
                 &PredefinedMenuItem::about(None, Some(about_metadata())),
                 &PredefinedMenuItem::separator(),
@@ -112,6 +165,29 @@ mod imp {
                 &PredefinedMenuItem::quit(None),
             ]);
             let _ = menu.append(&app);
+            let file = Submenu::new("File", true);
+            let _ = file.append_items(&[&new_pane, &new_tab, &PredefinedMenuItem::separator(), &close_tab]);
+            let view = Submenu::new("View", true);
+            let mut check = |command: Command| -> CheckMenuItem {
+                let made = CheckMenuItem::with_id(command.id(), command.label(), false, false, command.shortcut().and_then(accelerator));
+                kept.push((command, Item::Check(made.clone())));
+                made
+            };
+            let shown = [Command::ToggleStrongs, Command::ToggleMarks, Command::ToggleFootnotes, Command::ToggleRefs].map(&mut check);
+            let margin = [Command::StrongsInMargin, Command::MarksInMargin, Command::FootnotesInMargin, Command::RefsInMargin].map(&mut check);
+            let _ = view.append(&reader);
+            let _ = view.append(&PredefinedMenuItem::separator());
+            for made in &shown {
+                let _ = view.append(made);
+            }
+            let _ = view.append(&PredefinedMenuItem::separator());
+            for made in &margin {
+                let _ = view.append(made);
+            }
+            let go = Submenu::new("Go", true);
+            let _ = go.append_items(&[&back, &forward, &PredefinedMenuItem::separator(), &previous, &next, &PredefinedMenuItem::separator(), &search]);
+            let _ = menu.append_items(&[&file, &view, &go]);
+            ITEMS.with(|items| *items.borrow_mut() = kept);
             menu.init_for_nsapp();
             give_symbol("Settings", "gearshape");
             // The menu bar belongs to the app for as long as it runs.
@@ -137,18 +213,34 @@ mod imp {
         }
     }
 
-    pub fn settings_chosen() -> Subscription<()> {
+    pub fn commands_chosen() -> Subscription<Command> {
         Subscription::run(|| {
             let (tx, rx) = mpsc::unbounded();
             *CHOSEN.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
             MenuEvent::set_event_handler(Some(|event: MenuEvent| {
-                if event.id == SETTINGS
+                if let Some(command) = Command::from_id(&event.id.0)
                     && let Some(tx) = CHOSEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
                 {
-                    let _ = tx.unbounded_send(());
+                    let _ = tx.unbounded_send(command);
                 }
             }));
-            rx.map(|()| ())
+            rx
+        })
+    }
+
+    pub fn sync_menu(window: Id, state: MenuState) -> Task<()> {
+        window::run(window, move |_| {
+            ITEMS.with(|items| {
+                for (command, item) in items.borrow().iter() {
+                    match item {
+                        Item::Plain(i) => i.set_enabled(state.enabled(*command)),
+                        Item::Check(i) => {
+                            i.set_enabled(state.enabled(*command));
+                            i.set_checked(state.checked(*command));
+                        }
+                    }
+                }
+            });
         })
     }
 
@@ -179,8 +271,12 @@ mod imp {
         Task::none()
     }
 
-    pub fn settings_chosen() -> Subscription<()> {
+    pub fn commands_chosen() -> Subscription<Command> {
         Subscription::none()
+    }
+
+    pub fn sync_menu(_window: Id, _state: MenuState) -> Task<()> {
+        Task::none()
     }
 }
 

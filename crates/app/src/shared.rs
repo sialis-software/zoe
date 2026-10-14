@@ -19,6 +19,14 @@ use study_core::{ModuleId, StudyBackend};
 /// Identifies a tab for as long as the app runs.
 pub type TabId = u32;
 
+/// Whether a tab can go back or forward to a tab it was before, as opposed to a place within itself:
+/// a link that takes over a tab leaves the tab it replaced to go back to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Outer {
+    pub back: bool,
+    pub forward: bool,
+}
+
 /// A change other tabs may need to follow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -227,7 +235,26 @@ impl Shared {
                 daily = true;
             }
         }
+        self.sync_log_days();
         (logged, daily)
+    }
+
+    /// Make each day's heading in the reading log a link to that day's daily note when there is one
+    /// (and a plain date when there is not). A daily note is the one of a kind that is one a day
+    /// (see `templates::todays_note`), under the name that kind gives it for that day: so a note made
+    /// from the Daily template is linked from its day, and one that is renamed, deleted or not made yet
+    /// is not. Called whenever the log or the notes that might be dailies change.
+    pub fn sync_log_days(&mut self) {
+        let Some(log) = self.notes.get(READING_LOG) else { return };
+        let templates = self.templates();
+        let linked = study_core::reading_log::link_days(log, |date| {
+            let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+            let noon = day.and_hms_opt(12, 0, 0)?.and_local_timezone(chrono::Local).earliest()?;
+            templates::todays_note(&templates, &noon, |p| self.notes.contains_key(p))
+        });
+        if let Some(text) = linked {
+            self.rewrite_note(READING_LOG, text);
+        }
     }
 
     /// A new mark is a bookmark: with the setting on, today's note (when there is one) gets a link to
@@ -321,6 +348,7 @@ impl Shared {
             self.rewrite_note(&path, text);
             gone.1 = true;
         }
+        self.sync_log_days();
         gone
     }
 
@@ -614,6 +642,7 @@ impl Shared {
             self.notes.insert(next.clone(), String::new());
         }
         self.events.push(Event::NoteRemoved { old: path.to_string(), next });
+        self.sync_log_days();
     }
 
     /// Give an ordinary note a new name (its file's name, in the same folder). The links to it from
@@ -651,6 +680,7 @@ impl Shared {
         self.notes.insert(new.clone(), text);
         self.relink(old, &new);
         self.events.push(Event::NoteRewritten { old: old.to_string(), new: new.clone() });
+        self.sync_log_days();
         Ok(new)
     }
 

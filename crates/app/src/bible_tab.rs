@@ -591,6 +591,11 @@ impl BibleTab {
 
     // ---- state changes -------------------------------------------------------------
 
+    /// Start the tab's own history over at where it is (a tab made to show a link is not a tab that went there).
+    pub fn forget_history(&mut self) {
+        self.history = History::new(self.place(None));
+    }
+
     /// Read a chapter in a tab that has nothing in progress.
     fn open_chapter(&mut self, sh: &Shared, book: Book, chapter: u16) {
         self.book = book;
@@ -1405,8 +1410,8 @@ impl BibleTab {
         self.reader_pane(sh, Some(margins))
     }
 
-    pub fn view<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
-        let content = column![self.toolbar(sh), iced::widget::rule::horizontal(1), self.reader_pane(sh, None)];
+    pub fn view<'a>(&'a self, sh: &'a Shared, outer: crate::shared::Outer) -> Element<'a, BibleMsg> {
+        let content = column![self.toolbar(sh, outer), iced::widget::rule::horizontal(1), self.reader_pane(sh, None)];
         // A pop-up (the history list or the reader's menu) hangs from its button; a click anywhere
         // else puts it away. The layers are always in the tree, empty when there is no pop-up, so
         // that opening one does not rebuild the reader beneath (which would lose its scroll).
@@ -1585,7 +1590,7 @@ impl BibleTab {
         (modules, books, chapters)
     }
 
-    fn toolbar<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
+    fn toolbar<'a>(&'a self, sh: &'a Shared, outer: crate::shared::Outer) -> Element<'a, BibleMsg> {
         let (modules, books, chapters) = self.choices(sh);
         let current = ChapterChoice(self.book, self.chapter_no);
         let module = modules.iter().find(|m| m.0 == self.module).cloned();
@@ -1607,15 +1612,12 @@ impl BibleTab {
             .padding(0)
             .style(button::secondary)
             .on_press(BibleMsg::ReadingMode);
-        let arrow = |icon: crate::icons::Icon, on: bool, msg: BibleMsg| {
-            let b = button(container(icon.view(18.0)).center(Length::Fill)).width(31).height(31).padding(0).style(button::secondary);
-            if on { b.on_press(msg) } else { b }
-        };
+        let arrow = |icon: crate::icons::Icon, on: bool, msg: BibleMsg| icon.arrow_button(on, msg);
         // Right-clicking either lists the places the tab has been.
         let nav = iced::widget::mouse_area(
             row![
-                arrow(crate::icons::Icon::Back, self.history.can_back(), BibleMsg::Back),
-                arrow(crate::icons::Icon::Forward, self.history.can_forward(), BibleMsg::Forward),
+                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, BibleMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, BibleMsg::Forward),
             ]
             .spacing(4),
         )

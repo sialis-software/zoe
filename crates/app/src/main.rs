@@ -11,6 +11,8 @@ mod backlinks_tab;
 mod bible_search;
 mod bible_tab;
 mod bundled;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod commands;
 mod commentary_tab;
 mod dict_tab;
 mod drag;
@@ -82,6 +84,14 @@ fn main() -> iced::Result {
 const TOP_BAR_PADDING: f32 = 9.0;
 /// The height of the top bar and the line under it.
 const TOP_BAR_HEIGHT: f32 = 24.0 + 2.0 * TOP_BAR_PADDING + 1.0;
+
+/// What a tab was before a link took it over, kept whole (with its place, its selection and its own
+/// history) to go back to; and what it was when it went back, to go forward to.
+#[derive(Default)]
+struct Nav {
+    back: Vec<Tab>,
+    forward: Vec<Tab>,
+}
 
 /// What a tab holds. Each kind is one self-contained type of tab.
 enum Tab {
@@ -237,6 +247,8 @@ const READING_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 struct App {
     sh: Shared,
     tabs: BTreeMap<TabId, Tab>,
+    /// The tabs that a tab took over from, and ones it went back from: by the id of the tab showing.
+    navs: BTreeMap<TabId, Nav>,
     panes: Vec<Pane>,
     /// How the panes are divided up.
     layout: Node,
@@ -246,6 +258,8 @@ struct App {
     zoomed: Option<PaneId>,
     /// The main window's size, as last reported.
     window_size: iced::Size,
+    /// What the menu bar was last told (None: nothing yet).
+    menu_synced: Option<commands::MenuState>,
     /// The Bible tab read alone, filling the window with nothing else around it, if any.
     reader_mode: Option<ReaderMode>,
     /// The Bible and note tab last used, which others work with: a note's links show their
@@ -411,8 +425,14 @@ enum Message {
     Plans(plans_window::PlansMsg),
     /// Escape: put away the card that is open.
     EscapeCard,
+    /// A menu bar item was chosen (macOS).
+    Command(commands::Command),
+    /// The menu bar is in place: it is told what the app is like now.
+    MenuInstalled,
     /// Leave reading mode.
     EndReading,
+    /// Back or forward in this tab (its own buttons, wherever the tab has them).
+    NavTab(TabId, bool),
     /// ⌘T, pressed in this window: a new tab in the pane last used.
     NewTabHere(iced::window::Id),
     /// ⌘N, pressed in this window: a new pane, split off the pane last used.
@@ -499,7 +519,7 @@ impl App {
             ..iced::window::Settings::default()
         });
         app.main = main;
-        let mut task = open.then(native::install_menu).discard();
+        let mut task = open.then(native::install_menu).map(|()| Message::MenuInstalled);
         if app.onboarding.is_some() {
             task = Task::batch([task, app.open_welcome()]);
         }
@@ -525,11 +545,13 @@ impl App {
         let mut app = App {
             sh,
             tabs: BTreeMap::new(),
+            navs: BTreeMap::new(),
             panes: Vec::new(),
             layout: Node::Leaf(0),
             focus: 0,
             zoomed: None,
             window_size: iced::Size::new(1280.0, 800.0),
+            menu_synced: None,
             reader_mode: None,
             last_bible: None,
             last_note: None,
@@ -735,6 +757,114 @@ impl App {
         }
         self.detach_tab(id);
         self.tabs.remove(&id);
+        self.navs.remove(&id);
+    }
+
+    /// Whether tab `id` can go back (or forward) within itself, in its own history.
+    fn inner_can(&self, id: TabId, back: bool) -> bool {
+        match self.tabs.get(&id) {
+            Some(Tab::Bible(t)) => if back { t.history.can_back() } else { t.history.can_forward() },
+            Some(Tab::Note(t)) => if back { t.history.can_back() } else { t.history.can_forward() },
+            Some(Tab::Dict(t)) => if back { t.history.can_back() } else { t.history.can_forward() },
+            _ => false,
+        }
+    }
+
+    /// Whether tab `id` has a tab to go back (or forward) to.
+    fn outer(&self, id: TabId) -> shared::Outer {
+        let nav = self.navs.get(&id);
+        shared::Outer { back: nav.is_some_and(|n| !n.back.is_empty()), forward: nav.is_some_and(|n| !n.forward.is_empty()) }
+    }
+
+    /// Back or forward in tab `id`, as a browser's: in the tab's own history while it has somewhere to go,
+    /// then to the tab it was before.
+    fn go(&mut self, id: TabId, back: bool) -> Task<Message> {
+        if self.inner_can(id, back) {
+            return match self.tabs.get(&id) {
+                Some(Tab::Bible(_)) => self.handle(Message::Bible(id, if back { BibleMsg::Back } else { BibleMsg::Forward })),
+                Some(Tab::Note(_)) => self.handle(Message::Note(id, if back { NoteMsg::Back } else { NoteMsg::Forward })),
+                Some(Tab::Dict(_)) => self.handle(Message::Dict(id, if back { DictMsg::Back } else { DictMsg::Forward })),
+                _ => Task::none(),
+            };
+        }
+        self.step_tab(id, back);
+        Task::none()
+    }
+
+    /// Put tab `to` where tab `from` is (its place in its pane, and the history that goes with it).
+    fn swap_in(&mut self, from: TabId, to: Tab) -> TabId {
+        let id = App::id_of(&to);
+        for pane in &mut self.panes {
+            for t in &mut pane.tabs {
+                if *t == from {
+                    *t = id;
+                }
+            }
+            if pane.active == Some(from) {
+                pane.active = Some(id);
+            }
+        }
+        self.tabs.insert(id, to);
+        if let Some(nav) = self.navs.remove(&from) {
+            self.navs.insert(id, nav);
+        }
+        self.remember(id);
+        id
+    }
+
+    /// A link took over tab `from`: `to` shows in its place, and `from` is kept to go back to.
+    fn take_over(&mut self, from: TabId, to: Tab) -> TabId {
+        let Some(mut old) = self.tabs.remove(&from) else { return App::id_of(&to) };
+        if let Tab::Bible(tab) = &mut old {
+            tab.stop_edit(&mut self.sh);
+        }
+        let mut nav = self.navs.remove(&from).unwrap_or_default();
+        nav.back.push(old);
+        nav.forward.clear();
+        self.navs.insert(from, nav);
+        let id = self.swap_in(from, to);
+        self.activate(id);
+        id
+    }
+
+    /// Go back (or forward) in tab `id` to the tab it was before, which comes back as it was left.
+    fn step_tab(&mut self, id: TabId, back: bool) {
+        let Some(mut nav) = self.navs.remove(&id) else { return };
+        // (A note that has gone since is passed over.)
+        let target = loop {
+            let popped = if back { nav.back.pop() } else { nav.forward.pop() };
+            let Some(tab) = popped else { break None };
+            let gone = match &tab {
+                Tab::Note(t) => !self.sh.notes.contains_key(&t.path),
+                _ => false,
+            };
+            if !gone {
+                break Some(tab);
+            }
+        };
+        let Some(mut target) = target else {
+            self.navs.insert(id, nav);
+            return;
+        };
+        let Some(mut current) = self.tabs.remove(&id) else {
+            self.navs.insert(id, nav);
+            return;
+        };
+        if let Tab::Bible(tab) = &mut current {
+            tab.stop_edit(&mut self.sh);
+        }
+        if back { nav.forward.push(current) } else { nav.back.push(current) }
+        // What changed while it was away: its marks, its text.
+        match &mut target {
+            Tab::Bible(t) => t.marks_changed(),
+            // (A note is as it was, with its caret, unless it was changed meanwhile.)
+            Tab::Note(t) if self.sh.notes.get(&t.path).is_some_and(|text| text != t.doc.source()) => t.reload(&self.sh),
+            Tab::Log(t) => t.note.reload(&self.sh),
+            _ => {}
+        }
+        self.navs.insert(id, nav);
+        let new = self.swap_in(id, target);
+        self.activate(new);
     }
 
     /// Take a tab out of its pane (not out of the app). A pane left with no tabs goes away.
@@ -1081,7 +1211,46 @@ impl App {
         self.settle_reading();
         self.sh.save();
         self.note_session();
-        Task::batch([task, self.shown_changed()])
+        let menu = self.menu_state();
+        let told = if self.menu_synced == Some(menu) {
+            Task::none()
+        } else {
+            self.menu_synced = Some(menu);
+            native::sync_menu(self.main, menu).discard()
+        };
+        Task::batch([task, self.shown_changed(), told])
+    }
+
+    /// What the menu bar shows of the app: what has somewhere to go, and what is on.
+    fn menu_state(&self) -> commands::MenuState {
+        let tab = self.focused_tab().and_then(|id| self.tabs.get(&id));
+        let focused = self.focused_tab();
+        let outer = focused.map(|id| self.outer(id)).unwrap_or_default();
+        let (back, forward) = match focused {
+            Some(id) => (self.inner_can(id, true) || outer.back, self.inner_can(id, false) || outer.forward),
+            None => (false, false),
+        };
+        let bible = match tab {
+            Some(Tab::Bible(t)) => Some(t),
+            _ => None,
+        };
+        let shown = |on: fn(&bible_tab::BibleTab) -> bool| bible.is_some_and(|t| on(t));
+        commands::MenuState {
+            back,
+            forward,
+            tabs: self.pane_index(self.focus).is_some_and(|p| self.panes[p].tabs.len() > 1),
+            can_read: bible.is_some(),
+            reading: self.reader_mode.is_some(),
+            search: !self.sh.backend.modules().is_empty(),
+            strongs: shown(|t| t.show_strongs),
+            marks: shown(|t| t.show_marks),
+            footnotes: shown(|t| t.show_footnotes),
+            refs: shown(|t| t.show_refs),
+            strongs_in_margin: shown(|t| t.in_margin.strongs),
+            marks_in_margin: shown(|t| t.in_margin.marks),
+            footnotes_in_margin: shown(|t| t.in_margin.footnotes),
+            refs_in_margin: shown(|t| t.in_margin.refs),
+        }
     }
 
     /// The tabs showing: the one of each pane, or only that of the pane filling the window.
@@ -1222,12 +1391,22 @@ impl App {
             }
             Message::Navigate { back } => {
                 let Some(id) = self.panes.iter().find(|p| p.id == self.focus).and_then(|p| p.active) else { return Task::none() };
-                match self.tabs.get(&id) {
-                    Some(Tab::Bible(_)) => self.handle(Message::Bible(id, if back { BibleMsg::Back } else { BibleMsg::Forward })),
-                    Some(Tab::Note(_)) => self.handle(Message::Note(id, if back { NoteMsg::Back } else { NoteMsg::Forward })),
-                    Some(Tab::Dict(_)) => self.handle(Message::Dict(id, if back { DictMsg::Back } else { DictMsg::Forward })),
-                    _ => Task::none(),
-                }
+                self.go(id, back)
+            }
+            Message::NavTab(id, back) => {
+                self.touch(id);
+                self.go(id, back)
+            }
+            // A tab's own back and forward buttons: its history first, then the tab it was before.
+            Message::Bible(id, BibleMsg::Back) | Message::Note(id, NoteMsg::Back) | Message::Dict(id, DictMsg::Back) if !self.inner_can(id, true) => {
+                self.touch(id);
+                self.step_tab(id, true);
+                Task::none()
+            }
+            Message::Bible(id, BibleMsg::Forward) | Message::Note(id, NoteMsg::Forward) | Message::Dict(id, DictMsg::Forward) if !self.inner_can(id, false) => {
+                self.touch(id);
+                self.step_tab(id, false);
+                Task::none()
             }
             Message::MenuOpen(dest) => match self.link_menu.take() {
                 Some(menu) => self.open_spec(menu.from, menu.spec, dest),
@@ -1274,6 +1453,7 @@ impl App {
                 }
                 let Some(Tab::Bible(tab)) = self.tabs.get_mut(&id) else { return Task::none() };
                 let selected = matches!(msg, BibleMsg::SelectionChanged(Some(_)));
+                let open_word = matches!(msg, BibleMsg::OpenWord(_));
                 let (task, request) = tab.update(&mut self.sh, msg);
                 let task = task.map(move |m| Message::Bible(id, m));
                 // A note waiting for a passage (Reselect, Mark) takes the next selection that settles.
@@ -1282,7 +1462,11 @@ impl App {
                 }
                 match request {
                     Some(bible_tab::Request::Open(spec)) => {
-                        let dest = Dest::from_modifiers(self.modifiers);
+                        // (A card's "Open in tab" button is not a link: it opens a tab, not over this one.)
+                        let dest = match Dest::from_modifiers(self.modifiers) {
+                            Dest::Here if open_word => Dest::OtherPane,
+                            dest => dest,
+                        };
                         return Task::batch([task, self.open_spec(id, spec, dest)]);
                     }
                     Some(bible_tab::Request::Menu(spec, at)) => self.link_menu = Some(LinkMenu { at, spec, from: id }),
@@ -1440,7 +1624,7 @@ impl App {
                     PlanMsg::Link(study_core::markdown::LinkTarget::Note(name)) => {
                         let name = name.split_once('#').map_or(name.as_str(), |(n, _)| n).to_string();
                         if let Some(path) = study_core::markdown::resolve_note(&self.sh.note_paths(), &name).cloned() {
-                            self.show_note(path);
+                            self.open_note_at(id, path, Dest::from_modifiers(self.modifiers));
                         }
                         return Task::none();
                     }
@@ -1461,7 +1645,7 @@ impl App {
                     _ => None,
                 };
                 if let Some(path) = picked {
-                    self.show_note(path);
+                    self.open_note_at(id, path, Dest::from_modifiers(self.modifiers));
                 }
                 Task::none()
             }
@@ -1534,6 +1718,53 @@ impl App {
             Message::CloseTab(id) => {
                 self.close_tab(id);
                 Task::none()
+            }
+            Message::MenuInstalled => {
+                self.menu_synced = None;
+                Task::none()
+            }
+            Message::Command(command) => {
+                use commands::Command as C;
+                let main = self.main;
+                match command {
+                    C::Settings => self.handle(Message::OpenSettings),
+                    C::NewTab => self.handle(Message::NewTabHere(main)),
+                    C::NewPane => self.handle(Message::NewPaneHere(main)),
+                    C::CloseTab => self.handle(Message::CloseFocusedTab(main)),
+                    C::PreviousTab => self.handle(Message::CycleTab(main, false)),
+                    C::NextTab => self.handle(Message::CycleTab(main, true)),
+                    C::Back => self.handle(Message::Navigate { back: true }),
+                    C::Forward => self.handle(Message::Navigate { back: false }),
+                    C::Search => self.handle(Message::OpenSearch),
+                    C::ReaderMode => {
+                        if self.reader_mode.is_some() {
+                            self.reader_mode = None;
+                        } else if let Some(id) = self.focused_tab().filter(|id| matches!(self.tabs.get(id), Some(Tab::Bible(_)))) {
+                            self.start_reading(id);
+                        }
+                        Task::none()
+                    }
+                    setting => {
+                        // The Bible tab's own settings: each message carries the new value.
+                        use bible_tab::NoteKind as K;
+                        let state = self.menu_state();
+                        let focused = self.focused_tab().filter(|id| matches!(self.tabs.get(id), Some(Tab::Bible(_))));
+                        match (focused, setting.setting()) {
+                            (Some(id), Some((kind, in_margin))) if state.enabled(setting) => {
+                                let on = !state.checked(setting);
+                                let msg = match (kind, in_margin) {
+                                    (K::Strongs, false) => BibleMsg::ToggleStrongs(on),
+                                    (K::Marks, false) => BibleMsg::ToggleMarks(on),
+                                    (K::Footnotes, false) => BibleMsg::ToggleFootnotes(on),
+                                    (K::Refs, false) => BibleMsg::ToggleRefs(on),
+                                    (kind, true) => BibleMsg::SetInMargin(kind, on),
+                                };
+                                self.handle(Message::Bible(id, msg))
+                            }
+                            _ => Task::none(),
+                        }
+                    }
+                }
             }
             Message::NewTabHere(window) => {
                 if window == self.main {
@@ -1758,7 +1989,7 @@ impl App {
             Message::SaveLayout => {
                 let name = self.layout_draft.trim().to_string();
                 if !name.is_empty() && !name.eq_ignore_ascii_case(DEFAULT_LAYOUT) {
-                    let workspace = self.workspace();
+                    let workspace = self.layout_to_save();
                     self.sh.save_layout(NamedLayout { name: name.clone(), workspace });
                     self.layout_draft.clear();
                     self.naming = false;
@@ -1773,6 +2004,8 @@ impl App {
                     let Some(layout) = self.sh.layouts.iter().find(|l| l.name == name) else { return Task::none() };
                     layout.workspace.clone()
                 };
+                // (What the readers read is not the layout's: the ones open carry on into it.)
+                let workspace = self.layout_with_readers(&workspace);
                 match self.apply_workspace(&workspace) {
                     Ok(task) => {
                         self.panel = None;
@@ -2110,34 +2343,50 @@ impl App {
             .or_else(|| self.sh.backend.strongs_dictionary(key))
     }
 
-    /// Show an entry in a dictionary tab. Followed plainly, it goes to the dictionary tab already
-    /// open (or the one it came from), and failing that to the other pane, so that what was being
-    /// read stays in view.
+    /// Show an entry in a dictionary tab. Followed plainly, a tab that shows it comes forward, else the tab
+    /// the link is in goes to it; a new tab, the other pane or a new pane are asked for by keys.
     fn open_dictionary(&mut self, from: TabId, module: ModuleId, key: String, dest: Dest) {
-        let existing = |app: &App| app.last_dict.filter(|id| matches!(app.tabs.get(id), Some(Tab::Dict(_))));
-        let target = if dest == Dest::Here {
-            let source = matches!(self.tabs.get(&from), Some(Tab::Dict(_))).then_some(from);
-            source.or_else(|| existing(self))
-        } else {
-            None
-        };
-        let target = match target {
-            Some(id) => id,
-            None => {
-                let from_pane = self.pane_of(from).unwrap_or(0);
-                let pane = self.target_pane(from_pane, if dest == Dest::Here { Dest::OtherPane } else { dest });
-                // The other pane's own dictionary tab, if that is what it is showing.
-                let reusable = (matches!(dest, Dest::Here | Dest::OtherPane))
-                    .then(|| self.panes[pane].active)
-                    .flatten()
-                    .filter(|id| matches!(self.tabs.get(id), Some(Tab::Dict(_))));
-                match reusable {
-                    Some(id) => id,
-                    None => {
-                        let tab = Tab::Dict(Box::new(DictTab::new(self.next_tab, &self.sh, module.clone(), "")));
-                        self.next_tab += 1;
-                        self.add_tab(pane, tab)
-                    }
+        if dest == Dest::Here {
+            // As a browser follows a link: a tab that shows the entry comes forward; else the tab the link
+            // is in goes to it (a dictionary tab in its own history, any other kind of tab being taken over,
+            // to be gone back to).
+            let showing = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Dict(d) if d.module == module && d.key == key).then_some(*id));
+            let mut fresh = false;
+            let target = match showing {
+                Some(id) => id,
+                None if matches!(self.tabs.get(&from), Some(Tab::Dict(_))) => from,
+                None => {
+                    let tab = Tab::Dict(Box::new(DictTab::new(self.next_tab, &self.sh, module.clone(), "")));
+                    self.next_tab += 1;
+                    fresh = true;
+                    self.take_over(from, tab)
+                }
+            };
+            if showing.is_none()
+                && let Some(Tab::Dict(tab)) = self.tabs.get_mut(&target)
+            {
+                tab.open(&self.sh, module, &key);
+                if fresh {
+                    tab.forget_history();
+                }
+            }
+            self.activate(target);
+            return;
+        }
+        let target = {
+            let from_pane = self.pane_of(from).unwrap_or(0);
+            let pane = self.target_pane(from_pane, dest);
+            // The other pane's own dictionary tab, if that is what it is showing.
+            let reusable = (dest == Dest::OtherPane)
+                .then(|| self.panes[pane].active)
+                .flatten()
+                .filter(|id| matches!(self.tabs.get(id), Some(Tab::Dict(_))));
+            match reusable {
+                Some(id) => id,
+                None => {
+                    let tab = Tab::Dict(Box::new(DictTab::new(self.next_tab, &self.sh, module.clone(), "")));
+                    self.next_tab += 1;
+                    self.add_tab(pane, tab)
                 }
             }
         };
@@ -2147,17 +2396,63 @@ impl App {
         self.activate(target);
     }
 
+    /// The Bible tab that is on screen (in front in its pane, and its pane not hidden by another filling the
+    /// window): the one last used if it is, else any.
+    fn visible_reader(&self) -> Option<TabId> {
+        let reader = |id: &TabId| matches!(self.tabs.get(id), Some(Tab::Bible(_))) && self.is_showing(*id);
+        self.last_bible.into_iter().chain(self.tabs.keys().copied()).find(|id| reader(id))
+    }
+
+    /// The Bible tab that shows the chapter of `range` already (in its module's numbering): `from` if it
+    /// does, else the one last used if it does, else any.
+    fn bible_showing(&self, range: scripture::RefRange, from: TabId) -> Option<TabId> {
+        let shows = |id: &TabId| match self.tabs.get(id) {
+            Some(Tab::Bible(t)) => {
+                let mapped = self.sh.backend.versification(&t.module).map_from_kjv(range);
+                (t.book, t.chapter_no) == (mapped.book, mapped.chapter)
+            }
+            _ => false,
+        };
+        std::iter::once(from)
+            .chain(self.last_bible)
+            .chain(self.tabs.keys().copied())
+            .find(|id| shows(id))
+    }
+
     fn open_verse(&mut self, from: TabId, range: scripture::RefRange, dest: Dest) -> Task<Message> {
         if self.sh.backend.modules().is_empty() {
             self.sh.toast("No Bible modules installed: add some in Modules");
             return Task::none();
         }
         // The Bible tab the link belongs to: the one it was followed in, or the one a note works with.
-        let natural = if matches!(self.tabs.get(&from), Some(Tab::Bible(_))) { from } else { self.bible_for_showing() };
         if dest == Dest::Here {
-            self.activate(natural);
-            return self.show_verse_in(natural, range);
+            // As a browser follows a link: a Bible tab that shows the chapter comes forward; else the tab the
+            // link is in goes to it if it is a Bible tab; else a Bible tab on screen is claimed; else the tab
+            // the link is in is taken over, to be gone back to.
+            let showing = self.bible_showing(range, from);
+            let mut fresh = false;
+            let target = match showing {
+                Some(id) => id,
+                None if matches!(self.tabs.get(&from), Some(Tab::Bible(_))) => from,
+                // A reader that is on screen is claimed (this is the exception: a passage is for reading, so
+                // it goes to the reader, whatever kind of tab the link was in).
+                None if self.visible_reader().is_some() => self.visible_reader().unwrap_or(from),
+                None => {
+                    let module = self.reference_bible_id().and_then(|b| self.bible_tab(b)).map(|t| t.module.clone()).unwrap_or_else(|| self.first_module());
+                    let near = self.reference_bible_id();
+                    let tab = self.new_bible(module, near);
+                    fresh = true;
+                    self.take_over(from, tab)
+                }
+            };
+            self.activate(target);
+            let task = self.show_verse_in(target, range);
+            if fresh && let Some(Tab::Bible(tab)) = self.tabs.get_mut(&target) {
+                tab.forget_history();
+            }
+            return task;
         }
+        let natural = if matches!(self.tabs.get(&from), Some(Tab::Bible(_))) { from } else { self.bible_for_showing() };
         // A new tab goes beside the Bible tab the link belongs with. "Other pane" and "new pane" are
         // relative to where the link is (a note's, say), which is not that tab's pane when the Bible
         // tab is the other pane already.
@@ -2192,15 +2487,28 @@ impl App {
             self.sh.status = format!("No note named \u{201C}{name}\u{201D} yet");
             return;
         };
-        let from_note = matches!(self.tabs.get(&from), Some(Tab::Note(_)));
+        self.open_note_at(from, path, dest);
+    }
+
+    /// Follow a link from tab `from` to the note at `path`.
+    fn open_note_at(&mut self, from: TabId, path: String, dest: Dest) {
         if dest == Dest::Here {
-            if from_note {
-                if let Some(Tab::Note(tab)) = self.tabs.get_mut(&from) {
-                    tab.open(&mut self.sh, path);
+            // As a browser follows a link: a tab that shows the note comes forward; else the tab the link
+            // is in goes to it (a note tab in its own history, any other kind of tab being taken over, to
+            // be gone back to).
+            let showing = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Note(n) if n.path == path).then_some(*id));
+            match showing {
+                Some(id) => self.activate(id),
+                None if matches!(self.tabs.get(&from), Some(Tab::Note(_))) => {
+                    if let Some(Tab::Note(tab)) = self.tabs.get_mut(&from) {
+                        tab.open(&mut self.sh, path);
+                    }
+                    self.activate(from);
                 }
-                self.activate(from);
-            } else {
-                self.show_note(path);
+                None => {
+                    let tab = self.new_note(path);
+                    self.take_over(from, tab);
+                }
             }
             return;
         }
@@ -2378,7 +2686,27 @@ impl App {
             iced::Event::Window(iced::window::Event::Opened { size, .. } | iced::window::Event::Resized(size)) => Some(Message::WindowSize(window, size)),
             // ⌘[ and ⌘] (Ctrl elsewhere), and the mouse's own back and forward buttons. With shift
             // they change tab instead (the shifted keys are { and } on some layouts), and ⌘W closes one.
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) if modifiers.command() => {
+            // (On a Mac these are the menu bar's, which takes the keys before they get here.)
+            // The settings of the reader (option with the command key and a digit): matched by the key
+            // on the keyboard, as option changes the character. (Where Ctrl and Alt together make
+            // AltGr, a layout may take these keys for itself.)
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { physical_key, modifiers, .. })
+                if modifiers.command() && modifiers.alt() && !cfg!(target_os = "macos") =>
+            {
+                use iced::keyboard::key::{Code, Physical};
+                let digit = match physical_key {
+                    Physical::Code(Code::Digit1) => '1',
+                    Physical::Code(Code::Digit2) => '2',
+                    Physical::Code(Code::Digit3) => '3',
+                    Physical::Code(Code::Digit4) => '4',
+                    _ => return None,
+                };
+                commands::Command::ALL
+                    .into_iter()
+                    .find(|c| c.shortcut().is_some_and(|s| s.alt && s.key == digit && s.shift == modifiers.shift()))
+                    .map(Message::Command)
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) if modifiers.command() && !cfg!(target_os = "macos") => {
                 match key.as_ref() {
                     iced::keyboard::Key::Character("[" | "{") if modifiers.shift() => Some(Message::CycleTab(window, false)),
                     iced::keyboard::Key::Character("]" | "}") if modifiers.shift() => Some(Message::CycleTab(window, true)),
@@ -2400,7 +2728,7 @@ impl App {
         let mut all = vec![
             keys,
             iced::window::close_requests().map(Message::CloseRequested),
-            native::settings_chosen().map(|()| Message::OpenSettings),
+            native::commands_chosen().map(Message::Command),
         ];
         // Escape leaves reading mode, unless a card is open: it is put away first.
         if self.reader_mode.is_some() && !(self.naming || self.setup.is_some()) {
@@ -2822,45 +3150,60 @@ impl App {
         container(bar).padding([TOP_BAR_PADDING, 16.0]).into()
     }
 
+    /// A tab without a bar of its own gets one, with the back and forward buttons where the other
+    /// tabs have theirs (a link followed here takes over the tab, and these go back to what it was).
+    fn with_nav_bar<'a>(&'a self, id: TabId, content: Element<'a, Message>) -> Element<'a, Message> {
+        let outer = self.outer(id);
+        let bar = container(
+            row![
+                icons::Icon::Back.arrow_button(outer.back, Message::NavTab(id, true)),
+                icons::Icon::Forward.arrow_button(outer.forward, Message::NavTab(id, false)),
+            ]
+            .spacing(4),
+        )
+        .padding([8, 16]);
+        column![bar, rule::horizontal(1), content].into()
+    }
+
     fn pane_view(&self, index: usize) -> Element<'_, Message> {
         let pane = &self.panes[index];
         let content: Element<'_, Message> = match pane.active.and_then(|id| self.tabs.get(&id)) {
             Some(Tab::Bible(tab)) => {
                 let id = tab.id;
-                tab.view(&self.sh).map(move |m| Message::Bible(id, m))
+                tab.view(&self.sh, self.outer(id)).map(move |m| Message::Bible(id, m))
             }
             Some(Tab::Dict(tab)) => {
                 let id = tab.id;
                 let searched = self.strongs_module();
-                tab.view(&self.sh, searched.as_ref()).map(move |m| Message::Dict(id, m))
+                tab.view(&self.sh, searched.as_ref(), self.outer(id)).map(move |m| Message::Dict(id, m))
             }
             Some(Tab::Commentary(tab)) => {
                 let id = tab.id;
-                tab.view(&self.sh).map(move |m| Message::Commentary(id, m))
+                self.with_nav_bar(id, tab.view(&self.sh).map(move |m| Message::Commentary(id, m)))
             }
             Some(Tab::Search(tab)) => {
                 let id = tab.id;
-                tab.view(&self.sh).map(move |m| Message::Search(id, m))
+                self.with_nav_bar(id, tab.view(&self.sh).map(move |m| Message::Search(id, m)))
             }
             Some(Tab::Backlinks(tab)) => {
                 let id = tab.id;
-                tab.view(&self.sh).map(move |m| Message::Backlinks(id, m))
+                self.with_nav_bar(id, tab.view(&self.sh).map(move |m| Message::Backlinks(id, m)))
             }
             Some(Tab::Plan(tab)) => {
                 let id = tab.id;
-                tab.view(&self.sh, &self.plan_cache, self.plans.confirm_remove.as_ref()).map(move |m| Message::Plan(id, m))
+                self.with_nav_bar(id, tab.view(&self.sh, &self.plan_cache, self.plans.confirm_remove.as_ref()).map(move |m| Message::Plan(id, m)))
             }
             Some(Tab::Note(tab)) => {
                 let id = tab.id;
                 let reference = self.reference_bible_id().and_then(|b| self.bible_tab(b));
-                tab.view(&self.sh, reference).map(move |m| Message::Note(id, m))
+                tab.view(&self.sh, reference, self.outer(id)).map(move |m| Message::Note(id, m))
             }
             Some(Tab::Log(tab)) => {
                 let id = tab.id();
                 let reference = self.reference_bible_id().and_then(|b| self.bible_tab(b));
-                tab.note.log_view(&self.sh, reference).map(move |m| Message::Log(id, m))
+                self.with_nav_bar(id, tab.note.log_view(&self.sh, reference).map(move |m| Message::Log(id, m)))
             }
-            Some(Tab::Blank(id)) => self.blank_view(*id),
+            Some(Tab::Blank(id)) => self.with_nav_bar(*id, self.blank_view(*id)),
             None => space::vertical().into(),
         };
         // What can be dropped on the pane: only there while something is being dragged, and the
@@ -4385,7 +4728,8 @@ mod tests {
         assert_eq!((tab.book, tab.chapter), (Book::from_osis("Acts").unwrap(), 28), "back from Romans 1 into Acts");
         app.bible_mut().chapter_no = 1;
         let _ = app.update(Message::Commentary(id, CommentaryMsg::Link(study_core::markdown::LinkTarget::Verse { range: scripture::RefRange { book: Book::JOHN, chapter: 3, verses: Some((16, 16)) }, module: None })));
-        assert_eq!((app.bible().book, app.bible().chapter_no), (Book::JOHN, 3), "a verse link shows it in the reader");
+        assert_eq!((app.bible().book, app.bible().chapter_no), (Book::JOHN, 3), "a verse link shows it in the reader on screen");
+        assert!(matches!(app.tabs.get(&id), Some(Tab::Commentary(_))), "and the commentary stays");
 
         // The text selects and moves but cannot be changed; what is copied is the words.
         let _ = app.update(Message::Commentary(id, CommentaryMsg::PickBook(bible_tab::BookChoice(Book::JOHN))));
@@ -4486,6 +4830,11 @@ mod tests {
         let slice = app.bible().select_words.expect("the words are to be selected").1;
         let canon = app.bible().chapter.as_ref().unwrap().canonical_verses()[&16].clone();
         assert!(canon[slice.start..slice.end].to_lowercase().contains("only begotten"), "{}", &canon[slice.start..slice.end]);
+        // (No Bible tab was on John 3, so the search tab was taken over by a new one, which goes back to it.)
+        let shown = app.last_bible.unwrap();
+        assert!(app.tabs.get(&id).is_none());
+        let _ = app.update(Message::NavTab(shown, true));
+        assert!(matches!(app.tabs.get(&id), Some(Tab::Search(_))));
         // Narrowing to a book, and showing more.
         let _ = app.update(Message::Search(id, SearchMsg::Book(Some(Book::JOHN))));
         let _ = app.update(Message::Search(id, SearchMsg::More));
@@ -4683,6 +5032,31 @@ mod tests {
     }
 
     #[test]
+    fn the_reading_logs_day_headings_link_to_their_daily_notes_while_those_exist() {
+        use crate::shared::READING_LOG;
+        let mut app = App::new();
+        let now = chrono::Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        assert!(app.sh.log_reading(Book::JOHN, 3, &now));
+        assert!(app.sh.notes[READING_LOG].contains(&format!("## {day}\n")), "no daily note yet: a plain date");
+        // Making today's note links its day.
+        let daily = app.sh.templates().into_iter().find(|t| t.name == "Daily").unwrap();
+        let made = study_core::templates::plan(&daily, &now, None, |_| false);
+        let path = made.path.clone();
+        let template = daily.path.clone();
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::PickKind(template)));
+        assert!(app.sh.notes.contains_key(&path), "the note was made");
+        let link = format!("## [[{}|{day}]]", path.trim_end_matches(".md"));
+        assert!(app.sh.notes[READING_LOG].contains(&link), "{}", app.sh.notes[READING_LOG]);
+        // Taking a chapter back and logging another leaves it linked; the note going away unlinks it.
+        let _ = app.sh.log_reading(Book::JOHN, 4, &now);
+        assert!(app.sh.notes[READING_LOG].contains(&link));
+        app.sh.delete_note(&path);
+        assert!(app.sh.notes[READING_LOG].contains(&format!("## {day}\n")) && !app.sh.notes[READING_LOG].contains("[[notes"), "{}", app.sh.notes[READING_LOG]);
+    }
+
+    #[test]
     fn a_new_notes_tab_opens_on_todays_note_when_there_is_one() {
         let mut app = App::new();
         let pane = app.panes[0].id;
@@ -4853,7 +5227,9 @@ mod tests {
         app.note_reading(t0 + Duration::from_secs(31));
         let log = app.sh.notes.get(crate::shared::READING_LOG).expect("the log is made").clone();
         assert!(log.contains("tags: [reading-log]") && log.contains("# Reading log"), "{log}");
-        assert!(log.contains(&format!("## {}", now.format("%Y-%m-%d"))) && log.contains("- [[John 3]]"), "{log}");
+        // (Today's note exists, so the day's heading is a link to it.)
+        let day = now.format("%Y-%m-%d");
+        assert!(log.contains(&format!("## [[{}|{day}]]", daily_path.trim_end_matches(".md"))) && log.contains("- [[John 3]]"), "{log}");
         assert!(app.sh.notes[&daily_path].contains("## Reading\n\n- [[John 3]]"), "{}", app.sh.notes[&daily_path]);
         app.note_reading(t0 + Duration::from_secs(120));
         assert_eq!(app.sh.notes[crate::shared::READING_LOG].matches("[[John 3]]").count(), 1);
@@ -5584,7 +5960,8 @@ mod tests {
     #[test]
     fn show_in_reader_switches_chapter_marks_and_requests_reveal() {
         let mut app = App::new();
-        let _ = app.update(app.n(NoteMsg::OpenLink(LinkTarget::Verse {
+        // (A link in the reader navigates the reader.)
+        let _ = app.update(app.b(BibleMsg::OpenLink(LinkTarget::Verse {
             range: RefRange::parse("Ps 23:2-3").unwrap(),
             module: None,
         })));
@@ -5594,14 +5971,14 @@ mod tests {
         assert_eq!(verse, 2);
 
         // Asking again for the same verse needs a fresh token, or the widget would ignore it.
-        let _ = app.update(app.n(NoteMsg::OpenLink(LinkTarget::Verse {
+        let _ = app.update(app.b(BibleMsg::OpenLink(LinkTarget::Verse {
             range: RefRange::parse("Ps 23:2-3").unwrap(),
             module: None,
         })));
         assert_ne!(app.bible().reveal.unwrap().0, first);
 
         // A chapter that is not available leaves everything alone and says so.
-        let _ = app.update(app.n(NoteMsg::OpenLink(LinkTarget::Verse {
+        let _ = app.update(app.b(BibleMsg::OpenLink(LinkTarget::Verse {
             range: RefRange::parse("Gen 1:1").unwrap(),
             module: None,
         })));
@@ -5617,6 +5994,9 @@ mod tests {
     fn app_with_writer(text: &str) -> App {
         let mut app = App::new();
         app.note_mut().doc = Document::new(text);
+        // (As typing does, the text is the note's.)
+        let path = app.note().path.clone();
+        app.sh.notes.insert(path, text.to_string());
         app
     }
 
@@ -5797,7 +6177,7 @@ mod tests {
         assert_eq!(h.app.note().path, "notes/Nicodemus.md");
         assert!(h.app.note().doc.source().contains("Nicodemus"), "the writer now holds that note");
 
-        // A verse link shows the passage in the reader and leaves the writer's text and caret alone.
+        // A verse link shows the passage in the reader on screen and leaves the writer's text and caret alone.
         let mut h = Harness::new(app_with_writer("see [[Ps 23:1]] now\nlast"));
         let end = h.app.note().doc.selection().head;
         let (x, y) = h.in_editor(h.app.note().editor_id(), 16.0, 60.0, 12.0);
@@ -5879,7 +6259,7 @@ mod tests {
         // Cmd-click still follows, for when you do want to.
         h.feed(Event::Keyboard(keyboard::Event::ModifiersChanged(Modifiers::COMMAND)));
         h.click(b.x + 60.0, b.y + 14.0);
-        assert_eq!(h.app.note().path, "notes/Nicodemus.md");
+        assert!(h.app.tabs.values().any(|t| matches!(t, Tab::Note(n) if n.path == "notes/Nicodemus.md")), "the note it names is open");
     }
 
     #[test]
@@ -6006,14 +6386,13 @@ mod tests {
         let b = h.bounds_of_text("[[Nicodemus]] and **bold**").expect("the card shows its comment");
         // Rendered, the link is just its label at the start of the line: a plain click follows it.
         h.click(b.x + 20.0, b.y + 12.0);
-        assert_eq!(h.app.note().path, "notes/Nicodemus.md");
-        assert_ne!(before, h.app.note().path);
+        // The link took over the tab the reader was in (the only one), which is gone back to.
+        let shown = h.app.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Note(n) if n.path == "notes/Nicodemus.md").then_some(*id)).expect("the note it names is shown");
+        assert!(!h.app.tabs.values().any(|t| matches!(t, Tab::Bible(_))));
+        assert_eq!(h.app.note().path, before, "the other note tab is as it was");
+        let _ = h.app.update(Message::NavTab(shown, true));
         assert!(h.app.bible().editing.is_none(), "following a link is not editing");
         // Anywhere else in the card (the far end of the first line) starts editing it.
-        // Following the link brought the note's pane into view; put it away again so the
-        // reader has its margin back.
-        assert!(h.app.zoomed.is_none(), "a followed link shows where it went");
-        h.app.zoomed = Some(h.app.panes[0].id);
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
         let b = h.bounds_of_text("[[Nicodemus]] and **bold**").expect("the card is back");
         h.click(b.x + b.width - 10.0, b.y + 12.0);
@@ -6516,6 +6895,100 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_bars_commands_do_what_the_keys_did_and_the_menu_is_told_what_is_possible() {
+        use commands::Command as C;
+        let mut app = App::new();
+        let pane = app.pane_index(app.focus).unwrap();
+        let tabs = app.panes[pane].tabs.len();
+        let state = app.menu_state();
+        assert!(state.can_read || !app.panes[pane].active.is_some_and(|a| matches!(app.tabs.get(&a), Some(Tab::Bible(_)))));
+        assert!(!state.tabs, "one tab: nothing to step to");
+        let _ = app.update(Message::Command(C::NewTab));
+        assert_eq!(app.panes[pane].tabs.len(), tabs + 1);
+        assert!(app.menu_state().tabs, "now there is");
+        let before = app.panes[pane].active;
+        let _ = app.update(Message::Command(C::PreviousTab));
+        assert_ne!(app.panes[pane].active, before);
+        let _ = app.update(Message::Command(C::CloseTab));
+        assert_eq!(app.panes[pane].tabs.len(), tabs);
+        let panes = app.panes.len();
+        let _ = app.update(Message::Command(C::NewPane));
+        assert_eq!(app.panes.len(), panes + 1);
+        // Reader mode, from the menu, for the Bible tab in front.
+        let bible = app.bid();
+        app.activate(bible);
+        let _ = app.update(Message::Command(C::ReaderMode));
+        assert!(app.reader_mode.is_some() && app.menu_state().reading);
+        let _ = app.update(Message::Command(C::ReaderMode));
+        assert!(app.reader_mode.is_none());
+    }
+
+    #[test]
+    fn the_menu_toggles_the_readers_settings_and_the_margin_ones_wait_for_their_kind() {
+        use commands::Command as C;
+        let mut app = App::new();
+        let bible = app.bid();
+        app.activate(bible);
+        let _ = app.update(Message::Bible(bible, BibleMsg::ToggleStrongs(false)));
+        let _ = app.update(Message::Bible(bible, BibleMsg::ToggleMarks(true)));
+        let _ = app.update(Message::Bible(bible, BibleMsg::ToggleFootnotes(false)));
+        let _ = app.update(Message::Bible(bible, BibleMsg::ToggleRefs(false)));
+        let state = app.menu_state();
+        assert!(!state.enabled(C::StrongsInMargin) && state.enabled(C::MarksInMargin), "only for what is shown");
+        let before = (app.bible().in_margin.strongs, app.bible().in_margin.marks);
+        let _ = app.update(Message::Command(C::StrongsInMargin));
+        assert_eq!(app.bible().in_margin.strongs, before.0, "Strong's are hidden: nothing happens");
+        let _ = app.update(Message::Command(C::MarksInMargin));
+        assert_eq!(app.bible().in_margin.marks, !before.1);
+        let _ = app.update(Message::Command(C::MarksInMargin));
+        assert_eq!(app.bible().in_margin.marks, before.1);
+        for command in [C::ToggleStrongs, C::ToggleMarks, C::ToggleFootnotes, C::ToggleRefs] {
+            let was = (app.bible().show_strongs, app.bible().show_marks, app.bible().show_footnotes, app.bible().show_refs);
+            let _ = app.update(Message::Command(command));
+            let now = (app.bible().show_strongs, app.bible().show_marks, app.bible().show_footnotes, app.bible().show_refs);
+            let flipped = match command {
+                C::ToggleStrongs => (!was.0, was.1, was.2, was.3),
+                C::ToggleMarks => (was.0, !was.1, was.2, was.3),
+                C::ToggleFootnotes => (was.0, was.1, !was.2, was.3),
+                _ => (was.0, was.1, was.2, !was.3),
+            };
+            assert_eq!(now, flipped, "{command:?}");
+        }
+        assert!(app.bible().show_strongs && !app.bible().show_marks, "and the menu follows");
+        assert!(app.menu_state().checked(C::ToggleStrongs) && app.menu_state().enabled(C::StrongsInMargin));
+        let _ = app.update(Message::Command(C::NewTab));
+        assert!(!app.menu_state().enabled(C::ToggleMarks), "not a Bible tab in front");
+    }
+
+    #[test]
+    fn a_layout_does_not_keep_what_the_readers_read_and_open_readers_carry_into_it() {
+        let mut app = App::new();
+        let first = app.bid();
+        let _ = app.update(Message::Bible(first, BibleMsg::PickChapter(ChapterChoice(Book::PSALMS, 23))));
+        app.add_bible(0);
+        let second = *app.panes[0].tabs.last().unwrap();
+        let _ = app.update(Message::Bible(second, BibleMsg::PickChapter(ChapterChoice(Book::NUMBERS, 21))));
+        app.layout_draft = "Two readers".into();
+        let _ = app.update(Message::SaveLayout);
+        let saved = &app.sh.layouts.iter().find(|l| l.name == "Two readers").unwrap().workspace;
+        let readers: Vec<&state::TabSave> = saved.panes.iter().flat_map(|p| p.tabs.iter()).filter(|t| matches!(t, state::TabSave::Bible { .. })).collect();
+        assert_eq!(readers.len(), 2);
+        assert!(readers.iter().all(|t| matches!(t, state::TabSave::Bible { module, book, chapter: 0, .. } if module.is_empty() && book.is_empty())), "no passage is stored");
+        // Open readers elsewhere (one, reading Psalm 23) go into it: the first reader gets that, the other the default passage.
+        let _ = app.update(Message::LoadLayout(DEFAULT_LAYOUT.into()));
+        let only = app.bid();
+        let _ = app.update(Message::Bible(only, BibleMsg::PickChapter(ChapterChoice(Book::PSALMS, 23))));
+        let _ = app.update(Message::LoadLayout("Two readers".into()));
+        let bibles: Vec<(Book, u16)> = app.workspace().panes.iter().flat_map(|p| p.tabs.iter()).filter_map(|t| match t {
+            state::TabSave::Bible { book, chapter, .. } => Some((Book::from_osis(book).unwrap(), *chapter)),
+            _ => None,
+        }).collect();
+        assert_eq!(bibles.len(), 2);
+        assert!(bibles.contains(&(Book::PSALMS, 23)), "the reader that was open keeps its place: {bibles:?}");
+        assert!(bibles.contains(&(Book::JOHN, 3)), "the other opens at the default passage: {bibles:?}");
+    }
+
+    #[test]
     fn the_keys_close_the_tab_in_front_and_step_through_the_panes_tabs() {
         let mut app = App::new();
         let main = app.main;
@@ -6664,18 +7137,36 @@ mod tests {
     }
 
     #[test]
-    fn a_notes_verse_link_shows_in_the_bible_tab_last_used() {
+    fn a_verse_link_claims_the_reader_on_screen_else_takes_over_its_tab_and_back_returns_to_it() {
         let mut app = App::new();
-        app.add_bible(0);
-        let (first, second) = (app.panes[0].tabs[0], app.panes[0].tabs[1]);
-        // Use the first tab, then follow a link in the note.
-        let _ = app.update(Message::Bible(first, BibleMsg::ToggleStrongs(false)));
-        let target = LinkTarget::Verse { range: RefRange::parse("Num 21:9").unwrap(), module: None };
-        let note = app.nid();
-        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(target)));
-        assert_eq!(bible_of(&app, first).book, Book::NUMBERS, "the last used tab took it");
-        assert_eq!(bible_of(&app, second).book, Book::JOHN);
-        assert_eq!(app.panes[0].active, Some(first));
+        let (bible, note) = (app.bid(), app.nid());
+        let numbers = LinkTarget::Verse { range: RefRange::parse("Num 21:9").unwrap(), module: None };
+        // A reader is on screen: it is claimed, and the note's tab is left as it is.
+        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(numbers.clone())));
+        assert_eq!(bible_of(&app, bible).book, Book::NUMBERS);
+        assert!(matches!(app.tabs.get(&note), Some(Tab::Note(_))));
+        // The note's pane fills the window, so the reader is not on screen: the note's tab becomes a Bible tab.
+        let note_pane = app.pane_of(note).unwrap();
+        app.zoomed = Some(app.panes[note_pane].id);
+        let psalm = LinkTarget::Verse { range: RefRange::parse("Ps 23:1").unwrap(), module: None };
+        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(psalm)));
+        let shown = app.last_bible.unwrap();
+        assert_ne!(shown, bible);
+        assert_eq!(bible_of(&app, shown).book, Book::PSALMS);
+        assert_eq!(app.pane_of(shown), Some(note_pane));
+        assert!(!app.tabs.contains_key(&note));
+        assert_eq!(bible_of(&app, bible).book, Book::NUMBERS, "the hidden reader is as it was");
+        // Back is the note, as it was; forward is the Bible tab again.
+        let _ = app.update(Message::NavTab(shown, true));
+        assert!(matches!(app.tabs.get(&note), Some(Tab::Note(_))) && !app.tabs.contains_key(&shown));
+        let _ = app.update(Message::NavTab(note, false));
+        assert_eq!(bible_of(&app, shown).book, Book::PSALMS);
+        let _ = app.update(Message::NavTab(shown, true));
+        // A tab that shows the chapter already comes forward instead, hidden or not: the note stays.
+        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(numbers)));
+        assert!(matches!(app.tabs.get(&note), Some(Tab::Note(_))));
+        assert_eq!(bible_tabs(&app), [bible], "no new tab");
+        assert!(app.zoomed.is_none_or(|z| Some(z) == app.pane_of(bible).map(|p| app.panes[p].id)), "the reader showing it is brought forward");
     }
 
     #[test]
@@ -7649,7 +8140,7 @@ mod tests {
         app.open_note_link(note, "Reading log", Dest::Here);
         assert!(app.sh.status.contains("No note named"), "{}", app.sh.status);
         assert!(!app.tabs.values().any(|t| matches!(t, Tab::Log(_))), "no log tab was made by it");
-        // From the log, a link to a note goes nowhere; a link to a verse and a web address do.
+        // From the log, a link to a note (a day's heading is one) opens it, as does a link to a verse.
         let id = app.show_log();
         let (mut asked, mut spec) = (None, None);
         for target in [
@@ -7658,9 +8149,9 @@ mod tests {
         ] {
             let Some(Tab::Log(tab)) = app.tabs.get_mut(&id) else { unreachable!() };
             let (_, request) = tab.update(&mut app.sh, NoteMsg::OpenLink(target.clone()));
-            if matches!(target, study_core::markdown::LinkTarget::Note(_)) { asked = Some(request.is_none()) } else { spec = request }
+            if matches!(target, study_core::markdown::LinkTarget::Note(_)) { asked = Some(request.is_some()) } else { spec = request }
         }
-        assert_eq!(asked, Some(true), "a link to a note does nothing in the log");
+        assert_eq!(asked, Some(true), "a link to a note opens it from the log");
         assert!(matches!(spec, Some(note_tab::Request::Open(opening::Spec::Verse { .. }))), "a verse opens");
     }
 
@@ -8622,14 +9113,14 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_click_follows_a_link_here_and_a_notes_link_goes_to_its_bible_tab() {
+    fn a_plain_click_follows_a_link_here_and_a_notes_verse_link_goes_to_the_reader_on_screen() {
         let mut app = App::new();
         let (bible, note) = (app.bid(), app.nid());
         let _ = app.update(Message::Note(note, NoteMsg::OpenLink(verse_link("Ps 23:1"))));
-        assert_eq!(app.bible().book, Book::PSALMS);
+        assert_eq!(app.bible().book, Book::PSALMS, "the reader on screen took it");
         assert_eq!(bible_tabs(&app), [bible], "no new tab");
         let _ = app.update(Message::Bible(bible, BibleMsg::OpenLink(verse_link("Num 21:9"))));
-        assert_eq!(app.bible().book, Book::NUMBERS, "a link in a Bible tab navigates that tab");
+        assert_eq!(bible_of(&app, bible).book, Book::NUMBERS, "a link in a Bible tab navigates that tab");
     }
 
     #[test]
@@ -8872,14 +9363,19 @@ mod tests {
         assert_eq!(dict_tabs(&app).len(), 1);
         let first = dict_tabs(&app)[0];
         assert_eq!(dict_of(&app, first).key, "G25");
-        assert_eq!(app.pane_of(first), Some(0), "beside the note it was followed from, not on top of it");
+        // Followed plainly it takes over the tab the link is in, which going back returns to.
+        let note_pane = app.pane_of(first).unwrap();
+        assert!(!app.tabs.contains_key(&note));
+        let _ = app.update(Message::NavTab(first, true));
+        assert!(matches!(app.tabs.get(&note), Some(Tab::Note(_))) && app.pane_of(note) == Some(note_pane));
+        assert_eq!(dict_tabs(&app).len(), 0);
         // With keys: a new tab, another pane, a new pane.
         app.modifiers = Modifiers::COMMAND;
         let _ = app.update(Message::Note(note, NoteMsg::OpenLink(link.clone())));
-        assert_eq!(dict_tabs(&app).len(), 2);
+        assert_eq!(dict_tabs(&app).len(), 1);
         app.modifiers = Modifiers::SHIFT;
         let _ = app.update(Message::Note(note, NoteMsg::OpenLink(link)));
-        assert_eq!(dict_tabs(&app).len(), 3);
+        assert_eq!(dict_tabs(&app).len(), 2);
         assert_eq!(app.panes.len(), 3);
         // A dictionary that is not installed says so.
         app.modifiers = Modifiers::empty();

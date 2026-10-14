@@ -734,6 +734,8 @@ impl NoteTab {
         let made = templates::plan(&template, &chrono::Local::now(), title, |path| sh.notes.contains_key(path));
         if let Some(text) = made.text {
             sh.notes.insert(made.path.clone(), text);
+            // (A day's note that was not there is now: its day in the reading log links to it.)
+            sh.sync_log_days();
         }
         self.open(sh, made.path);
     }
@@ -1112,7 +1114,7 @@ impl NoteTab {
         column![editor, rule::horizontal(1), bar].into()
     }
 
-    pub fn view<'a>(&'a self, sh: &'a Shared, reference: Option<&'a BibleTab>) -> Element<'a, NoteMsg> {
+    pub fn view<'a>(&'a self, sh: &'a Shared, reference: Option<&'a BibleTab>, outer: crate::shared::Outer) -> Element<'a, NoteMsg> {
         // The header bar, like the Bible tab's: the selector on the left, actions on the right.
         // Controls are as tall as the Bible tab's pickers so the two bars line up.
         let open = self.picker.is_some();
@@ -1152,18 +1154,11 @@ impl NoteTab {
             .on_press(NoteMsg::TogglePicker)
             .into(),
         };
-        let arrow = |icon: crate::icons::Icon, on: bool, msg: NoteMsg| {
-            let b = button(container(icon.view(18.0)).center(Length::Fill))
-                .width(CONTROL_HEIGHT)
-                .height(CONTROL_HEIGHT)
-                .padding(0)
-                .style(button::secondary);
-            if on { b.on_press(msg) } else { b }
-        };
+        let arrow = |icon: crate::icons::Icon, on: bool, msg: NoteMsg| icon.arrow_button(on, msg);
         let mut header = row![
             row![
-                arrow(crate::icons::Icon::Back, self.history.can_back(), NoteMsg::Back),
-                arrow(crate::icons::Icon::Forward, self.history.can_forward(), NoteMsg::Forward),
+                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, NoteMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, NoteMsg::Forward),
             ]
             .spacing(4),
             container(who).width(Length::Fill),

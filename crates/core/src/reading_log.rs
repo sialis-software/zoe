@@ -18,6 +18,51 @@ fn day_heading(now: &DateTime<Local>) -> String {
     format!("## {}", now.format("%Y-%m-%d"))
 }
 
+/// The day a heading line is for, as `2025-10-13`: `## 2025-10-13`, or the same as a link to that
+/// day's note, `## [[notes/2025-10-13|2025-10-13]]`. `None` for a line that is not a day's heading.
+fn heading_date(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("## ")?.trim();
+    let shown = match rest.strip_prefix("[[").and_then(|r| r.strip_suffix("]]")) {
+        Some(link) => link.rsplit_once('|').map_or_else(|| link.rsplit('/').next().unwrap_or(link), |(_, name)| name),
+        None => rest,
+    };
+    let shown = shown.trim();
+    let bytes = shown.as_bytes();
+    let dashed = bytes.len() == 10 && bytes[4] == b'-' && bytes[7] == b'-';
+    (dashed && shown.bytes().enumerate().all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())).then_some(shown)
+}
+
+/// Whether a heading line is the heading of the day of `now`.
+fn is_day(line: &str, now: &DateTime<Local>) -> bool {
+    heading_date(line) == Some(now.format("%Y-%m-%d").to_string().as_str())
+}
+
+/// `log` with each day's heading a link to that day's note where `daily` says there is one (it is given
+/// the day, as `2025-10-13`, and answers with the note's path), and a plain date where there is not (a
+/// note that went away takes its link with it). `None` when that changes nothing.
+pub fn link_days(log: &str, daily: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let mut changed = false;
+    let lines: Vec<String> = log
+        .lines()
+        .map(|line| {
+            let Some(date) = heading_date(line) else { return line.to_string() };
+            let wanted = match daily(date) {
+                Some(path) => format!("## [[{}|{date}]]", path.trim_end_matches(".md")),
+                None => format!("## {date}"),
+            };
+            changed |= wanted != line;
+            wanted
+        })
+        .collect();
+    changed.then(|| {
+        let mut text = lines.join("\n");
+        if log.ends_with('\n') {
+            text.push('\n');
+        }
+        text
+    })
+}
+
 /// The log as it begins: its properties and title.
 pub fn new_log(title: &str, created: &str) -> String {
     format!("---\ncreated: {created}\ntags: [reading-log]\n---\n# {title}\n")
@@ -74,7 +119,7 @@ pub fn add_entry(log: &str, link: &str, now: &DateTime<Local>) -> Option<String>
     let heading = day_heading(now);
     let lines: Vec<&str> = log.lines().collect();
     let last_heading = lines.iter().rposition(|l| l.starts_with("## "));
-    let is_today = last_heading.is_some_and(|at| lines[at] == heading);
+    let is_today = last_heading.is_some_and(|at| is_day(lines[at], now));
     if let Some(at) = last_heading.filter(|_| is_today)
         && lines[at + 1..].iter().any(|l| l.trim_start().starts_with("- ") && l.trim_end().ends_with(link))
     {
@@ -93,8 +138,8 @@ pub fn dates_read(log: &str, link: &str) -> Vec<String> {
     let mut day: Option<&str> = None;
     let mut found: Vec<String> = Vec::new();
     for line in log.lines() {
-        if let Some(date) = line.strip_prefix("## ") {
-            day = Some(date.trim());
+        if line.starts_with("## ") {
+            day = heading_date(line);
         } else if let Some(date) = day
             && line.trim_start().starts_with("- ")
             && line.trim_end().ends_with(link)
@@ -110,14 +155,13 @@ pub fn dates_read(log: &str, link: &str) -> Vec<String> {
 
 /// `log` without the line for `link` under the day of `now`; `None` when it has none there.
 pub fn remove_entry(log: &str, link: &str, now: &DateTime<Local>) -> Option<String> {
-    let heading = day_heading(now);
     let mut in_day = false;
     let mut removed = false;
     let mut kept: Vec<&str> = log
         .lines()
         .filter(|line| {
             if line.starts_with("## ") {
-                in_day = *line == heading;
+                in_day = is_day(line, now);
             }
             let gone = in_day && !removed && line.trim_start().starts_with("- ") && line.trim_end().ends_with(link);
             removed |= gone;
@@ -125,7 +169,7 @@ pub fn remove_entry(log: &str, link: &str, now: &DateTime<Local>) -> Option<Stri
         })
         .collect();
     if removed
-        && let Some(at) = kept.iter().position(|l| *l == heading)
+        && let Some(at) = kept.iter().position(|l| is_day(l, now))
     {
         // The day's last chapter taken out: the day goes with it (its heading and the space under it).
         let end = kept[at + 1..].iter().position(|l| l.starts_with("## ")).map_or(kept.len(), |n| at + 1 + n);
@@ -339,5 +383,27 @@ mod tests {
         // The only day: nothing but the log's own title is left.
         let only = remove_entry(&add_entry(&new_log("Reading log", "x"), "[[John 3]]", &at(10, 9, 0)).unwrap(), "[[John 3]]", &at(10, 9, 0)).unwrap();
         assert!(only.ends_with("# Reading log\n"), "{only}");
+    }
+
+    #[test]
+    fn a_days_heading_can_be_a_link_to_its_note_and_everything_still_finds_the_day() {
+        let mut log = new_log("Reading log", "x");
+        for (day, link) in [(10, "[[John 3]]"), (11, "[[John 4]]")] {
+            log = add_entry(&log, link, &at(day, 9, 0)).unwrap();
+        }
+        let daily = |date: &str| (date == "2025-10-11").then(|| "notes/2025-10-11.md".to_string());
+        let linked = link_days(&log, daily).unwrap();
+        assert!(linked.contains("## 2025-10-10\n") && linked.contains("## [[notes/2025-10-11|2025-10-11]]\n"), "{linked}");
+        assert_eq!(link_days(&linked, daily), None, "nothing more to do");
+        // The linked day is still that day: found, added to, taken back from.
+        assert_eq!(dates_read(&linked, "[[John 4]]"), ["2025-10-11"]);
+        let more = add_entry(&linked, "[[John 5]]", &at(11, 20, 0)).unwrap();
+        assert!(more.contains("- [[John 4]]\n- [[John 5]]\n") && more.matches("2025-10-11").count() == 2, "{more}");
+        let back = remove_entry(&more, "[[John 5]]", &at(11, 20, 0)).unwrap();
+        assert_eq!(back, linked);
+        let gone = remove_entry(&linked, "[[John 4]]", &at(11, 20, 0)).unwrap();
+        assert!(!gone.contains("2025-10-11"), "its heading goes with its last chapter: {gone}");
+        // The note going away takes the link with it.
+        assert_eq!(link_days(&linked, |_| None).unwrap(), log);
     }
 }

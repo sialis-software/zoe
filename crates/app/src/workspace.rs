@@ -76,6 +76,55 @@ impl App {
         }
     }
 
+    /// `layout` for saving as a named layout: its Bible tabs keep how they show things (Strong's,
+    /// the margin) but not what they read, which is not the layout's to say.
+    pub fn layout_to_save(&self) -> Workspace {
+        let mut saved = self.workspace();
+        for pane in &mut saved.panes {
+            for tab in &mut pane.tabs {
+                if let TabSave::Bible { module, book, chapter, scroll, .. } = tab {
+                    (*module, *book, *chapter, *scroll) = (String::new(), String::new(), 0, 0.0);
+                }
+            }
+        }
+        saved
+    }
+
+    /// `layout` ready to put in place: its Bible tabs read what the Bible tabs open now read, the
+    /// first of them the first of those (in the order they are on the screen), and any left over open
+    /// the default passage.
+    pub fn layout_with_readers(&self, layout: &Workspace) -> Workspace {
+        fn order(layout: &Layout) -> Vec<u32> {
+            match layout {
+                Layout::Pane { id } => vec![*id],
+                Layout::Split { a, b, .. } => order(a).into_iter().chain(order(b)).collect(),
+            }
+        }
+        let open = self.workspace();
+        let mut reading: std::collections::VecDeque<(String, String, u16, f32)> = order(&open.layout)
+            .into_iter()
+            .filter_map(|id| open.panes.iter().find(|p| p.id == id))
+            .flat_map(|pane| pane.tabs.iter())
+            .filter_map(|tab| match tab {
+                TabSave::Bible { module, book, chapter, scroll, .. } => Some((module.clone(), book.clone(), *chapter, *scroll)),
+                _ => None,
+            })
+            .collect();
+        let module = self.first_module();
+        let (book, chapter) = self.sh.first_chapter(&module);
+        let default = (module.0.clone(), book.osis().to_string(), chapter, 0.0);
+        let mut out = layout.clone();
+        for id in order(&layout.layout) {
+            let Some(pane) = out.panes.iter_mut().find(|p| p.id == id) else { continue };
+            for tab in &mut pane.tabs {
+                if let TabSave::Bible { module, book, chapter, scroll, .. } = tab {
+                    (*module, *book, *chapter, *scroll) = reading.pop_front().unwrap_or_else(|| default.clone());
+                }
+            }
+        }
+        out
+    }
+
     /// Replace what is open with `saved`. A tab whose module or note is gone is left out (and a
     /// pane left with no tabs with it); if nothing at all can be put back, nothing changes and
     /// this says so.

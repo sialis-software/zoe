@@ -58,6 +58,11 @@ impl DictTab {
         tab
     }
 
+    /// Start the tab's own history over at where it is (a tab made to show a link is not a tab that went there).
+    pub fn forget_history(&mut self) {
+        self.history = History::new((self.module.clone(), self.key.clone()));
+    }
+
     /// Show `key` of the current dictionary.
     pub fn show(&mut self, sh: &Shared, key: &str) {
         self.look_up(sh, key);
@@ -160,19 +165,16 @@ impl DictTab {
         out.into()
     }
 
-    pub fn view<'a>(&'a self, sh: &'a Shared, searched: Option<&ModuleId>) -> Element<'a, DictMsg> {
+    pub fn view<'a>(&'a self, sh: &'a Shared, searched: Option<&ModuleId>, outer: crate::shared::Outer) -> Element<'a, DictMsg> {
         let choices: Vec<DictChoice> =
             sh.backend.dictionaries().into_iter().map(|d| DictChoice(d.id, d.abbreviation)).collect();
         let current = choices.iter().find(|c| c.0 == self.module).cloned();
         // The same bar as the Bible tab's: a dictionary picker, then the entry wanted.
-        let arrow = |icon: crate::icons::Icon, on: bool, msg: DictMsg| {
-            let b = button(container(icon.view(18.0)).center(Length::Fill)).width(31).height(31).padding(0).style(button::secondary);
-            if on { b.on_press(msg) } else { b }
-        };
+        let arrow = |icon: crate::icons::Icon, on: bool, msg: DictMsg| icon.arrow_button(on, msg);
         let bar = row![
             row![
-                arrow(crate::icons::Icon::Back, self.history.can_back(), DictMsg::Back),
-                arrow(crate::icons::Icon::Forward, self.history.can_forward(), DictMsg::Forward),
+                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, DictMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, DictMsg::Forward),
             ]
             .spacing(4),
             pick_list(choices, current, DictMsg::PickModule),

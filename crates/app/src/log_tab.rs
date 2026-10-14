@@ -1,11 +1,10 @@
 //! The reading log's tab: the log (`Reading log.md`, which grows down: see `study_core::reading_log`), written in like a
 //! note, in a tab of its own, shown at its end. It is the app's, and not one of the notes: no note leads to it and it leads to none (the
-//! notes selector, links and backlinks leave it out, and a link in it follows only to a verse or a web address), it has no
+//! notes selector, links and backlinks leave it out; the links in it, to a verse, a web address or a day's daily note, follow as in a note), it has no
 //! name to change, no properties, no history. What there is of editing is a note tab's (it holds one), and the title (as
 //! the frontmatter, which is not shown) is out of reach.
 
 use crate::note_tab::{NoteMsg, NoteTab, Request};
-use crate::opening::Spec;
 use crate::shared::{READING_LOG, Shared, TabId};
 use iced::Task;
 
@@ -26,6 +25,8 @@ impl LogTab {
                 }
             }
         }
+        // Each day's heading links to its daily note, if there is one by now.
+        sh.sync_log_days();
         LogTab { note: NoteTab::new(id, sh, READING_LOG.to_string()) }
     }
 
@@ -47,9 +48,9 @@ impl LogTab {
             return (Task::none(), None);
         }
         let (task, request) = self.note.update(sh, message);
-        let to_a_note = |spec: &Spec| matches!(spec, Spec::Note(_));
+        // (The days' headings are links to their daily notes, which open like any link; the log has no
+        // backlinks of its own to show.)
         let request = match request {
-            Some(Request::Open(spec)) | Some(Request::Menu(spec, _)) | Some(Request::Drag(spec, _)) if to_a_note(&spec) => None,
             Some(Request::Backlinks(_)) => None,
             other => other,
         };
