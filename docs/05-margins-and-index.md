@@ -342,8 +342,7 @@ The Berean Standard Bible and both Strong's dictionaries are compiled into the p
 installed into the app's own module folder once, on the first run, when no Bible is found anywhere; about 9 MB of the program's size.
 
 The icon files in `packaging/icons` (PNGs and `zoe.ico`) are made from the rounded artwork by `scripts/make-icons.sh` and kept in git.
-`scripts/bundle-macos.sh` is the older, hand-made macOS bundle (it can make a universal binary with `UNIVERSAL=1`); `scripts/package-linux.sh`
-and `scripts/package-windows.ps1` (Inno Setup) are the same for the other systems, to be run on them.
+`scripts/bundle-macos.sh` is the older, hand-made macOS bundle, kept for what cargo-packager does not do: a universal binary (`UNIVERSAL=1`).
 Only the macOS, Windows installer and Linux packages' building has been tried; none has been run on Windows or Linux.
 
 The program file is `Zoe` (a `[[bin]]` in `crates/app/Cargo.toml`; `cargo run -p zoe` still runs it), so that
