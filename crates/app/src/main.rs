@@ -78,6 +78,9 @@ fn main() -> iced::Result {
         .run()
 }
 
+/// The space above and below the logo in the top bar (which is the logo's 24 px and this twice).
+const TOP_BAR_PADDING: f32 = 9.0;
+
 /// What a tab holds. Each kind is one self-contained type of tab.
 enum Tab {
     /// A new tab: it offers a choice of what to open, then becomes that.
@@ -387,6 +390,8 @@ enum Message {
     TogglePanel(Panel),
     /// Show the settings window (or bring it forward).
     OpenSettings,
+    /// The settings, at their About page (the logo in the top bar).
+    OpenAbout,
     Vault(vault_setup::VaultMsg),
     Modules(module_folders::ModulesMsg),
     Manager(module_manager::ManagerMsg),
@@ -1597,6 +1602,10 @@ impl App {
                 self.panel = if self.panel == Some(panel) { None } else { Some(panel) };
                 Task::none()
             }
+            Message::OpenAbout => {
+                self.settings_tab = SettingsTab::About;
+                self.handle(Message::OpenSettings)
+            }
             Message::OpenSettings => {
                 if let Some(id) = self.settings_window {
                     return iced::window::gain_focus(id);
@@ -2381,7 +2390,8 @@ impl App {
             Panel::Layouts => self.layouts_panel(),
         };
         container(iced::widget::opaque(container(content).padding(14).width(320).style(popup_style)))
-            .padding(iced::Padding { top: 36.0, right: 12.0, left: 0.0, bottom: 0.0 })
+            // (Under the top bar: the logo's height and the bar's padding above and below it.)
+            .padding(iced::Padding { top: 24.0 + 2.0 * TOP_BAR_PADDING, right: 12.0, left: 0.0, bottom: 0.0 })
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(iced::alignment::Horizontal::Right)
@@ -2646,6 +2656,8 @@ impl App {
             .width(10.2)
             .height(24)
             .style(|theme: &Theme, _status| iced::widget::svg::Style { color: Some(theme.extended_palette().background.base.text) });
+        // Pressed, it says what the app is: the settings, at their About page.
+        let mark = button(mark).padding(0).style(button::text).on_press(Message::OpenAbout);
         let mut bar = row![mark, space::horizontal()].spacing(16).align_y(iced::Center);
         if !self.sh.status.is_empty() {
             bar = bar.push(text(self.sh.status.clone()).size(13).style(text::danger));
@@ -2661,7 +2673,7 @@ impl App {
         let modules = button(text("Modules").size(13)).padding([2, 8]).style(button::text).on_press(Message::Manager(module_manager::ManagerMsg::Open));
         let plans = button(text("Plans").size(13)).padding([2, 8]).style(button::text).on_press(Message::Plans(plans_window::PlansMsg::Open));
         bar = bar.push(row![tool("Layouts", Panel::Layouts), plans, modules, settings].spacing(4));
-        container(bar).padding([6, 16]).into()
+        container(bar).padding([TOP_BAR_PADDING, 16.0]).into()
     }
 
     fn pane_view(&self, index: usize) -> Element<'_, Message> {
@@ -7022,6 +7034,21 @@ mod tests {
         let _ = app.update(Message::Note(id, NoteMsg::PropRemove(i)));
         assert!(front_of(&app).props.iter().all(|p| p.key != "pages"));
         assert_eq!(front_of(&app).props.len(), count + 1);
+    }
+
+    #[test]
+    fn the_logo_in_the_top_bar_opens_the_settings_at_the_about_page() {
+        let mut h = Harness::new(App::new());
+        assert!(h.app.settings_window.is_none());
+        // The logo is at the left of the bar.
+        h.click(24.0, 20.0);
+        assert!(h.app.settings_window.is_some(), "the settings are open");
+        assert_eq!(h.app.settings_tab, SettingsTab::About);
+        // With the settings open at another page, it is brought to the About page, and the window is the same one.
+        let window = h.app.settings_window;
+        let _ = h.app.update(Message::SettingsTab(SettingsTab::Pens));
+        let _ = h.app.update(Message::OpenAbout);
+        assert_eq!((h.app.settings_window, h.app.settings_tab), (window, SettingsTab::About));
     }
 
     #[test]
