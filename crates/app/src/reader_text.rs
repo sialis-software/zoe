@@ -219,6 +219,12 @@ pub type TextSelection = Option<Vec<CanonSlice>>;
 pub enum MarkKind {
     Highlight,
     Underline,
+    /// An underline of dashes.
+    Dashed,
+    /// An underline that waves.
+    Wavy,
+    /// A highlight of diagonal stripes.
+    Striped,
     /// A faint line, for a note anchored to text without a highlight.
     Note,
 }
@@ -618,7 +624,7 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
             key,
             blocks,
             size: Pixels(19.0),
-            line_height: LineHeight::Relative(1.5),
+            line_height: LineHeight::Relative(1.65),
             selection_color: Color::from_rgba(0.3, 0.5, 0.9, 0.35),
             hover_color: Color::from_rgb(0.3, 0.5, 0.9),
             citation: None,
@@ -1013,6 +1019,79 @@ const CONNECTOR_CARD_OFFSET: f32 = 18.0;
 
 /// A colour with less saturation (halfway to its own grey) and a light touch of opacity: the
 /// hover highlight under an underline or note.
+/// Paint one line of a mark: `line` is the stretch of the line it marks (as tall as the line), and `under` how far down
+/// from its top the underlines go (below the text and the dots of a Strong's word). Every corner is rounded, for a softer,
+/// more hand-made look.
+fn paint_mark(renderer: &mut iced::Renderer, kind: MarkKind, color: Color, line: Rectangle, under: f32) {
+    let (x, top, w, height) = (line.x, line.y, line.width, line.height);
+    // A rounded bar `len` long and `thick` thick, `dx` along the stretch and `dy` down from the top of the line.
+    let bar = |renderer: &mut iced::Renderer, dx: f32, dy: f32, len: f32, thick: f32| {
+        renderer.fill_quad(
+            Quad {
+                bounds: Rectangle::new(Point::new(x + dx, top + dy), Size::new(len, thick)),
+                border: iced::Border { radius: (thick / 2.0).into(), ..iced::Border::default() },
+                ..Quad::default()
+            },
+            color,
+        );
+    };
+    match kind {
+        MarkKind::Highlight => renderer.fill_quad(
+            Quad { bounds: line, border: iced::Border { radius: MARK_RADIUS.into(), ..iced::Border::default() }, ..Quad::default() },
+            color,
+        ),
+        MarkKind::Underline => bar(renderer, 0.0, under, w, 2.0),
+        MarkKind::Note => bar(renderer, 0.0, under, w, 1.0),
+        MarkKind::Dashed => {
+            const DASH: f32 = 6.0;
+            const GAP: f32 = 3.5;
+            let mut at = 0.0;
+            while at < w {
+                bar(renderer, at, under, DASH.min(w - at), 2.0);
+                at += DASH + GAP;
+            }
+        }
+        MarkKind::Wavy => {
+            // A wave of round steps, up and down by under two pixels over a period of eight.
+            const WAVE: [f32; 8] = [0.0, 0.7, 1.4, 0.7, 0.0, -0.7, -1.4, -0.7];
+            let mut at = 0.0;
+            let mut step = 0;
+            while at < w {
+                bar(renderer, at, under - 0.3 + WAVE[step % 8], 2.4f32.min(w - at + 0.4), 1.8);
+                at += 2.0;
+                step += 1;
+            }
+        }
+        MarkKind::Striped => {
+            // Diagonal stripes of the color, each as wide as the gap between them: the stripes are an SVG pattern in a
+            // rounded rectangle, one picture for the stretch (the renderer keeps what it has drawn).
+            let (pw, ph) = (w.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32);
+            let hex = format!("#{:02X}{:02X}{:02X}", (color.r * 255.0).round() as u8, (color.g * 255.0).round() as u8, (color.b * 255.0).round() as u8);
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pw}\" height=\"{ph}\" viewBox=\"0 0 {pw} {ph}\"><defs>\
+                 <pattern id=\"s\" width=\"{STRIPE_PERIOD}\" height=\"{STRIPE_PERIOD}\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(45)\">\
+                 <rect width=\"{}\" height=\"{STRIPE_PERIOD}\" fill=\"{hex}\"/></pattern></defs>\
+                 <rect width=\"{pw}\" height=\"{ph}\" rx=\"{MARK_RADIUS}\" fill=\"url(#s)\"/></svg>",
+                STRIPE_COLORED
+            );
+            use iced::advanced::svg::Renderer as _;
+            // (Opaque stripes drawn at the color's strength: translucent pixels inside the picture come out darker than they should.)
+            let picture = iced::advanced::svg::Svg::new(iced::advanced::svg::Handle::from_memory(svg.into_bytes())).opacity(color.a);
+            renderer.draw_svg(picture, line, line);
+        }
+    }
+}
+
+/// How far under the baseline (as a part of the text size) a mark's underline is: under the dots of a Strong's word, which
+/// are at 0.12, so the two do not run into each other.
+const UNDERLINE_DROP: f32 = 0.3;
+
+/// The corner radius of a highlight, in pixels.
+const MARK_RADIUS: f32 = 4.0;
+/// How far along a striped highlight goes from one stripe to the next, and how much of that is color (the rest is clear).
+const STRIPE_PERIOD: f32 = 14.0;
+const STRIPE_COLORED: f32 = 9.0;
+
 fn softened(color: Color) -> Color {
     let grey = 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
     let mix = |c: f32| (c + grey) / 2.0;
@@ -1706,10 +1785,11 @@ where
                     if pass == 1 && !emphasised.contains(&mark.mark) {
                         continue;
                     }
-                    for (mb, s, e) in block_ranges(&state.pieces, mark.slice) {
-                        if mb != b {
-                            continue;
-                        }
+                    // (The words of a verse can be pieces of their own, the Strong's words; a mark is one stretch from the
+                    // first of them to the last, drawn whole along each line rather than word by word.)
+                    let ranges = block_ranges(&state.pieces, mark.slice).into_iter().filter(|(mb, _, _)| *mb == b);
+                    let whole = ranges.fold(None, |acc: Option<(usize, usize)>, (_, s, e)| Some(acc.map_or((s, e), |(lo, hi)| (lo.min(s), hi.max(e)))));
+                    if let Some((s, e)) = whole {
                         let (c0, c1) = (cosmic_text::Cursor::new(0, s), cosmic_text::Cursor::new(0, e));
                         for run in laid.para.buffer().layout_runs() {
                             let Some((x, w)) = run.highlight(c0, c1) else { continue };
@@ -1727,21 +1807,13 @@ where
                                     softened(mark.color),
                                 );
                             }
-                            let bounds = match mark.kind {
-                                MarkKind::Highlight => Rectangle::new(
-                                    top_left + Vector::new(x, run.line_top),
-                                    Size::new(w, run.line_height),
-                                ),
-                                MarkKind::Underline => Rectangle::new(
-                                    top_left + Vector::new(x, run.line_y + self.size.0 * 0.14),
-                                    Size::new(w, 2.0),
-                                ),
-                                MarkKind::Note => Rectangle::new(
-                                    top_left + Vector::new(x, run.line_y + self.size.0 * 0.14),
-                                    Size::new(w, 1.0),
-                                ),
-                            };
-                            renderer.fill_quad(Quad { bounds, ..Quad::default() }, mark.color);
+                            paint_mark(
+                                renderer,
+                                mark.kind,
+                                mark.color,
+                                Rectangle::new(top_left + Vector::new(x, run.line_top), Size::new(w, run.line_height)),
+                                run.line_y - run.line_top + self.size.0 * UNDERLINE_DROP,
+                            );
                         }
                     }
                 }

@@ -357,7 +357,14 @@ pub struct StyleChoice(pub MarkStyle);
 
 impl StyleChoice {
     /// The looks a mark can be given here.
-    pub const ALL: [StyleChoice; 3] = [StyleChoice(MarkStyle::Highlight), StyleChoice(MarkStyle::Underline), StyleChoice(MarkStyle::None)];
+    pub const ALL: [StyleChoice; 6] = [
+        StyleChoice(MarkStyle::Highlight),
+        StyleChoice(MarkStyle::Underline),
+        StyleChoice(MarkStyle::Striped),
+        StyleChoice(MarkStyle::Dashed),
+        StyleChoice(MarkStyle::Wavy),
+        StyleChoice(MarkStyle::None),
+    ];
 }
 
 impl fmt::Display for StyleChoice {
@@ -365,6 +372,9 @@ impl fmt::Display for StyleChoice {
         f.write_str(match self.0 {
             MarkStyle::Highlight => "Highlight",
             MarkStyle::Underline => "Underline",
+            MarkStyle::Dashed => "Dashed underline",
+            MarkStyle::Wavy => "Wavy underline",
+            MarkStyle::Striped => "Striped highlight",
             MarkStyle::None => "Plain",
         })
     }
@@ -488,7 +498,7 @@ pub fn label_of(sh: &Shared, path: &str) -> String {
     if let Some(mark) = sh.mark_index_of(path).and_then(|i| sh.marks.get(i)) {
         let kind = match (mark.body.trim().is_empty(), mark.style) {
             (false, _) => "note",
-            (true, MarkStyle::Underline) => "underline",
+            (true, MarkStyle::Underline | MarkStyle::Dashed | MarkStyle::Wavy) => "underline",
             (true, _) => "highlight",
         };
         return format!("{} · {kind}", mark.anchor);

@@ -340,9 +340,9 @@ fn pen_toolbar(sh: &Shared, backlinks: bool) -> Element<'static, BibleMsg> {
         let color = hex_color(&pen.color, 1.0).unwrap_or(Color::WHITE);
         let name = pen.name();
         let label: Element<'static, BibleMsg> = match pen.style {
-            // Underlined: the name in the pen's colour with a line of it just under, as wide as
+            // Underlined (a line of any kind): the name in the pen's colour with a line of it just under, as wide as
             // the name (the line is a layer over the name, so the name sets the width).
-            crate::state::PenStyle::Underline => stack![
+            crate::state::PenStyle::Underline | crate::state::PenStyle::Dashed | crate::state::PenStyle::Wavy => stack![
                 container(text(name.clone()).size(13).color(color))
                     .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 4.0, left: 0.0 }),
                 container(container(space::horizontal()).width(Length::Fill).height(2).style(move |_: &Theme| {
@@ -353,8 +353,8 @@ fn pen_toolbar(sh: &Shared, backlinks: bool) -> Element<'static, BibleMsg> {
                 .align_y(iced::alignment::Vertical::Bottom),
             ]
             .into(),
-            // Highlighted: the name on a band of its colour, as the text will be marked.
-            crate::state::PenStyle::Highlight => container(text(name).size(13))
+            // Highlighted (or striped): the name on a band of its colour, as the text will be marked.
+            crate::state::PenStyle::Highlight | crate::state::PenStyle::Striped => container(text(name).size(13))
                 .padding([1, 4])
                 .style(move |_: &Theme| container::Style {
                     background: Some(Color { a: 0.45, ..color }.into()),
@@ -863,6 +863,9 @@ impl BibleTab {
             let (kind, alpha) = match mark.style {
                 MarkStyle::Highlight => (MarkKind::Highlight, if sh.is_dark() { 0.38 } else { 0.5 }),
                 MarkStyle::Underline => (MarkKind::Underline, 1.0),
+                MarkStyle::Dashed => (MarkKind::Dashed, 1.0),
+                MarkStyle::Wavy => (MarkKind::Wavy, 1.0),
+                MarkStyle::Striped => (MarkKind::Striped, if sh.is_dark() { 0.4 } else { 0.48 }),
                 MarkStyle::None => (MarkKind::Note, 0.7),
             };
             let Some(color) = hex_color(mark.shown_color(), alpha) else { continue };
@@ -944,10 +947,7 @@ impl BibleTab {
         self.stop_edit(sh);
         // With no margin the card appears under the selection, so keep it selected.
         let keep = !self.marks_in_margin();
-        let style = match pen.style {
-            crate::state::PenStyle::Highlight => MarkStyle::Highlight,
-            crate::state::PenStyle::Underline => MarkStyle::Underline,
-        };
+        let style = pen.style.mark();
         match self.make_mark(sh, style, &pen.color, vec![pen.tag.clone()], keep) {
             Some(index) => {
                 self.card_doc = Document::new("");

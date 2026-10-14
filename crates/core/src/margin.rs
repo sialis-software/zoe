@@ -14,6 +14,12 @@ const CONTEXT: usize = 12;
 pub enum MarkStyle {
     Highlight,
     Underline,
+    /// An underline of dashes.
+    Dashed,
+    /// An underline that waves.
+    Wavy,
+    /// A highlight of diagonal stripes.
+    Striped,
     /// A note anchored to the text without a highlight (drawn only as a faint line).
     None,
 }
@@ -23,6 +29,9 @@ impl MarkStyle {
         match self {
             MarkStyle::Highlight => "highlight",
             MarkStyle::Underline => "underline",
+            MarkStyle::Dashed => "dashed",
+            MarkStyle::Wavy => "wavy",
+            MarkStyle::Striped => "striped",
             MarkStyle::None => "none",
         }
     }
@@ -31,6 +40,9 @@ impl MarkStyle {
         match s {
             "highlight" => Some(MarkStyle::Highlight),
             "underline" => Some(MarkStyle::Underline),
+            "dashed" => Some(MarkStyle::Dashed),
+            "wavy" => Some(MarkStyle::Wavy),
+            "striped" => Some(MarkStyle::Striped),
             "none" => Some(MarkStyle::None),
             _ => None,
         }
@@ -328,9 +340,10 @@ impl Mark {
             quote: get("quote").map(yaml_unquote).unwrap_or_default(),
             prefix: get("prefix").map(yaml_unquote).unwrap_or_default(),
             suffix: get("suffix").map(yaml_unquote).unwrap_or_default(),
-            // (With no `style` it is a plain mark; one that is there and unknown is not read.)
+            // (With no `style` it is a plain mark; one that is there and not known, from a newer version of the app,
+            // is drawn as a highlight, so that the mark is not lost.)
             style: match get("style") {
-                Some(style) => MarkStyle::parse(style)?,
+                Some(style) => MarkStyle::parse(style).unwrap_or(MarkStyle::Highlight),
                 None => MarkStyle::None,
             },
             color: get("color").map(yaml_unquote).unwrap_or_default(),
@@ -481,8 +494,15 @@ mod tests {
         let old = Mark::from_markdown("k3f9", &old).expect("an older file");
         assert_eq!(old.style, MarkStyle::None);
         assert!(!old.to_markdown().contains("style:"));
-        // A look that is there but not known is not read, as before; a highlight keeps its look.
-        assert!(Mark::from_markdown("k3f9", &text.replace("tags:", "style: sparkly\ntags:")).is_none());
+        // A look that is there but not known (from a newer version) is a highlight, and the mark is kept.
+        let unknown = Mark::from_markdown("k3f9", &text.replace("tags:", "style: sparkly\ntags:")).expect("it is read");
+        assert_eq!(unknown.style, MarkStyle::Highlight);
+        // The styles round-trip by name.
+        for style in [MarkStyle::Highlight, MarkStyle::Underline, MarkStyle::Dashed, MarkStyle::Wavy, MarkStyle::Striped] {
+            let mut m = mark("John 3:16", "so loved", "", "");
+            m.style = style;
+            assert_eq!(Mark::from_markdown("k3f9", &m.to_markdown()).unwrap().style, style, "{style:?}");
+        }
         let lit = mark("John 3:16", "so loved", "", "");
         assert!(lit.to_markdown().contains("style: highlight") && lit.to_markdown().contains("color:"));
         assert_eq!(lit.shown_color(), lit.color);

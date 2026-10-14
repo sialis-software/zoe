@@ -57,6 +57,42 @@ pub struct Settings {
 pub enum PenStyle {
     Highlight,
     Underline,
+    Dashed,
+    Wavy,
+    Striped,
+}
+
+impl PenStyle {
+    /// Every way a pen can mark, in the order the pens' button goes through them.
+    pub const ALL: [PenStyle; 5] = [PenStyle::Highlight, PenStyle::Underline, PenStyle::Striped, PenStyle::Dashed, PenStyle::Wavy];
+
+    /// How the marks it makes are drawn.
+    pub fn mark(self) -> study_core::margin::MarkStyle {
+        use study_core::margin::MarkStyle;
+        match self {
+            PenStyle::Highlight => MarkStyle::Highlight,
+            PenStyle::Underline => MarkStyle::Underline,
+            PenStyle::Dashed => MarkStyle::Dashed,
+            PenStyle::Wavy => MarkStyle::Wavy,
+            PenStyle::Striped => MarkStyle::Striped,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PenStyle::Highlight => "Highlight",
+            PenStyle::Underline => "Underline",
+            PenStyle::Dashed => "Dashed",
+            PenStyle::Wavy => "Wavy",
+            PenStyle::Striped => "Stripes",
+        }
+    }
+
+    /// The next one, after the last the first.
+    pub fn next(self) -> PenStyle {
+        let at = PenStyle::ALL.iter().position(|s| *s == self).unwrap_or(0);
+        PenStyle::ALL[(at + 1) % PenStyle::ALL.len()]
+    }
 }
 
 /// A pen: a tag, the color of the tag (and of its marks) and how the text is marked.
@@ -375,6 +411,30 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pen_goes_through_every_way_of_marking_and_back_and_each_is_its_own_mark_look() {
+        let mut style = PenStyle::Highlight;
+        let mut seen = vec![style];
+        loop {
+            style = style.next();
+            if style == PenStyle::Highlight {
+                break;
+            }
+            seen.push(style);
+        }
+        assert_eq!(seen, PenStyle::ALL.to_vec());
+        let looks: Vec<String> = seen.iter().map(|s| format!("{:?}", s.mark())).collect();
+        let distinct: std::collections::BTreeSet<_> = looks.iter().collect();
+        assert_eq!(distinct.len(), PenStyle::ALL.len(), "no two ways of marking are the same look");
+        let names: std::collections::BTreeSet<_> = seen.iter().map(|s| s.label()).collect();
+        assert_eq!(names.len(), PenStyle::ALL.len());
+        // A pen's style is saved by name, and an old saved style still reads.
+        let pen: PenDef = serde_json::from_str(r##"{"tag":"a","color":"#112233","style":"underline"}"##).unwrap();
+        assert_eq!(pen.style, PenStyle::Underline);
+        let pen: PenDef = serde_json::from_str(r##"{"tag":"a","color":"#112233","style":"striped"}"##).unwrap();
+        assert_eq!(pen.style, PenStyle::Striped);
+    }
 
     fn sample() -> Workspace {
         Workspace {

@@ -744,13 +744,7 @@ impl Shared {
     /// The look a new mark gets when none is asked for: the first pen's (else a yellow highlight).
     pub fn default_look(&self) -> (MarkStyle, String) {
         match self.settings.pens.first() {
-            Some(pen) => (
-                match pen.style {
-                    crate::state::PenStyle::Highlight => MarkStyle::Highlight,
-                    crate::state::PenStyle::Underline => MarkStyle::Underline,
-                },
-                pen.color.clone(),
-            ),
+            Some(pen) => (pen.style.mark(), pen.color.clone()),
             None => (MarkStyle::Highlight, "#F5D90A".to_string()),
         }
     }

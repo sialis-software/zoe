@@ -62,7 +62,7 @@ module: KJV              # module the marked words were chosen in
 quote: "For God so loved"
 prefix: ""               # a few characters of context before and after
 suffix: " the world"
-style: highlight         # highlight | underline; no `style` at all is a plain mark (below)
+style: highlight         # highlight | underline | striped | dashed | wavy; no `style` at all is a plain mark (below)
 color: "#F5D90A"
 tags: [promise]
 created: 2026-10-12T18:03:00
@@ -74,7 +74,7 @@ Optional markdown comment, with [[links]] like any document.
 words or verses a note is about and nothing painted on them but a faint grey line (and its card, if it has a comment). A plain
 mark's file has **no `style` and no `color`** (they are taken out when it is set plain, and the color choice is not offered); a
 file with neither is a plain mark, and an older file with `style: none` is read as one and loses them when written again. Set
-back to a highlight or an underline it takes the first pen's color.
+back to any look it takes the first pen's color. A `style` this version does not know (from a newer one) is drawn as a highlight.
 
 **Verse-level marks.** If the selection when a pen is applied is whole verses (from a verse
 number, a triple-click, or a drag that happens to cover them exactly), the mark is tied to

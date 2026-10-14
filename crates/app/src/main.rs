@@ -1588,10 +1588,7 @@ impl App {
             }
             Message::CyclePenStyle(i) => self.change_settings(|s| {
                 if let Some(pen) = s.pens.get_mut(i) {
-                    pen.style = match pen.style {
-                        state::PenStyle::Highlight => state::PenStyle::Underline,
-                        state::PenStyle::Underline => state::PenStyle::Highlight,
-                    };
+                    pen.style = pen.style.next();
                 }
             }),
             Message::SetDraftColor(i) => {
@@ -2527,10 +2524,7 @@ impl App {
         };
         let mut list = column![].spacing(4);
         for (i, pen) in self.sh.settings.pens.iter().enumerate() {
-            let style = match pen.style {
-                state::PenStyle::Highlight => "Highlight",
-                state::PenStyle::Underline => "Underline",
-            };
+            let style = pen.style.label();
             list = list.push(
                 row![
                     swatch(&pen.color, Message::EditPenColor(i)),
@@ -3598,7 +3592,7 @@ mod tests {
                 cache: Cache::default(),
                 renderer,
                 cursor: mouse::Cursor::Unavailable,
-                size: Size::new(1024.0, 1500.0),
+                size: Size::new(1024.0, 1800.0),
                 clipboard: TestClipboard::default(),
             };
             // Like the runtime's first frame: lets the reader report what layout it chose.
@@ -3771,7 +3765,7 @@ mod tests {
     impl Harness {
         /// Single-click over a grid of reader points until `done(app)` holds.
         fn click_scan(&mut self, done: impl Fn(&App) -> bool) -> Option<(f32, f32)> {
-            self.click_scan_to(1400, done)
+            self.click_scan_to(1700, done)
         }
 
         /// Like `click_scan`, down to `bottom` only.
@@ -6018,7 +6012,7 @@ mod tests {
             assert!(narrow == h.bounds_of_text("Unlink").is_some(), "the mark's card is offered when popped up (narrow: {narrow})");
             assert!(h.app.bible().editing.is_none(), "a lookup does not start an edit");
             // A click elsewhere closes both.
-            h.click(60.0, 1300.0);
+            h.click(8.0, 1700.0);
             assert!(h.app.bible().note_card.is_none() && h.app.bible().popup.is_none());
         }
     }
@@ -6497,10 +6491,41 @@ mod tests {
         if std::env::var("SNAP_ZOOM").is_ok() {
             app.zoomed = Some(app.panes[0].id);
         }
+        if let Ok(theme) = std::env::var("SNAP_THEME") {
+            app.sh.settings.theme = theme;
+        }
         let mut h = Harness::new(app);
         h.size = Size::new(1024.0, 560.0);
         if let Ok(w) = std::env::var("SNAP_W") {
             h.size = Size::new(w.parse().unwrap(), 800.0);
+        }
+        if std::env::var("SNAP_STYLES").is_ok() {
+            if std::env::var("SNAP_STRONGS").is_ok() {
+                h.app.bible_mut().show_strongs = true;
+            }
+            // Two words of verse 1 in each way a pen marks, side by side with the plain text.
+            let canon = h.app.bible().chapter.as_ref().unwrap().canonical_verses();
+            let text = canon[&1].clone();
+            let mut at = 0;
+            for style in crate::state::PenStyle::ALL {
+                h.app.sh.settings.pens[0].style = style;
+                if let Ok(color) = std::env::var("SNAP_COLOR") {
+                    h.app.sh.settings.pens[0].color = color;
+                }
+                let mut end = at;
+                for _ in 0..2 {
+                    end += text[end..].find(' ').map_or(text.len() - end, |f| f + 1);
+                }
+                let end_word = text[at..end].trim_end().len() + at;
+                h.app.bible_mut().text_selection = Some(vec![CanonSlice { verse: 1, start: at, end: end_word }]);
+                let _ = h.app.update(h.app.b(BibleMsg::ApplyPen(0)));
+                at = end;
+            }
+            h.app.bible_mut().popup = None;
+            h.app.bible_mut().text_selection = None;
+            for _ in 0..4 {
+                h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+            }
         }
         if let Ok(count) = std::env::var("SNAP_CROWD") {
             // Many notes on the words of one verse.
@@ -6691,12 +6716,12 @@ mod tests {
         ui.draw(
             &mut h.renderer,
             &theme,
-            &iced::advanced::renderer::Style { text_color: iced::Color::WHITE },
+            &iced::advanced::renderer::Style { text_color: theme.extended_palette().background.base.text },
             h.cursor,
         );
         h.cache = ui.into_cache();
         let (w, hh) = (h.size.width as u32, h.size.height as u32);
-        let rgba = h.renderer.screenshot(Size::new(w, hh), 1.0, iced::Color::BLACK);
+        let rgba = h.renderer.screenshot(Size::new(w, hh), 1.0, theme.extended_palette().background.base.color);
         let file = std::fs::File::create(&out).unwrap();
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, hh);
         enc.set_color(png::ColorType::Rgba);
@@ -7576,7 +7601,7 @@ mod tests {
             let w = h.size.width as usize;
             let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
             let mut part = Vec::new();
-            for y in 330..430usize {
+            for y in 338..438usize {
                 part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
             }
             part
@@ -7584,7 +7609,7 @@ mod tests {
         h.cursor = mouse::Cursor::Unavailable;
         let first = card(&mut h);
         // The bar's right arrow, under the top card.
-        h.click(1298.0, 446.0);
+        h.click(1298.0, 454.0);
         h.cursor = mouse::Cursor::Unavailable;
         let second = card(&mut h);
         assert_ne!(first, second, "the next note is on top");
@@ -7615,15 +7640,15 @@ mod tests {
             part
         };
         // The pointer on the footnote's marker, then on "born again" a few words on.
-        h.move_to(399.0, 343.0);
+        h.move_to(399.0, 351.0);
         let footnote = card(&mut h);
-        h.move_to(880.0, 343.0);
+        h.move_to(880.0, 351.0);
         let mark = card(&mut h);
         assert_ne!(footnote, mark, "each comes to the top as it is pointed at");
-        h.move_to(399.0, 343.0);
+        h.move_to(399.0, 351.0);
         assert_eq!(card(&mut h), footnote);
         // With its note on top, a click on the mark edits it.
-        h.click(880.0, 343.0);
+        h.click(880.0, 351.0);
         assert!(h.app.bible().editing.is_some());
     }
 
@@ -7713,7 +7738,7 @@ mod tests {
         // Clicking a mark floats its card under the click, as in a reader with no margin.
         h.size = Size::new(1500.0, 800.0);
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
-        h.click(880.0, 343.0);
+        h.click(880.0, 351.0);
         assert!(h.app.bible().popup.is_some(), "the click on \"born again\" floated its card");
         assert!(h.app.bible().editing.is_none(), "and did not start writing in the margin");
         assert!(h.app.bible().floating(&h.app.sh).is_some());
@@ -7845,7 +7870,7 @@ mod tests {
             let w = h.size.width as usize;
             let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
             let mut part = Vec::new();
-            for y in 590..720usize {
+            for y in 590..780usize {
                 part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
             }
             part
@@ -7853,13 +7878,13 @@ mod tests {
         h.cursor = mouse::Cursor::Unavailable;
         let calm = stack(&mut h);
         // "God" and "world" are different words with different entries.
-        h.move_to(767.0, 621.0);
+        h.move_to(767.0, 662.0);
         let god = stack(&mut h);
         assert_ne!(god, calm, "its entry came up");
-        h.move_to(935.0, 621.0);
+        h.move_to(935.0, 662.0);
         let world = stack(&mut h);
         assert_ne!(world, god, "each word has its own entry");
-        h.move_to(767.0, 621.0);
+        h.move_to(767.0, 662.0);
         assert_eq!(stack(&mut h), god);
     }
 

@@ -12,22 +12,17 @@ Things talked about and not started, newest first. Delete a line when it is done
 - **CrossWire / SWORD reading plan import**, once a sample plan file is at hand (`plan::from_sword_lines` is a guess).
 - **Unlisted gaps** of the Vim mode, the module manager and the reading-plan parser are listed in their docs and reports.
 
-## More ways to mark text (scoped, not started)
+## More ways to mark text (dashed, wavy and striped are done)
 
-Marks have two looks (highlight, underline) and a plain note. The reader draws each as rectangles per line of text
-(`reader_text.rs`, `MarkKind`), so most new looks are a few more rectangles per line, and each is a variant of
-`MarkStyle` (`margin.rs`, the file's `style:` word), a case in `bible_tab.rs`'s draw conversion, a row in the note tab's
-style drop-down (`StyleChoice::ALL`) and, to be used with a pen, in `PenStyle` (`state.rs`, the pens settings).
+Marks are drawn by the reader as rectangles per line of text (`reader_text.rs`, `MarkKind` and `paint_mark`); each look is a
+variant of `MarkStyle` (`margin.rs`, the file's `style:` word), a case in `bible_tab.rs`'s draw conversion, a row in the
+note tab's style drop-down (`StyleChoice::ALL`) and, to be used with a pen, in `PenStyle` (`state.rs`).
 
-- **Cheap (rectangles only):** double underline; dotted and dashed underline (a run of short rectangles); wavy underline
-  (short rectangles stepping up and down); strikethrough (a line at mid-height); box (a hollow bordered rectangle: the
-  border is a quad's own, drawn per line, with the ends left open where the mark wraps); marker (the lower half of the line,
-  a highlighter stroke) and a bar in the margin beside the marked lines. About a day for the set with tests and the pens.
+- **Done:** dashed underline, wavy underline and a striped highlight (bands of the color alternating with clear ones, an SVG
+  pattern). All have rounded corners, and underlines sit below a Strong's word's dots. A box was tried and dropped. A dotted underline is **kept for Strong's words** and is not offered. A look a file has that this
+  version does not know is read as a highlight, so the mark is not lost.
+- **Not done (cheap, rectangles only):** double underline; strikethrough (a line at mid-height); marker (the lower half of
+  the line, a highlighter stroke); a bar in the margin beside the marked lines.
 - **Costlier (they change the text, not what is drawn under it):** a text color (the spans of the marked words are rebuilt
   with that color before layout, which touches selection, hover and Strong's words), bold or italic (they change glyph
   widths and so the line breaks of the whole verse: not worth it). Leave until asked for.
-- **Decisions:** which of the cheap ones (each adds a thing to learn and a name to the drop-down); whether *Plain* (a note
-  with only a faint line) is listed in the drop-down (a bare Plain mark with no comment is deleted when its card closes, so
-  switching one to it needs care); whether a style carries its own default color; and what an older app does with a file
-  whose `style:` it does not know (today `Mark::from_markdown` returns nothing, so the mark is not drawn and is not listed;
-  it should fall back to a highlight so a file from a newer version still shows).
