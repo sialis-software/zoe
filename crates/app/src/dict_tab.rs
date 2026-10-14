@@ -6,7 +6,8 @@ use crate::fonts;
 use crate::history::History;
 use crate::shared::{Shared, TabId};
 use iced::widget::{button, column, container, pick_list, row, rule, scrollable, space, text, text_input};
-use iced::{Element, Font, Length, font};
+use iced::{Element, Length};
+use md_editor::{Action, Document};
 use std::fmt;
 use study_core::{LexiconEntry, ModuleId};
 
@@ -34,6 +35,8 @@ pub enum DictMsg {
     Forward,
     /// Show a verse that has the word (the app decides where, as for any link).
     OpenVerse(scripture::RefRange, ModuleId, Vec<(usize, usize)>),
+    /// Something done in a piece of the entry's text (by its name): only what selects or moves is taken.
+    Text(String, Action),
 }
 
 pub struct DictTab {
@@ -48,11 +51,13 @@ pub struct DictTab {
     pub scroll: f32,
     /// The entries this tab has shown, as dictionary and key.
     pub history: History<(ModuleId, String)>,
+    /// The pieces of the entry as they are selected, by name, with the markdown each was made from.
+    texts: std::cell::RefCell<std::collections::HashMap<String, (String, Document)>>,
 }
 
 impl DictTab {
     pub fn new(id: TabId, sh: &Shared, module: ModuleId, key: &str) -> Self {
-        let mut tab = DictTab { id, history: History::new((module.clone(), String::new())), module, key: String::new(), draft: String::new(), entry: None, scroll: 0.0 };
+        let mut tab = DictTab { id, history: History::new((module.clone(), String::new())), module, key: String::new(), draft: String::new(), entry: None, scroll: 0.0, texts: Default::default() };
         tab.show(sh, key);
         tab.history = History::new((tab.module.clone(), tab.key.clone()));
         tab
@@ -121,6 +126,16 @@ impl DictTab {
             }
             // Opening a verse is for the workspace to do.
             DictMsg::OpenVerse(..) => {}
+            // The text is read, not written: only what selects or moves is taken.
+            DictMsg::Text(name, action) => {
+                if matches!(
+                    action,
+                    Action::Move { .. } | Action::SetCaret { .. } | Action::Select(_) | Action::SelectBetween { .. } | Action::SelectAll | Action::SelectWord(_) | Action::SelectLine(_)
+                ) && let Some((_, doc)) = self.texts.borrow_mut().get_mut(&name)
+                {
+                    doc.perform(action);
+                }
+            }
             DictMsg::Go => {
                 let key = self.draft.clone();
                 self.show(sh, &key);
@@ -165,6 +180,43 @@ impl DictTab {
         out.into()
     }
 
+    /// The markdown a piece of the entry's text is made from, and whether any of it is selected (for the tests to
+    /// look in: the text is drawn by the editor widget, which a search of the screen for words does not look inside).
+    #[cfg(test)]
+    pub fn piece(&self, name: &str) -> Option<(String, bool)> {
+        self.texts.borrow().get(name).map(|(markdown, doc)| (markdown.clone(), doc.selection().anchor != doc.selection().head))
+    }
+
+    /// A piece of the entry's text that can be selected and copied: `name` says which, so that its selection
+    /// is kept as the tab is drawn again.
+    fn selectable<'a>(&self, sh: &Shared, name: &str, markdown: String, size: f32, quiet: bool) -> Element<'a, DictMsg> {
+        let doc = {
+            let mut texts = self.texts.borrow_mut();
+            let kept = texts.entry(name.to_string()).or_insert_with(|| (markdown.clone(), Document::new(&markdown)));
+            if kept.0 != markdown {
+                *kept = (markdown.clone(), Document::new(&markdown));
+            }
+            kept.1.clone()
+        };
+        let name = name.to_string();
+        let editor: Element<'a, DictMsg> = crate::live_editor::live_reader(doc, crate::palette::Palette::for_theme(&sh.theme()))
+            .reading(true)
+            .copy_as(crate::commentary_tab::plain_text)
+            .fit_width()
+            .height(Length::Shrink)
+            .size(size)
+            .font(fonts::UI)
+            .padding([2.0, 0.0])
+            .on_action(move |action| DictMsg::Text(name.clone(), action))
+            .into();
+        if !quiet {
+            return editor;
+        }
+        container(editor)
+            .style(|theme: &iced::Theme| container::Style { text_color: Some(theme.extended_palette().secondary.base.color), ..container::Style::default() })
+            .into()
+    }
+
     pub fn view<'a>(&'a self, sh: &'a Shared, searched: Option<&ModuleId>, outer: crate::shared::Outer) -> Element<'a, DictMsg> {
         let choices: Vec<DictChoice> =
             sh.backend.dictionaries().into_iter().map(|d| DictChoice(d.id, d.abbreviation)).collect();
@@ -190,7 +242,7 @@ impl DictTab {
             (Some(e), _) => {
                 let mut head = row![].spacing(12).align_y(iced::Alignment::End);
                 if !e.lemma.is_empty() {
-                    head = head.push(text(e.lemma.clone()).size(34));
+                    head = head.push(self.selectable(sh, "lemma", crate::bible_tab::markdown_text(&e.lemma), 34.0, false));
                     if crate::speech::can_say(&e.lemma) {
                         head = head.push(
                             button(crate::icons::Icon::Speaker.view(22.0)).padding([2, 6]).style(button::text).on_press(DictMsg::Speak(e.lemma.clone())),
@@ -198,13 +250,12 @@ impl DictTab {
                     }
                 }
                 if !e.transliteration.is_empty() {
-                    let italic = Font { style: font::Style::Italic, ..fonts::UI };
-                    head = head.push(text(e.transliteration.clone()).size(18).font(italic).style(text::secondary));
+                    head = head.push(self.selectable(sh, "transliteration", format!("*{}*", crate::bible_tab::markdown_text(&e.transliteration)), 18.0, true));
                 }
                 let mut entry = column![
-                    text(e.key.clone()).size(12).style(text::secondary),
+                    self.selectable(sh, "key", crate::bible_tab::markdown_text(&e.key), 12.0, true),
                     head,
-                    text(e.definition.clone()).size(17),
+                    self.selectable(sh, "definition", crate::bible_tab::markdown_text(&e.definition), 17.0, false),
                 ]
                 .spacing(10);
                 if let Some(module) = searched {

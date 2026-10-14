@@ -6548,6 +6548,35 @@ mod tests {
     }
 
     #[test]
+    fn the_text_of_a_reference_card_can_be_selected_but_not_changed() {
+        let mut h = narrow_reader();
+        h.click_scan(opened).expect("a footnote marker in John 3");
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let id = h.app.bid();
+        let source = h.app.bible().card_source("popup").expect("the card's text");
+        assert!(!h.app.bible().card_selected("popup"));
+        let _ = h.app.update(Message::Bible(id, BibleMsg::CardText("popup".into(), md_editor::Action::SelectAll)));
+        assert!(h.app.bible().card_selected("popup"), "everything in the card is selected");
+        let _ = h.app.update(Message::Bible(id, BibleMsg::CardText("popup".into(), md_editor::Action::Insert("typed".into()))));
+        let _ = h.app.update(Message::Bible(id, BibleMsg::CardText("popup".into(), md_editor::Action::Backspace)));
+        assert_eq!(h.app.bible().card_source("popup"), Some(source), "reading, not writing");
+        assert!(h.app.bible().card_selected("popup"), "and what was done to change it left the selection alone");
+        assert!(h.app.bible().note_card.is_some(), "the card stays while its text is worked in");
+    }
+
+    #[test]
+    fn dragging_across_the_text_of_a_reference_card_selects_it() {
+        let mut h = narrow_reader();
+        h.click_scan(opened).expect("a footnote marker in John 3");
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let card = h.bounds_of_text("Footnote").expect("the card");
+        let y = card.y + 40.0;
+        h.drag((card.x + 12.0, y), (card.x + 120.0, y));
+        assert!(h.app.bible().note_card.is_some(), "the card stays");
+        assert!(h.app.bible().card_selected("popup"), "the drag selected some of the text");
+    }
+
+    #[test]
     fn a_floating_footnote_card_closes_on_escape_or_a_click_in_the_text() {
         let mut h = narrow_reader();
         h.click_scan(opened).unwrap();
@@ -6617,8 +6646,9 @@ mod tests {
         let label = format!("Strong's {key}");
         let card = h.bounds_of_text(&label).expect("the pop-over header");
         assert!(card.y > y - 4.0, "under the line of the word: card {} word {y}", card.y);
-        assert!(h.center_of(&entry.lemma).is_some(), "the lemma is shown");
-        assert!(h.center_of(&entry.transliteration).is_some(), "and its transliteration");
+        let shown = h.app.bible().card_source("popup").expect("the card's text");
+        assert!(shown.contains(&entry.lemma), "the lemma is shown");
+        assert!(shown.contains(&entry.transliteration), "and its transliteration");
         // It closes on a click elsewhere, or Escape, as in a narrow reader.
         h.feed(iced_test::simulator::press_key(keyboard::key::Named::Escape, None));
         assert!(h.app.bible().note_card.is_none());
@@ -8406,7 +8436,7 @@ mod tests {
         // Each reference is a link with the start of its text.
         // (Each reference is drawn as the writer draws a link, so it has the same right click and
         // pull-away: those are the editor's own, tested with it.)
-        assert!(h.center_of("The Lord is my shepherd; I shall not want.").is_some(), "its text, to tell it apart");
+        assert!(h.app.bible().card_source("popup:1:text").is_some_and(|t| t.contains("The Lord is my shepherd; I shall not want.")), "its text, to tell it apart");
         // Following one takes this tab there.
         let id = h.app.bid();
         let target = LinkTarget::Verse { range: RefRange::parse("Ps 23:1").unwrap(), module: None };
@@ -9418,11 +9448,22 @@ mod tests {
             t.open(&app.sh, module, "G2316");
         }
         let mut h = Harness::new(app);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
         let e = h.app.sh.backend.lexicon_entry("G2316").unwrap();
-        for text in [e.lemma.as_str(), e.transliteration.as_str(), e.definition.as_str()] {
-            assert!(h.center_of(text).is_some(), "{text}");
+        let Some(Tab::Dict(tab)) = h.app.tabs.get(&id) else { unreachable!() };
+        for (name, text) in [("lemma", e.lemma.as_str()), ("transliteration", e.transliteration.as_str()), ("definition", e.definition.as_str())] {
+            assert!(tab.piece(name).is_some_and(|(markdown, _)| markdown.contains(text)), "{name}: {text}");
         }
+        let before = tab.piece("definition").unwrap();
         assert!(h.center_of("Go").is_some(), "the lookup button");
+        // The text can be selected (but not changed).
+        assert!(!before.1);
+        let _ = h.app.update(Message::Dict(id, DictMsg::Text("definition".into(), md_editor::Action::SelectAll)));
+        let _ = h.app.update(Message::Dict(id, DictMsg::Text("definition".into(), md_editor::Action::Insert("typed".into()))));
+        let Some(Tab::Dict(tab)) = h.app.tabs.get(&id) else { unreachable!() };
+        let after = tab.piece("definition").unwrap();
+        assert!(after.1, "all of it is selected");
+        assert_eq!(after.0, before.0, "and nothing typed went in");
     }
 
     // ---- history ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 //! reads and changes the shared notes and marks through [`Shared`].
 
 use crate::history::History;
-use crate::live_editor::{live_editor, live_view};
+use crate::live_editor::{live_editor, live_reader, live_view};
 use crate::opening::Spec;
 use crate::palette::Palette;
 use crate::reader::{self, Link};
@@ -135,6 +135,8 @@ pub enum BibleMsg {
     SearchSelection,
     /// Open the search tab.
     OpenSearch,
+    /// Something done in the text of a reference card (by its key): only what selects or moves is taken.
+    CardText(String, EditAction),
     /// Fill the window with this chapter's text alone.
     ReadingMode,
     /// Mark this chapter as read today, or take the mark back.
@@ -299,6 +301,9 @@ pub struct BibleTab {
     /// What is typed in the tag box of the card being written in.
     pub card_tag_draft: String,
     pub note_card: Option<NoteCard>,
+    /// The text of the reference cards (footnotes, references, dictionary entries) as it is selected, by
+    /// card, with the markdown it was made from (the text is made again when that changes).
+    card_texts: std::cell::RefCell<std::collections::HashMap<String, (String, Document)>>,
     /// The chapter's Strong's words with their entries, when they are kept in the margin (looked
     /// up when the chapter loads, not for every drawing).
     pub words: Vec<WordCard>,
@@ -414,78 +419,113 @@ pub fn copy_text(refs: &[RefRange], module: &str, quote: bool) -> String {
     }
 }
 
-/// Footnote text, with scripture references in it (`See Mrk 9:29`) as links to the reader.
-pub fn footnote_body<'a>(sh: &Shared, note: &str, link: Color) -> Element<'a, BibleMsg> {
-    use iced::widget::{rich_text, span};
-    // References drawn as the writer draws links, so they can also be right clicked (where to
-    // open it) and pulled away to a tab or pane. That means writing the text as markdown, so
-    // only text with nothing in it that markdown would take for something else.
-    let refs = find_refs(note);
-    if !refs.is_empty() && !note.contains(['*', '_', '`', '#', '[', ']', '<', '>', '\\', '\n']) {
-        let mut markdown = String::new();
-        let mut at = 0;
-        for (range, _) in &refs {
-            markdown.push_str(&note[at..range.start]);
-            markdown.push_str(&format!("[[{}]]", &note[range.clone()]));
-            at = range.end;
+/// `text` as markdown that shows it as it is: the characters markdown would take for something else are
+/// escaped (and a line break is a paragraph break).
+pub(crate) fn markdown_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' | '*' | '_' | '`' | '#' | '[' | ']' | '<' | '>' | '~' | '|' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\n\n"),
+            c => out.push(c),
         }
-        markdown.push_str(&note[at..]);
-        return link_view(sh, markdown);
     }
-    let mut spans = Vec::new();
+    out
+}
+
+/// Footnote text as markdown, with scripture references in it (`See Mrk 9:29`) as links to the reader.
+fn footnote_markdown(note: &str) -> String {
+    let mut markdown = String::new();
     let mut at = 0;
-    for (range, target) in find_refs(note) {
-        if range.start > at {
-            spans.push(span(note[at..range.start].to_string()));
-        }
-        spans.push(span(note[range.clone()].to_string()).color(link).underline(true).link(target));
+    for (range, _) in find_refs(note) {
+        markdown.push_str(&markdown_text(&note[at..range.start]));
+        markdown.push_str(&format!("[[{}]]", &note[range.clone()]));
         at = range.end;
     }
-    if at < note.len() {
-        spans.push(span(note[at..].to_string()));
+    markdown.push_str(&markdown_text(&note[at..]));
+    markdown
+}
+
+impl BibleTab {
+    /// Text for a card (markdown, with `[[links]]` that open as links do), set like a card's text, that can be
+    /// selected and copied: `key` says which card, so that its selection is kept as the card is drawn again.
+    fn card_text<'a>(&self, sh: &Shared, key: String, markdown: String) -> Element<'a, BibleMsg> {
+        self.card_text_sized(sh, key, markdown, 1.0, false)
     }
-    rich_text(spans)
-        .size(card_size(sh))
-        .font(sh.settings.text_font())
-        .on_link_click(|range: RefRange| BibleMsg::OpenLink(LinkTarget::Verse { range, module: None }))
-        .into()
-}
 
-/// Text with `[[links]]` in it, set like a card's text and with a link's usual behaviour: a click
-/// opens it, a right click offers where, and pulling it away takes it to a tab or pane.
-fn link_view<'a>(sh: &Shared, markdown: String) -> Element<'a, BibleMsg> {
-    live_view(Document::new(&markdown), Palette::for_theme(&sh.theme()))
-        .fit_width()
-        .size(card_size(sh))
-        .font(sh.settings.text_font())
-        .padding([2.0, 0.0])
-        .on_link(BibleMsg::OpenLink)
-        .on_link_menu(BibleMsg::CardLinkMenu)
-        .on_link_drag(BibleMsg::CardLinkDrag)
-        .into()
-}
-
-/// A dictionary entry: the word in its language and its transliteration, then the definition.
-fn word_body<'a>(sh: &Shared, e: &study_core::LexiconEntry) -> Element<'a, BibleMsg> {
-    let (size, font) = (card_size(sh), sh.settings.text_font());
-    let mut head = row![].spacing(8).align_y(iced::Alignment::Center);
-    if !e.lemma.is_empty() {
-        head = head.push(text(e.lemma.clone()).size(size * 1.2).font(font));
-        // Said aloud by the system's voice, where it has one for the language.
-        if crate::speech::can_say(&e.lemma) {
-            head = head.push(
-                button(crate::icons::Icon::Speaker.view(size))
-                    .padding([2, 4])
-                    .style(button::text)
-                    .on_press(BibleMsg::Speak(e.lemma.clone())),
-            );
+    /// [`BibleTab::card_text`] at `scale` times the card's text size, in the quiet color if `quiet`.
+    fn card_text_sized<'a>(&self, sh: &Shared, key: String, markdown: String, scale: f32, quiet: bool) -> Element<'a, BibleMsg> {
+        let doc = {
+            let mut texts = self.card_texts.borrow_mut();
+            let kept = texts.entry(key.clone()).or_insert_with(|| (markdown.clone(), Document::new(&markdown)));
+            if kept.0 != markdown {
+                *kept = (markdown.clone(), Document::new(&markdown));
+            }
+            kept.1.clone()
+        };
+        let editor: Element<'a, BibleMsg> = live_reader(doc, Palette::for_theme(&sh.theme()))
+            .reading(true)
+            .copy_as(crate::commentary_tab::plain_text)
+            .follow_links(true)
+            .fit_width()
+            .height(Length::Shrink)
+            .size(card_size(sh) * scale)
+            .font(sh.settings.text_font())
+            .padding([2.0, 0.0])
+            .on_action(move |action| BibleMsg::CardText(key.clone(), action))
+            .on_link(BibleMsg::OpenLink)
+            .on_link_menu(BibleMsg::CardLinkMenu)
+            .on_link_drag(BibleMsg::CardLinkDrag)
+            .into();
+        if !quiet {
+            return editor;
         }
+        // (The text takes its color from where it is drawn: as quiet as the secondary text.)
+        container(editor)
+            .style(|theme: &Theme| container::Style { text_color: Some(theme.extended_palette().secondary.base.color), ..container::Style::default() })
+            .into()
     }
-    if !e.transliteration.is_empty() {
-        let italic = Font { style: font::Style::Italic, ..font };
-        head = head.push(text(e.transliteration.clone()).size(size).font(italic).style(text::secondary));
+
+    /// The markdown the text of card `key` is made from (for the tests to look in: the text itself is drawn by the
+    /// editor widget, which a search of the screen for words does not look inside).
+    #[cfg(test)]
+    pub fn card_source(&self, key: &str) -> Option<String> {
+        self.card_texts.borrow().get(key).map(|(markdown, _)| markdown.clone())
     }
-    column![head, text(e.definition.clone()).size(size).font(font)].spacing(4).into()
+
+    /// Whether any of the text of card `key` is selected.
+    #[cfg(test)]
+    pub fn card_selected(&self, key: &str) -> bool {
+        self.card_texts.borrow().get(key).is_some_and(|(_, doc)| doc.selection().anchor != doc.selection().head)
+    }
+
+    /// Footnote text, with scripture references in it as links to the reader.
+    fn footnote_body<'a>(&self, sh: &Shared, key: String, note: &str) -> Element<'a, BibleMsg> {
+        self.card_text(sh, key, footnote_markdown(note))
+    }
+
+    /// A dictionary entry: the word in its language and its transliteration, then the definition.
+    fn word_body<'a>(&self, sh: &Shared, key: String, e: &study_core::LexiconEntry) -> Element<'a, BibleMsg> {
+        let size = card_size(sh);
+        let mut head = String::new();
+        if !e.lemma.is_empty() {
+            head.push_str(&format!("**{}**", markdown_text(&e.lemma)));
+        }
+        if !e.transliteration.is_empty() {
+            head.push_str(&format!("  *{}*", markdown_text(&e.transliteration)));
+        }
+        let markdown = if head.is_empty() { markdown_text(&e.definition) } else { format!("{head}\n\n{}", markdown_text(&e.definition)) };
+        let text = self.card_text(sh, key, markdown);
+        // Said aloud by the system's voice, where it has one for the language.
+        if !e.lemma.is_empty() && crate::speech::can_say(&e.lemma) {
+            let say = button(crate::icons::Icon::Speaker.view(size)).padding([2, 4]).style(button::text).on_press(BibleMsg::Speak(e.lemma.clone()));
+            return row![say, text].spacing(4).into();
+        }
+        text
+    }
 }
 
 /// A word with a Strong's number, where it is, and what the dictionary says of it.
@@ -571,6 +611,7 @@ impl BibleTab {
             in_margin: crate::state::MarginKinds::default(),
             card_tag_draft: String::new(),
             note_card: None,
+            card_texts: Default::default(),
             words: Vec::new(),
         }
     }
@@ -1223,6 +1264,22 @@ impl BibleTab {
                 request = Some(Request::Open(Spec::Verse { range: target, module: None }));
                 Task::none()
             }
+            BibleMsg::CardText(key, action) => {
+                if matches!(
+                    action,
+                    EditAction::Move { .. }
+                        | EditAction::SetCaret { .. }
+                        | EditAction::Select(_)
+                        | EditAction::SelectBetween { .. }
+                        | EditAction::SelectAll
+                        | EditAction::SelectWord(_)
+                        | EditAction::SelectLine(_)
+                ) && let Some((_, doc)) = self.card_texts.borrow_mut().get_mut(&key)
+                {
+                    doc.perform(action);
+                }
+                Task::none()
+            }
             BibleMsg::CloseNoteCard => {
                 self.note_card = None;
                 Task::none()
@@ -1699,7 +1756,7 @@ impl BibleTab {
                     follows_link: true,
                     element: {
                         let text = note.text.clone();
-                        CardElement::new(move || reference_card(sh, "Footnote", footnote_body(sh, &text, color), false, false, None))
+                        CardElement::new(move || reference_card(sh, "Footnote", self.footnote_body(sh, format!("footnote:{i}"), &text), false, false, None))
                     },
                 });
             }
@@ -1722,7 +1779,7 @@ impl BibleTab {
                     follows_link: true,
                     element: {
                         let refs = marker.refs.clone();
-                        CardElement::new(move || reference_card(sh, "References", self.reference_list(sh, &refs), false, false, None))
+                        CardElement::new(move || reference_card(sh, "References", self.reference_list(sh, format!("refs:{i}"), &refs), false, false, None))
                     },
                 });
             }
@@ -1742,7 +1799,7 @@ impl BibleTab {
                         reference_card(
                             sh,
                             &format!("Strong's {}", word.entry.key),
-                            word_body(sh, &word.entry),
+                            self.word_body(sh, format!("word:{i}"), &word.entry),
                             false,
                             false,
                             Some(("Open in tab", BibleMsg::OpenWord(word.entry.key.clone()))),
@@ -1822,14 +1879,14 @@ impl BibleTab {
         let (size, font) = (card_size(sh), sh.settings.text_font());
         let (label, body): (String, Element<'_, BibleMsg>) = match &card.content {
             NoteContent::Footnote(note) => {
-                ("Footnote".into(), footnote_body(sh, note, Palette::for_theme(&sh.theme()).link))
+                ("Footnote".into(), self.footnote_body(sh, "popup".into(), note))
             }
-            NoteContent::References(refs) => ("References".into(), self.reference_list(sh, refs)),
+            NoteContent::References(refs) => ("References".into(), self.reference_list(sh, "popup".into(), refs)),
             NoteContent::Word { key, entry: None } => (
                 format!("Strong's {key}"),
                 text("No installed dictionary has an entry for this number.").size(size).font(font).style(text::secondary).into(),
             ),
-            NoteContent::Word { key, entry: Some(e) } => (format!("Strong's {key}"), word_body(sh, e)),
+            NoteContent::Word { key, entry: Some(e) } => (format!("Strong's {key}"), self.word_body(sh, "popup".into(), e)),
         };
         // A dictionary entry can be taken to a tab of its own.
         let open = match &card.content {
@@ -1841,9 +1898,9 @@ impl BibleTab {
 
     /// The passages a cross reference marker points to, each a link to open it, with the start of
     /// its text so it can be told from the others.
-    fn reference_list<'a>(&self, sh: &Shared, refs: &[RefRange]) -> Element<'a, BibleMsg> {
+    fn reference_list<'a>(&self, sh: &Shared, key: String, refs: &[RefRange]) -> Element<'a, BibleMsg> {
         let mut list = column![].spacing(6);
-        for range in refs {
+        for (i, range) in refs.iter().enumerate() {
             let preview = sh
                 .backend
                 .chapter(&self.module, range.book, range.chapter)
@@ -1854,12 +1911,9 @@ impl BibleTab {
                     if t.chars().count() > 70 { format!("{short}\u{2026}") } else { short }
                 })
                 .filter(|t| !t.is_empty());
-            let mut entry = column![
-                link_view(sh, format!("[[{range}]]"))
-            ]
-            .spacing(1);
+            let mut entry = column![self.card_text(sh, format!("{key}:{i}"), format!("[[{range}]]"))].spacing(1);
             if let Some(preview) = preview {
-                entry = entry.push(text(preview).size(card_size(sh) * 0.8).font(sh.settings.text_font()).style(text::secondary));
+                entry = entry.push(self.card_text_sized(sh, format!("{key}:{i}:text"), markdown_text(&preview), 0.8, true));
             }
             list = list.push(entry);
         }

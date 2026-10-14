@@ -126,6 +126,12 @@ pub fn live_view<'a, Message>(doc: Document, pal: Palette) -> LiveEditor<'a, Mes
     editor(Cow::Owned(doc), pal, true)
 }
 
+/// A document that is read with `reading(true)`, but that the owner (not the widget) keeps: it selects and
+/// copies, where [`live_view`] only follows links.
+pub fn live_reader<'a, Message>(doc: Document, pal: Palette) -> LiveEditor<'a, Message> {
+    editor(Cow::Owned(doc), pal, false)
+}
+
 fn editor<'a, Message>(doc: Cow<'a, Document>, pal: Palette, read_only: bool) -> LiveEditor<'a, Message> {
     LiveEditor {
         doc,
