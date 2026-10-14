@@ -281,11 +281,13 @@ commentary installed the tab opens on this one.
 ## The reading log
 
 A chapter is added to the note `Reading log.md` (made the first time, tagged `reading-log`) under a
-heading for the day, as a bullet with the time and a link (`- 16:20 [[John 3]]`); the same chapter twice
-running is one line. When today's note already exists (the daily note: a one-a-day kind of note made
+heading for the day, as a bullet with a link and no time (`- [[John 3]]`); a chapter is in a day once, however
+often it is read. When today's note already exists (the daily note: a one-a-day kind of note made
 without asking a title) the chapter is also added under its `## Reading` heading, filling the empty
 bullet the template starts with (and never making the note). A button at the foot of a chapter's text,
-*Log John 3 as read*, does it by hand. Settings → Reading can also have a chapter logged by itself once
+*Mark as read*, does it by hand; it shows a green check mark (*Marked as read*) for as long as the chapter is in
+today's log, and pressing the check takes the mark back (from the log and today's note). A small clock to its left
+opens a card with the days the chapter was read, latest first, and a way to the log itself. Settings → Reading can also have a chapter logged by itself once
 it has been in front of the reader for a chosen number of seconds (10 to 600, thirty to begin with);
 that is **off** to begin with, and so is nothing else: the button is always there. A note open in the writer
 while something is added to it keeps the caret in the words it was in.

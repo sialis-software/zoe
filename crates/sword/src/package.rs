@@ -181,6 +181,7 @@ pub fn readability(module: &Module) -> Result<(), String> {
         Kind::Bible => module.bible().map(|_| ()),
         Kind::Commentary => module.commentary().map(|_| ()),
         Kind::Lexicon => module.lexicon().map(|_| ()),
+        Kind::Devotional => module.devotional().map(|_| ()),
         Kind::Other if module.is_locked() => return Err(format!("{} is locked and needs a key", module.name())),
         Kind::Other => {
             return Err(match module.conf.get("ModDrv") {
@@ -203,6 +204,7 @@ fn category_of(conf: &Conf, kind: Kind) -> String {
             Kind::Bible => "Biblical Texts",
             Kind::Commentary => "Commentaries",
             Kind::Lexicon => "Lexicons / Dictionaries",
+            Kind::Devotional => "Daily Devotional",
             Kind::Other => "Other",
         }
         .to_string(),

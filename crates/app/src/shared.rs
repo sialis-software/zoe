@@ -240,6 +240,37 @@ impl Shared {
         }
     }
 
+    /// The link a chapter has in the reading log and the notes made from it.
+    fn chapter_link(book: Book, chapter: u16) -> String {
+        format!("[[{} {}]]", book.name(), chapter)
+    }
+
+    /// The days a chapter is in the reading log, as `2025-10-13`, the latest first.
+    pub fn days_read(&self, book: Book, chapter: u16) -> Vec<String> {
+        self.notes.get(READING_LOG).map_or_else(Vec::new, |log| study_core::reading_log::dates_read(log, &Self::chapter_link(book, chapter)))
+    }
+
+    /// Whether the chapter is in the reading log for the day of `now`.
+    pub fn read_on(&self, book: Book, chapter: u16, now: &chrono::DateTime<chrono::Local>) -> bool {
+        let today = now.format("%Y-%m-%d").to_string();
+        self.days_read(book, chapter).contains(&today)
+    }
+
+    /// Take the chapter out of the reading log for the day of `now` (and out of that day's note, where
+    /// it was put): it was marked by mistake.
+    pub fn unlog_reading(&mut self, book: Book, chapter: u16, now: &chrono::DateTime<chrono::Local>) {
+        let link = Self::chapter_link(book, chapter);
+        if let Some(text) = self.notes.get(READING_LOG).and_then(|log| study_core::reading_log::remove_entry(log, &link, now)) {
+            self.rewrite_note(READING_LOG, text);
+        }
+        let today = templates::todays_note(&self.templates(), now, |p| self.notes.contains_key(p));
+        if let Some(path) = today
+            && let Some(text) = self.notes.get(&path).and_then(|t| study_core::reading_log::remove_bullet(t, &link))
+        {
+            self.rewrite_note(&path, text);
+        }
+    }
+
     /// Give the note at `path` this text, and tell the tabs showing it.
     fn rewrite_note(&mut self, path: &str, text: String) {
         self.notes.insert(path.to_string(), text);

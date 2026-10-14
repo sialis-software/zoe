@@ -87,6 +87,8 @@ pub fn own_folder() -> Option<PathBuf> {
 pub enum Kind {
     Bible,
     Lexicon,
+    /// A daily devotional (`Feature=DailyDevotion`), kept like a dictionary keyed by day.
+    Devotional,
     Commentary,
     Other,
 }
@@ -112,6 +114,10 @@ impl Module {
     }
 
     pub fn kind(&self) -> Kind {
+        // A devotional is stored as a dictionary, so it is told apart before the driver is looked at.
+        if self.conf.all("Feature").any(|f| f == "DailyDevotion") {
+            return Kind::Devotional;
+        }
         match self.conf.get("ModDrv") {
             Some("zText" | "zText4" | "RawText" | "RawText4") => Kind::Bible,
             Some("zLD" | "RawLD" | "RawLD4") => Kind::Lexicon,
@@ -197,6 +203,15 @@ impl Commentary {
 impl Module {
     /// Open as a dictionary, or say why we cannot.
     pub fn lexicon(&self) -> Result<Lexicon, Error> {
+        self.open_lexicon()
+    }
+
+    /// Open as a daily devotional (entries keyed by day), or say why we cannot.
+    pub fn devotional(&self) -> Result<Devotional, Error> {
+        self.open_lexicon().map(|lexicon| Devotional { lexicon })
+    }
+
+    fn open_lexicon(&self) -> Result<Lexicon, Error> {
         let driver = self.conf.get("ModDrv").unwrap_or("");
         let compressed = match driver {
             "zLD" => true,
@@ -212,6 +227,23 @@ impl Module {
         let stem = self.conf.data_dir(&self.root).ok_or_else(|| Error::Unsupported("no DataPath".into()))?;
         let stem = PathBuf::from(stem.to_string_lossy().trim_end_matches('/'));
         Ok(Lexicon::open(stem, compressed))
+    }
+}
+
+/// A daily devotional: one entry for each day, keyed like `01.01` for January 1.
+pub struct Devotional {
+    lexicon: Lexicon,
+}
+
+impl Devotional {
+    /// Every key, in order.
+    pub fn keys(&self) -> std::io::Result<Vec<String>> {
+        self.lexicon.key_list()
+    }
+
+    /// The raw marked-up entry for a key, or `None` if there is none.
+    pub fn raw(&self, key: &str) -> std::io::Result<Option<String>> {
+        self.lexicon.entry(key)
     }
 }
 
@@ -295,4 +327,44 @@ fn read_confs(root: &Path) -> Vec<Conf> {
         .filter_map(|p| std::fs::read(p).ok())
         .filter_map(|bytes| Conf::parse(&String::from_utf8_lossy(&bytes)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn module(conf: &str) -> Module {
+        Module { conf: Conf::parse(conf).unwrap(), root: PathBuf::from("/nowhere") }
+    }
+
+    #[test]
+    fn a_daily_devotion_is_a_devotional_not_a_lexicon_whatever_its_driver() {
+        for driver in ["zLD", "RawLD"] {
+            let m = module(&format!("[D]\nModDrv={driver}\nFeature=DailyDevotion\nDataPath=./d/d\n"));
+            assert_eq!(m.kind(), Kind::Devotional);
+        }
+        assert_eq!(module("[S]\nModDrv=zLD\nFeature=GreekDef\n").kind(), Kind::Lexicon);
+    }
+
+    #[test]
+    fn a_devotional_opens_with_the_checks_a_lexicon_has() {
+        assert!(matches!(module("[D]\nModDrv=zText\nFeature=DailyDevotion\n").devotional(), Err(Error::Unsupported(_))));
+        assert!(matches!(module("[D]\nModDrv=zLD\nCipherKey=\nFeature=DailyDevotion\n").devotional(), Err(Error::Locked(_))));
+        assert!(matches!(module("[D]\nModDrv=zLD\nCompressType=LZSS\nDataPath=./d/d\n").devotional(), Err(Error::Unsupported(_))));
+        assert!(module("[D]\nModDrv=zLD\nCompressType=ZIP\nDataPath=./d/d\n").devotional().is_ok());
+    }
+
+    #[test]
+    fn the_installed_morning_and_evening_reads_by_day() {
+        let lib = Library::discover();
+        let Some(sme) = lib.get("SME") else { return };
+        assert_eq!(sme.kind(), Kind::Devotional);
+        let d = sme.devotional().unwrap();
+        let keys = d.keys().unwrap();
+        assert_eq!(keys.len(), 366);
+        assert_eq!((keys[0].as_str(), keys[365].as_str()), ("01.01", "12.31"));
+        let raw = d.raw("01.01").unwrap().unwrap();
+        assert!(raw.contains("Morning, January 1"), "{raw}");
+        assert_eq!(d.raw("13.40").unwrap(), None);
+    }
 }

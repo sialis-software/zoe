@@ -1,6 +1,8 @@
 //! A commentary's notes as paragraphs of styled runs, from the markup modules keep them in
 //! (ThML or OSIS): only what a reader needs, which is where paragraphs break, bold and italic,
-//! and the passages the text points to.
+//! and the passages the text points to. [`markdown`] writes a paragraph the way the editor reads it.
+
+use scripture::RefRange;
 
 /// A stretch of text in one style.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -71,7 +73,7 @@ pub fn paragraphs(raw: &str) -> Vec<Paragraph> {
         let name = body.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
         match name.as_str() {
             // Where a paragraph ends (and the next begins), whether the tag opens or closes.
-            "p" | "br" | "lb" | "div" | "list" | "item" | "h1" | "h2" | "h3" | "h4" => end_paragraph(&mut out, &mut current),
+            "p" | "br" | "lb" | "div" | "list" | "item" | "lg" | "l" | "h1" | "h2" | "h3" | "h4" => end_paragraph(&mut out, &mut current),
             // A title is a paragraph of its own, in bold.
             "title" => {
                 end_paragraph(&mut out, &mut current);
@@ -190,6 +192,99 @@ fn decode(text: &str) -> String {
     out
 }
 
+/// A paragraph as markdown: bold and italic as the module has them, passages as `[[…]]` links
+/// that keep the words the note used.
+pub fn markdown(paragraph: &Paragraph) -> String {
+    let mut out = String::new();
+    for span in paragraph {
+        // Spaces at the ends stay outside the marks, which cannot touch them from inside.
+        let inner = span.text.trim();
+        if inner.is_empty() {
+            out.push_str(&span.text);
+            continue;
+        }
+        let lead = &span.text[..span.text.len() - span.text.trim_start().len()];
+        let tail = &span.text[span.text.trim_end().len()..];
+        let body = match span.passage.as_deref().and_then(passage_range) {
+            Some(range) => format!("[[{range}|{}]]", inner.replace(['|', '[', ']'], "")),
+            None => escape(inner),
+        };
+        let marks = match (span.bold, span.italic) {
+            (true, true) => "***",
+            (true, false) => "**",
+            (false, true) => "*",
+            (false, false) => "",
+        };
+        out.push_str(&format!("{lead}{marks}{body}{marks}{tail}"));
+    }
+    // A paragraph that would read as a list, a heading or a quote.
+    let digits = out.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0 && out[digits..].starts_with(['.', ')']) {
+        out.insert(digits, '\\');
+    } else if out.starts_with(['-', '+', '>', '#']) {
+        out.insert(0, '\\');
+    }
+    out
+}
+
+/// Text with what markdown would read as marks made literal.
+pub fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '*' | '_' | '[' | ']' | '`' | '<' | '>' | '~' | '|') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// What copying selected markdown puts on the clipboard: the words, without the marks that style
+/// them or the brackets of links.
+pub fn plain_text(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '*' => {}
+            '[' if chars.peek() == Some(&'[') => {
+                chars.next();
+                let mut inner = String::new();
+                for c in chars.by_ref() {
+                    if c == ']' {
+                        break;
+                    }
+                    inner.push(c);
+                }
+                chars.next_if_eq(&']');
+                out.push_str(inner.rsplit_once('|').map_or(inner.as_str(), |(_, shown)| shown));
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The first passage a reference names: `Joh 2:23,24` is John 2:23; `John.3.16` and the OSIS form
+/// with a work in front (`Bible:John.3.16`) are that.
+pub fn passage_range(passage: &str) -> Option<RefRange> {
+    let first = passage.split(';').next()?.trim();
+    // OSIS may name the work first (`Bible:Josh.5.12`); a book and chapter (`Joh 2:23`) is not that.
+    let first = match first.split_once(':') {
+        Some((work, rest)) if !work.is_empty() && work.chars().all(|c| c.is_ascii_alphabetic()) && rest.contains('.') => rest,
+        _ => first,
+    };
+    RefRange::from_osis(first).or_else(|| {
+        let first = first.split(',').next()?.trim();
+        RefRange::parse(first)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +334,37 @@ mod tests {
         assert_eq!(text(&paragraphs("12:7-9 not a place")[0]), "12:7-9 not a place");
         assert!(paragraphs("").is_empty() && paragraphs("<p /> <p />").is_empty());
         assert_eq!(text(&paragraphs("a &amp; b &#8217;s &unknown; c")[0]), "a & b \u{2019}s &unknown; c");
+    }
+
+    #[test]
+    fn notes_are_markdown_that_reads_back_as_the_words() {
+        let span = |t: &str, bold, italic, passage: Option<&str>| Span { text: t.into(), bold, italic, passage: passage.map(String::from) };
+        let paragraph = vec![
+            span("1. Not a list, a ", false, false, None),
+            span("bold ", true, false, None),
+            span("and *odd* [text]", false, true, None),
+            span(" see ", false, false, None),
+            span("Joh 2:23,24", false, false, Some("Joh 2:23,24")),
+        ];
+        let md = markdown(&paragraph);
+        assert_eq!(md, "1\\. Not a list, a **bold** *and \\*odd\\* \\[text\\]* see [[John 2:23|Joh 2:23,24]]");
+        assert_eq!(plain_text(&md), "1. Not a list, a bold and *odd* [text] see Joh 2:23,24");
+        assert_eq!(plain_text("[[John 3:16]]\n\nText"), "John 3:16\n\nText");
+    }
+
+    #[test]
+    fn the_passage_a_reference_names_is_its_first() {
+        let john = |c, a, z| Some(RefRange { book: scripture::Book::JOHN, chapter: c, verses: Some((a, z)) });
+        assert_eq!(passage_range("Joh 2:23,24"), john(2, 23, 23));
+        assert_eq!(passage_range("John 3:16-18; Rom 5:8"), john(3, 16, 18));
+        assert_eq!(passage_range("John.3.16"), john(3, 16, 16));
+        assert_eq!(passage_range("Bible:John.3.16"), john(3, 16, 16));
+        assert_eq!(passage_range("not a reference"), None);
+    }
+
+    #[test]
+    fn lines_of_verse_are_paragraphs_of_their_own() {
+        let ps = paragraphs("<p>Before.</p><lg>  <l>One line</l>  <l>Two line</l></lg><p>After.</p>");
+        assert_eq!(ps.iter().map(text).collect::<Vec<_>>(), ["Before.", "One line", "Two line", "After."]);
     }
 }

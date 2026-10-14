@@ -3,11 +3,13 @@
 
 pub mod ast;
 pub mod commentary;
+pub mod devotional;
 pub mod frontmatter;
 pub mod margin;
 pub mod markdown;
 pub mod mock;
 pub mod own_commentary;
+pub mod plan;
 pub mod reading_log;
 pub mod search;
 pub mod templates;

@@ -27,6 +27,8 @@ pub enum DictMsg {
     /// Look up what is typed.
     Go,
     Back,
+    /// Say the entry's word aloud.
+    Speak(String),
     /// The entry was scrolled this far.
     Scrolled(f32),
     Forward,
@@ -100,6 +102,11 @@ impl DictTab {
             }
             DictMsg::Draft(draft) => self.draft = draft,
             DictMsg::Scrolled(y) => self.scroll = y,
+            DictMsg::Speak(word) => {
+                if let Err(why) = crate::speech::speak(&word) {
+                    sh.toast(why);
+                }
+            }
             DictMsg::Back | DictMsg::Forward => {
                 let place = if matches!(message, DictMsg::Back) { self.history.back() } else { self.history.forward() }.cloned();
                 if let Some((module, key)) = place {
@@ -182,6 +189,11 @@ impl DictTab {
                 let mut head = row![].spacing(12).align_y(iced::Alignment::End);
                 if !e.lemma.is_empty() {
                     head = head.push(text(e.lemma.clone()).size(34));
+                    if crate::speech::can_say(&e.lemma) {
+                        head = head.push(
+                            button(crate::icons::Icon::Speaker.view(22.0)).padding([2, 6]).style(button::text).on_press(DictMsg::Speak(e.lemma.clone())),
+                        );
+                    }
                 }
                 if !e.transliteration.is_empty() {
                     let italic = Font { style: font::Style::Italic, ..fonts::UI };

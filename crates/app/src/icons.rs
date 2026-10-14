@@ -30,6 +30,10 @@ pub enum Icon {
     ChevronDown,
     ChevronUp,
     Search,
+    /// The times something happened.
+    History,
+    /// Say it aloud.
+    Speaker,
 }
 
 impl Icon {
@@ -51,6 +55,8 @@ impl Icon {
             Icon::ChevronDown => include_bytes!("../assets/icons/chevron-down.svg"),
             Icon::ChevronUp => include_bytes!("../assets/icons/chevron-up.svg"),
             Icon::Search => include_bytes!("../assets/icons/search.svg"),
+            Icon::History => include_bytes!("../assets/icons/history.svg"),
+            Icon::Speaker => include_bytes!("../assets/icons/speaker.svg"),
         }
     }
 
@@ -78,7 +84,7 @@ impl Icon {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 16] = [
+    const ALL: [Icon; 18] = [
         Icon::Link,
         Icon::Quote,
         Icon::Trash,
@@ -95,6 +101,8 @@ mod tests {
         Icon::ChevronDown,
         Icon::ChevronUp,
         Icon::Search,
+        Icon::History,
+        Icon::Speaker,
     ];
 
     #[test]

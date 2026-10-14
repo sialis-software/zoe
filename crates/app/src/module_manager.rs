@@ -210,6 +210,7 @@ fn kind_label(kind: sword::Kind) -> &'static str {
         sword::Kind::Bible => "Bible",
         sword::Kind::Commentary => "Commentary",
         sword::Kind::Lexicon => "Dictionary",
+        sword::Kind::Devotional => "Devotional",
         sword::Kind::Other => "Other",
     }
 }

@@ -132,8 +132,12 @@ pub enum BibleMsg {
     SearchSelection,
     /// Open the search tab.
     OpenSearch,
-    /// Put this chapter in the reading log, as read.
+    /// Mark this chapter as read today, or take the mark back.
     LogChapter,
+    /// Show or put away the card with the days the chapter was read.
+    ToggleReadCard,
+    /// Show the reading log note.
+    OpenReadingLog,
     /// Marks under a click in the reader (several when they overlap); empty = dismissed.
     MarksClicked(Vec<usize>),
     AutoScroll(f32),
@@ -144,6 +148,8 @@ pub enum BibleMsg {
     OpenLink(LinkTarget),
     /// Open a Strong's number's definition in a dictionary tab.
     OpenWord(String),
+    /// Say the Greek or Hebrew word aloud.
+    Speak(String),
     /// A dictionary entry's card was pressed (with the command key it opens in a tab of its own).
     CardPressed(String),
     /// A right click on a link in the text, at this point of the window.
@@ -250,8 +256,8 @@ pub struct BibleTab {
     pub select_request: Option<(u64, u16, u16)>,
     /// Words to select in the reader (from the first to the last), once.
     pub select_words: Option<(u64, CanonSlice)>,
-    /// When the chapter was marked as read, while the button still shows that it was.
-    pub marked: Option<std::time::Instant>,
+    /// Whether the card with the days the chapter was read is showing.
+    pub read_card: bool,
     pub select_token: u64,
     /// Whether the reader is wide enough to show its margin (reported by the reader).
     pub margin_showing: bool,
@@ -461,6 +467,15 @@ fn word_body<'a>(sh: &Shared, e: &study_core::LexiconEntry) -> Element<'a, Bible
     let mut head = row![].spacing(8).align_y(iced::Alignment::Center);
     if !e.lemma.is_empty() {
         head = head.push(text(e.lemma.clone()).size(size * 1.2).font(font));
+        // Said aloud by the system's voice, where it has one for the language.
+        if crate::speech::can_say(&e.lemma) {
+            head = head.push(
+                button(crate::icons::Icon::Speaker.view(size))
+                    .padding([2, 4])
+                    .style(button::text)
+                    .on_press(BibleMsg::Speak(e.lemma.clone())),
+            );
+        }
     }
     if !e.transliteration.is_empty() {
         let italic = Font { style: font::Style::Italic, ..font };
@@ -531,7 +546,7 @@ impl BibleTab {
             chapter: Err(String::new()),
             select_request: None,
             select_words: None,
-            marked: None,
+            read_card: false,
             select_token: 0,
             margin_showing: false,
             editing: None,
@@ -621,7 +636,7 @@ impl BibleTab {
         self.select_request = None;
         self.select_words = None;
         self.text_selection = None;
-        self.marked = None;
+        self.read_card = false;
         self.stop_edit(sh);
         self.editing = None;
         self.reveal = None;
@@ -1094,9 +1109,20 @@ impl BibleTab {
                 Task::none()
             }
             BibleMsg::LogChapter => {
-                // Already the last in the log is as good: it is marked, and the button says so.
-                let _ = sh.log_reading(self.book, self.chapter_no, &chrono::Local::now());
-                self.marked = Some(std::time::Instant::now());
+                let now = chrono::Local::now();
+                if sh.read_on(self.book, self.chapter_no, &now) {
+                    sh.unlog_reading(self.book, self.chapter_no, &now);
+                } else {
+                    let _ = sh.log_reading(self.book, self.chapter_no, &now);
+                }
+                Task::none()
+            }
+            BibleMsg::OpenReadingLog => {
+                request = Some(Request::OpenNote(crate::shared::READING_LOG.to_string()));
+                Task::none()
+            }
+            BibleMsg::ToggleReadCard => {
+                self.read_card = !self.read_card;
                 Task::none()
             }
             BibleMsg::OpenSearch => {
@@ -1177,6 +1203,12 @@ impl BibleTab {
             }
             BibleMsg::OpenLink(target) => {
                 request = Some(Request::Open(Spec::from_target(&target)));
+                Task::none()
+            }
+            BibleMsg::Speak(word) => {
+                if let Err(why) = crate::speech::speak(&word) {
+                    sh.toast(why);
+                }
                 Task::none()
             }
             BibleMsg::CardPressed(_) => Task::none(),
@@ -1421,24 +1453,50 @@ impl BibleTab {
     /// The button at the foot of the text that puts the chapter in the reading log.
     fn log_button<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
         let size = sh.settings.bible_size * 0.62;
-        // Quiet: words in the faint text color with no box, lit when pointed at; a green check mark
-        // for a few seconds after it is pressed.
-        let marked = self.marked.is_some();
-        let label = if marked { "\u{2713} Marked as read" } else { "Mark as read" };
-        let button = button(text(label).size(size))
-            .padding([4, 10])
-            .style(move |theme: &Theme, status| {
-                let p = theme.extended_palette();
-                let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                let color = if marked {
-                    p.success.base.color
-                } else {
-                    Color { a: if lit { 0.9 } else { 0.5 }, ..p.background.base.text }
-                };
-                button::Style { text_color: color, border: iced::Border { radius: 6.0.into(), ..iced::Border::default() }, ..button::Style::default() }
-            })
-            .on_press(BibleMsg::LogChapter);
-        container(button).width(Length::Fill).center_x(Length::Fill).into()
+        // Quiet: words in the faint text color with no box, lit when pointed at. A green check mark
+        // says the chapter was read today; pressing it again takes the mark back.
+        let read = sh.read_on(self.book, self.chapter_no, &chrono::Local::now());
+        let label = if read { "\u{2713} Marked as read" } else { "Mark as read" };
+        let quiet = move |theme: &Theme, status: button::Status, glow: bool| {
+            let p = theme.extended_palette();
+            let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            let color = if glow { p.success.base.color } else { Color { a: if lit { 0.9 } else { 0.5 }, ..p.background.base.text } };
+            button::Style { text_color: color, border: iced::Border { radius: 6.0.into(), ..iced::Border::default() }, ..button::Style::default() }
+        };
+        let mark = button(text(label).size(size)).padding([4, 10]).style(move |theme, status| quiet(theme, status, read)).on_press(BibleMsg::LogChapter);
+        // To its left, a small clock: the days the chapter was read, in a card.
+        let history = button(crate::icons::Icon::History.view(size + 2.0))
+            .padding([4, 6])
+            .style(move |theme, status| quiet(theme, status, false))
+            .on_press(BibleMsg::ToggleReadCard);
+        let mut out = column![container(row![history, mark].spacing(2).align_y(iced::Center)).width(Length::Fill).center_x(Length::Fill)].spacing(8);
+        if self.read_card {
+            out = out.push(container(self.read_card_view(sh, size)).width(Length::Fill).center_x(Length::Fill));
+        }
+        out.into()
+    }
+
+    /// The days the chapter was read, and a way to the log itself.
+    fn read_card_view<'a>(&'a self, sh: &'a Shared, size: f32) -> Element<'a, BibleMsg> {
+        let days = sh.days_read(self.book, self.chapter_no);
+        let name = format!("{} {}", self.book, self.chapter_no);
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let heading = match days.len() {
+            0 => format!("{name} has not been read yet"),
+            1 => format!("{name} was read once"),
+            n => format!("{name} was read on {n} days"),
+        };
+        let mut list = column![text(heading).size(size)].spacing(4);
+        for day in &days {
+            let label = if *day == today { format!("{day}  \u{b7}  today") } else { day.clone() };
+            list = list.push(text(label).size(size).style(text::secondary));
+        }
+        let open = button(text("Open the reading log").size(size)).padding([2, 8]).style(button::secondary).on_press(BibleMsg::OpenReadingLog);
+        container(column![list, open].spacing(8))
+            .padding(12)
+            .width(260)
+            .style(crate::popup_style)
+            .into()
     }
 
     /// Previous and next chapter, to put at the top and bottom of the text.
