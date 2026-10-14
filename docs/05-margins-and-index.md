@@ -15,13 +15,26 @@ They are not separate worlds. Both feed the same index, so any verse can answer
 A **highlight or underline is a margin note with no body**: frontmatter only. A margin
 note with a comment is the same file with markdown text. One model, one file type.
 
-Users will misjudge which kind they meant, so a margin note offers two actions, both
-shown in the writer while its file is open:
-- **Unlink from text:** the highlight goes, the note stays. The file moves out of `margins/`
-  to `notes/` as an ordinary document that keeps the quote (as a blockquote), the comment,
-  and a `[[reference]]` link back to the verses.
+Users will misjudge which kind they meant, so the writer (the note tab) treats the two as one note with one interface, and
+the passage is a section of it. In both, the **tags come first** at the top, then the passage section, then when it was made
+(and, for an ordinary note, the *Properties* drop-down with everything else the app does not give its own control).
+
+- A **margin note** has a *Reference* section in the place the other has its *Mark* button: the passage and the words marked (shown,
+  not edited here; nothing is said of a mark on whole verses, and the quote is shown only if there is one), how it marks them (a
+  drop-down of the styles, and a color swatch whose panel floats over the note instead of making it taller), and two buttons. **Reselect** waits for the next
+  selection to settle in a Bible reader and makes it the note's passage (its reference, quote and context, and the module the words
+  were chosen in); the note's text, tags, look and time stay, and its file is renamed for the new passage, the links to it following.
+  **Unlink** lets it go from the text: the highlight goes, the note stays. The file moves out of `margins/` to `notes/` as an
+  ordinary document that keeps the quote (as a blockquote), the comment, and a `[[reference]]` link back to the verses.
+- An **ordinary note** has *Not on a passage* and **Mark**, which waits for a selection the same way and makes the note a margin
+  note on it, as a pen would (the first pen's look, else a yellow highlight): the note's words become the comment, its tags and
+  time are kept, and its frontmatter is the mark's, made fresh (other properties it had are not kept: a margin file has only the
+  mark's). Links to the note follow it to the margin file.
+- Under the text, a margin note shows its **verse preview**: the passage as the Bible has it, with the marked words in the mark's
+  color. It is a rounded card in the **bottom bar** of the note tab: a bar 48 px high that every note has, with the Vim mode line
+  at its left and the pane's own buttons (split, fill the window) floating over its right end; the bar grows upward to hold the
+  card when the note has a passage. The reference at the card's head is a link.
 - **Delete:** the note and its mark are removed (to the trash, in a real vault).
-The reverse, *attach to passage*, is planned.
 
 **One selection model.** There is a single way to select text: click-and-drag (with
 double-click for words and triple-click for verses). A **verse number is only a shortcut**

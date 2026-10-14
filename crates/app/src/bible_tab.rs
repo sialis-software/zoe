@@ -880,6 +880,26 @@ impl BibleTab {
 
     // ---- marks -----------------------------------------------------------------------
 
+    /// The passage the current text selection is: its anchor, and the module's abbreviation to keep with
+    /// words (none for whole verses). Whole verses (a verse-number click, triple-click, or an exact drag)
+    /// tie it to the reference, not to words, so it shows in every module.
+    pub fn selection_anchor(&self, sh: &Shared) -> Option<(margin::Anchor, String)> {
+        let (slices, canon) = self.selection_context()?;
+        let anchor = match margin::whole_verses(&canon, &slices) {
+            Some((a, z)) => Some(margin::anchor_for_verses(self.book, self.chapter_no, a, z)),
+            None => margin::anchor_from_selection(self.book, self.chapter_no, &canon, &slices),
+        }?;
+        let module = if anchor.quote.is_empty() { String::new() } else { sh.module_abbreviation(&self.module) };
+        Some((anchor, module))
+    }
+
+    /// Let go of the selection (it was used).
+    pub fn clear_selection(&mut self) {
+        self.popup = None;
+        self.text_selection = None;
+        self.clear_token += 1;
+    }
+
     /// Make a mark of `style` on the current text selection, whole verses becoming
     /// verse-level marks. Returns its index. The selection is spent.
     pub fn make_mark(
@@ -890,16 +910,10 @@ impl BibleTab {
         tags: Vec<String>,
         keep_selection: bool,
     ) -> Option<usize> {
-        let (slices, canon) = self.selection_context()?;
-        // Whole verses (a verse-number click, triple-click, or an exact drag) tie the mark to
-        // the reference, not to words, so it shows in every module.
-        let anchor = match margin::whole_verses(&canon, &slices) {
-            Some((a, z)) => Some(margin::anchor_for_verses(self.book, self.chapter_no, a, z)),
-            None => margin::anchor_from_selection(self.book, self.chapter_no, &canon, &slices),
-        }?;
+        let (anchor, module) = self.selection_anchor(sh)?;
         let mark = Mark {
             id: sh.new_mark_id(),
-            module: if anchor.quote.is_empty() { String::new() } else { sh.module_abbreviation(&self.module) },
+            module,
             anchor: anchor.range,
             quote: anchor.quote,
             prefix: anchor.prefix,

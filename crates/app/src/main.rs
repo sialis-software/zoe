@@ -30,6 +30,7 @@ mod opening;
 mod palette;
 mod panes;
 mod persist;
+mod popover;
 mod plan_tab;
 mod plans_window;
 mod reader;
@@ -1184,8 +1185,13 @@ impl App {
                     self.touch(id);
                 }
                 let Some(Tab::Bible(tab)) = self.tabs.get_mut(&id) else { return Task::none() };
+                let selected = matches!(msg, BibleMsg::SelectionChanged(Some(_)));
                 let (task, request) = tab.update(&mut self.sh, msg);
                 let task = task.map(move |m| Message::Bible(id, m));
+                // A note waiting for a passage (Reselect, Mark) takes the next selection that settles.
+                if selected {
+                    self.finish_pick(id);
+                }
                 match request {
                     Some(bible_tab::Request::Open(spec)) => {
                         let dest = Dest::from_modifiers(self.modifiers);
@@ -2037,6 +2043,44 @@ impl App {
                 self.add_tab(pane, tab);
             }
         }
+    }
+
+    /// A selection has settled in the reader `reader`: if a note is waiting for a passage (its Reselect or Mark was
+    /// pressed), the selection becomes its passage. A margin note moves to it; an ordinary note becomes a margin
+    /// note on it, marked as the first pen marks (or, with no pens, a yellow highlight). The selection is spent.
+    fn finish_pick(&mut self, reader: TabId) {
+        let Some(waiting) = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Note(n) if n.picking).then_some(*id)) else { return };
+        let Some(Tab::Bible(bible)) = self.tabs.get(&reader) else { return };
+        let Some((anchor, module)) = bible.selection_anchor(&self.sh) else { return };
+        let Some(Tab::Note(note)) = self.tabs.get_mut(&waiting) else { return };
+        note.picking = false;
+        let path = note.path.clone();
+        let said = match self.sh.mark_index_of(&path) {
+            Some(index) => {
+                self.sh.set_mark_anchor(index, anchor, module);
+                "Moved the note to the new selection"
+            }
+            None => {
+                let (style, color) = match self.sh.settings.pens.first() {
+                    Some(pen) => (
+                        match pen.style {
+                            state::PenStyle::Highlight => study_core::margin::MarkStyle::Highlight,
+                            state::PenStyle::Underline => study_core::margin::MarkStyle::Underline,
+                        },
+                        pen.color.clone(),
+                    ),
+                    None => (study_core::margin::MarkStyle::Highlight, "#F5D90A".to_string()),
+                };
+                if self.sh.note_to_mark(&path, anchor, module, style, &color).is_none() {
+                    return;
+                }
+                "The note is on the selected passage now"
+            }
+        };
+        if let Some(Tab::Bible(bible)) = self.tabs.get_mut(&reader) {
+            bible.clear_selection();
+        }
+        self.sh.toast(said);
     }
 
     /// Pass what one tab did on to the others that show it.
@@ -3809,6 +3853,88 @@ mod tests {
         assert!(!app.sh.marks[index].tags.contains(&"wisdom-words".to_string()));
     }
 
+    /// A selection of the first words of verse `verse` of the chapter the reader shows, as the reader reports it.
+    fn reader_selects(app: &mut App, verse: u16) -> String {
+        let text = app.bible().chapter.as_ref().unwrap().canonical_verses()[&verse].clone();
+        let end = text.find(' ').expect("a word");
+        let slice = CanonSlice { verse, start: 0, end };
+        let _ = app.update(app.b(BibleMsg::SelectionChanged(Some(vec![slice]))));
+        text[..end].to_string()
+    }
+
+    #[test]
+    fn reselect_takes_the_next_selection_in_a_reader_as_a_margin_notes_passage() {
+        let mut app = App::new();
+        let index = app.sh.marks.iter().position(|m| !m.body.is_empty()).expect("a mark with a note");
+        let before = app.sh.marks[index].clone();
+        app.open_note(before.path());
+        let id = app.nid();
+        let _ = app.view(); // drawn, as it is before and while it waits
+        let _ = app.update(Message::Note(id, NoteMsg::PickText));
+        assert!(app.note().picking);
+        let _ = app.view();
+        // Until a selection settles in a reader nothing has changed.
+        assert_eq!(app.sh.marks[index], before);
+        let verse = app.bible().chapter.as_ref().unwrap().canonical_verses().keys().copied().find(|v| Some((*v, *v)) != before.anchor.verses).unwrap();
+        let words = reader_selects(&mut app, verse);
+        let mark = app.sh.marks[index].clone();
+        assert!(!app.note().picking);
+        assert_eq!((mark.anchor.book, mark.anchor.chapter, mark.anchor.verses), (app.bible().book, app.bible().chapter_no, Some((verse, verse))));
+        assert_eq!(mark.quote, words);
+        // What is not where it is stays: the comment, tags, look and when it was made.
+        assert_eq!((&mark.body, &mark.tags, mark.style, &mark.color, &mark.created), (&before.body, &before.tags, before.style, &before.color, &before.created));
+        assert_eq!(app.note().path, mark.path(), "the tab follows the file to its new name");
+        assert!(app.sh.notes.contains_key(&mark.path()) && (mark.path() == before.path() || !app.sh.notes.contains_key(&before.path())));
+        assert!(app.bible().text_selection.is_none(), "the selection is spent");
+        // It was one selection: the next does nothing.
+        let _ = reader_selects(&mut app, verse + 1);
+        assert_eq!(app.sh.marks[index], mark);
+    }
+
+    #[test]
+    fn mark_makes_an_ordinary_note_a_margin_note_on_the_next_selection_and_cancel_gives_up() {
+        let mut app = App::new();
+        app.sh.notes.insert("notes/Idea.md".into(), "---\ncreated: 2026-01-01T10:00:00\ntags: [idea]\n---\n# Idea\n\nWords to keep.\n".into());
+        app.sh.notes.insert("notes/Other.md".into(), "See [[Idea]].\n".into());
+        app.open_note("notes/Idea.md".into());
+        let id = app.nid();
+        let _ = app.view();
+        let _ = app.update(Message::Note(id, NoteMsg::PickText));
+        let _ = app.update(Message::Note(id, NoteMsg::CancelPick));
+        assert!(!app.note().picking);
+        let _ = reader_selects(&mut app, 1);
+        assert!(app.sh.notes.contains_key("notes/Idea.md"), "no one was waiting: it is as it was");
+        let marks = app.sh.marks.len();
+        let _ = app.update(Message::Note(id, NoteMsg::PickText));
+        let verse = *app.bible().chapter.as_ref().unwrap().canonical_verses().keys().nth(1).unwrap();
+        let words = reader_selects(&mut app, verse);
+        assert_eq!(app.sh.marks.len(), marks + 1);
+        let mark = app.sh.marks.last().unwrap().clone();
+        assert!(!app.sh.notes.contains_key("notes/Idea.md"), "it is the mark's file now");
+        assert_eq!((mark.quote.as_str(), mark.tags.as_slice(), mark.created.as_str()), (words.as_str(), ["idea".to_string()].as_slice(), "2026-01-01T10:00:00"));
+        assert!(mark.body.contains("Words to keep.") && mark.body.contains("# Idea"));
+        assert!(app.sh.notes[&mark.path()].starts_with("---\ntype: margin\n"));
+        assert_eq!(app.note().path, mark.path());
+        assert!(!app.sh.notes["notes/Other.md"].contains("[[Idea]]"), "what linked to the note follows it: {}", app.sh.notes["notes/Other.md"]);
+        let stem = mark.path().trim_end_matches(".md").rsplit('/').next().unwrap().to_string();
+        assert!(app.sh.notes["notes/Other.md"].contains(&format!("[[{stem}]]")), "{}", app.sh.notes["notes/Other.md"]);
+        let _ = app.view();
+    }
+
+    #[test]
+    fn unlink_in_the_note_lets_the_margin_note_go_from_the_text_and_stay_as_a_note() {
+        let mut app = App::new();
+        let index = app.sh.marks.iter().position(|m| !m.body.is_empty()).expect("a mark with a note");
+        let (path, marks) = (app.sh.marks[index].path(), app.sh.marks.len());
+        app.open_note(path.clone());
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::Unlink));
+        assert_eq!(app.sh.marks.len(), marks - 1);
+        assert!(!app.sh.notes.contains_key(&path));
+        assert!(app.note().path.starts_with("notes/") && app.sh.notes[&app.note().path].contains("refs:"), "{}", app.note().path);
+        let _ = app.view();
+    }
+
     #[test]
     fn a_bare_highlight_changed_in_its_note_is_refiled_and_the_note_follows() {
         let mut app = App::new();
@@ -4954,7 +5080,7 @@ mod tests {
     }
 
     /// Text only the note pane shows, to tell whether that pane is on screen.
-    const NOTE_PANE_MARK: &str = "Properties";
+    const NOTE_PANE_MARK: &str = "No tags";
 
     #[test]
     fn the_selection_toolbar_offers_copy_reference_and_copy_quote() {
@@ -6176,6 +6302,12 @@ mod tests {
             let p = app.sh.marks[0].path();
             app.open_note(p);
         }
+        if std::env::var("SNAP_VIM").is_ok() {
+            app.sh.settings.vim_mode = true;
+        }
+        if std::env::var("SNAP_PICKING").is_ok() {
+            app.note_mut().picking = true;
+        }
         if std::env::var("SNAP_NOTEMENU").is_ok() {
             let id = app.nid();
             let _ = app.update(Message::Note(id, NoteMsg::ToggleMenu));
@@ -6371,12 +6503,21 @@ mod tests {
         if std::env::var("SNAP_SELECT").is_ok() {
             h.click_scan(|a| a.bible().text_selection.is_some());
         }
+        if std::env::var("SNAP_OPEN").is_ok() || std::env::var("SNAP_COLORS").is_ok() {
+            h.app.note_mut().front_open = true;
+        }
+        if std::env::var("SNAP_COLORS").is_ok() {
+            h.app.note_mut().mark_colors = true;
+        }
         let theme = h.app.theme();
         let shown = match h.app.settings_window.or(h.app.plans_window) {
             Some(id) => h.app.window_view(id),
             None => h.app.view(),
         };
         let mut ui = UserInterface::build(shown, h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+        // (An update first, so that what floats over the window, such as a panel, is there to be drawn.)
+        let mut sink = Vec::new();
+        ui.update(&[Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now()))], h.cursor, &mut h.renderer, &mut h.clipboard, &mut sink);
         ui.draw(
             &mut h.renderer,
             &theme,
@@ -6560,6 +6701,7 @@ mod tests {
         app.open_note("prayers/Prayer list.md".into());
         let id = app.nid();
         assert!(study_core::frontmatter::parse(app.note().doc.source()).front.created.is_none());
+        app.note_mut().front_open = true;
         let mut h = Harness::new(app);
         assert!(h.center_of("No created time").is_some() && h.center_of("Stamp it now").is_some());
         let _ = h.app.update(Message::Note(id, NoteMsg::AddProperties));
@@ -6729,6 +6871,7 @@ mod tests {
         let (mut app, id) = props_app();
         let mut h = Harness::new({
             app.open_note("notes/Props.md".into());
+            app.note_mut().front_open = true;
             app
         });
         assert!(h.center_of("Properties").is_some(), "a button for the editor");
@@ -6748,9 +6891,11 @@ mod tests {
     fn a_margin_note_shows_its_marks_details_and_edits_them_in_place_of_properties() {
         let mut app = App::new();
         app.open_note(app.sh.marks[0].path());
+        app.note_mut().front_open = true;
         let mut h = Harness::new(app);
         assert!(h.center_of("Add tag").is_some(), "its tags are edited here, through the mark");
-        assert!(h.center_of("Highlight").is_some() && h.center_of("Underline").is_some());
+        // (How it marks the text is a drop-down, whose words the harness cannot find: `NoteMsg::MarkStyle` is its choice.)
+        assert!(h.center_of("Underline").is_none(), "the choices are listed only while it is open");
         assert!(h.center_of("Note only").is_none(), "that style is not offered");
         assert!(h.center_of("Properties").is_none(), "not the free-form property editor: the file's lines are the app's");
         assert!(h.center_of("#promise").is_some(), "its tag, to remove");
@@ -6764,6 +6909,52 @@ mod tests {
         h.click(x, y);
         assert_eq!((h.app.bible().book, h.app.bible().chapter_no), (Book::JOHN, 3), "the reader went to {anchor}");
         assert_eq!(h.app.bible().select_request.map(|(_, a, z)| (a, z)), h.app.sh.marks[0].anchor.verses);
+    }
+
+    #[test]
+    fn the_color_panel_floats_over_the_note_and_is_let_go_of_by_a_click_elsewhere_or_by_choosing() {
+        let mut app = App::new();
+        app.open_note(app.sh.marks[0].path());
+        app.note_mut().front_open = true;
+        app.note_mut().mark_colors = true;
+        let mut h = Harness::new(app);
+        // A click outside the panel closes it, and goes no further (it does not also start a tag).
+        let (x, y) = h.center_of("Add tag").expect("the tag box");
+        h.click(x, y);
+        assert!(!h.app.note().mark_colors, "a click elsewhere let go of the panel");
+        assert!(h.app.note().tag_draft.is_empty());
+    }
+
+    #[test]
+    fn the_frontmatter_is_folded_to_a_line_that_says_what_is_in_it_until_it_is_asked_for() {
+        let mut app = App::new();
+        app.open_note(app.sh.marks[0].path());
+        assert!(!app.note().front_open, "folded to begin with");
+        let anchor = app.sh.marks[0].anchor.to_string();
+        let mut h = Harness::new(app);
+        assert!(h.center_of("Add tag").is_none() && h.center_of("Reselect").is_none() && h.center_of("Mark").is_none(), "none of it shows");
+        let summary = format!("#promise  \u{b7}  {anchor}");
+        let (x, y) = h.center_of(&summary).expect("its tags and passage, in a line");
+        h.click(x, y);
+        assert!(h.app.note().front_open);
+        assert!(h.center_of("Add tag").is_some() && h.center_of("Reselect").is_some() && h.center_of("Frontmatter").is_some(), "all of it shows");
+        assert!(h.center_of(&summary).is_none(), "the line is the section's title now");
+        let (x, y) = h.center_of("Frontmatter").unwrap();
+        h.click(x, y);
+        assert!(!h.app.note().front_open && h.center_of("Add tag").is_none());
+        // Waiting for a selection is said on the line, with the way out, as the button that asked is hidden.
+        let id = h.app.nid();
+        let _ = h.app.update(Message::Note(id, NoteMsg::PickText));
+        assert!(h.center_of("Select text in a Bible\u{2026}").is_some());
+        let (x, y) = h.center_of("Cancel").expect("a way out");
+        h.click(x, y);
+        assert!(!h.app.note().picking);
+        // A note with no tags says so, and the fold is the tab's: another note keeps it as it is.
+        let mut app = App::new();
+        app.sh.notes.insert("notes/Bare.md".into(), "Words.\n".into());
+        app.open_note("notes/Bare.md".into());
+        let mut h = Harness::new(app);
+        assert!(h.center_of("No tags").is_some());
     }
 
     #[test]
@@ -7318,6 +7509,7 @@ mod tests {
         let order: Vec<String> = app.sh.tag_suggestions("born", &[], 8).into_iter().map(|(t, _)| t).collect();
         assert_eq!(order, ["born-again", "a-born"]);
         // Picking adds it to the note's tags and clears the box.
+        app.note_mut().front_open = true;
         let mut h = Harness::new(app);
         assert!(h.center_of("Use").is_some() && h.center_of("#john").is_some(), "the suggestion shows");
         let (x, y) = h.center_of("#john").unwrap();

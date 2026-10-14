@@ -10,7 +10,7 @@ use crate::state::{NamedLayout, Settings, Store};
 use iced::Theme;
 use scripture::Book;
 use std::collections::{BTreeMap, BTreeSet};
-use study_core::margin::{Mark, MarkStyle};
+use study_core::margin::{self, Mark, MarkStyle};
 use study_core::frontmatter;
 use study_core::templates::{self, Template};
 use study_core::markdown::{self, LinkTarget, find_links};
@@ -683,6 +683,58 @@ impl Shared {
             self.relink(&old, &path);
         }
         self.events.push(Event::NoteRewritten { old, new: path });
+    }
+
+    /// Put mark `index` on another passage, as chosen by a new selection: its reference, quote and context
+    /// (and the module the words were chosen in) change; its note, tags and look stay. The file is named by
+    /// the passage, so it moves and the links to it follow.
+    pub fn set_mark_anchor(&mut self, index: usize, anchor: margin::Anchor, module: String) {
+        let Some(mark) = self.marks.get_mut(index) else { return };
+        let old = mark.path();
+        mark.module = if anchor.quote.is_empty() { String::new() } else { module };
+        mark.anchor = anchor.range;
+        mark.quote = anchor.quote;
+        mark.prefix = anchor.prefix;
+        mark.suffix = anchor.suffix;
+        let (path, markdown) = (mark.path(), mark.to_markdown());
+        if path != old {
+            self.notes.remove(&old);
+        }
+        self.notes.insert(path.clone(), markdown);
+        if path != old {
+            self.relink(&old, &path);
+        }
+        self.events.push(Event::NoteRewritten { old, new: path });
+    }
+
+    /// Make the ordinary note at `path` a margin note on `anchor`: its words are the mark's comment, its tags
+    /// and the time it was made are kept, and its frontmatter is the mark's, made fresh (other properties it
+    /// had are not kept: a margin file has only the mark's). The note is gone from where it was, links to it
+    /// follow it, and tabs showing it show the mark's file. Returns the mark's index.
+    pub fn note_to_mark(&mut self, path: &str, anchor: margin::Anchor, module: String, style: MarkStyle, color: &str) -> Option<usize> {
+        let text = self.notes.get(path)?.clone();
+        let parsed = frontmatter::parse(&text);
+        let body = text[parsed.range.map_or(0, |r| r.end)..].trim_matches('\n').to_string();
+        let mark = Mark {
+            id: self.new_mark_id(),
+            module: if anchor.quote.is_empty() { String::new() } else { module },
+            anchor: anchor.range,
+            quote: anchor.quote,
+            prefix: anchor.prefix,
+            suffix: anchor.suffix,
+            style,
+            color: color.to_string(),
+            tags: parsed.front.tags.clone(),
+            body,
+            created: parsed.front.created.clone().unwrap_or_else(frontmatter::now),
+        };
+        let new = mark.path();
+        self.notes.remove(path);
+        self.notes.insert(new.clone(), mark.to_markdown());
+        self.marks.push(mark);
+        self.relink(path, &new);
+        self.events.push(Event::NoteRemoved { old: path.to_string(), next: new });
+        Some(self.marks.len() - 1)
     }
 
     /// Give mark `index` another look: how it marks the text, and in what color (`#RRGGBB`). A bare
