@@ -22,6 +22,7 @@ mod module_folders;
 mod module_manager;
 mod module_repo;
 mod link_area;
+mod log_tab;
 mod live_editor;
 mod native;
 mod network;
@@ -53,6 +54,7 @@ use drag::{Drag, Over, Payload, Pressed, Zone};
 use iced::widget::operation::{AbsoluteOffset, RelativeOffset, scroll_to, snap_to};
 use iced::widget::{button, column, container, pick_list, row, rule, space, stack, text, text_input, tooltip};
 use iced::{Element, Length, Task, Theme};
+use log_tab::LogTab;
 use note_tab::{NoteMsg, NoteTab};
 use opening::{Dest, Spec};
 use search_tab::{SearchMsg, SearchTab};
@@ -89,6 +91,8 @@ enum Tab {
     Commentary(Box<CommentaryTab>),
     /// The notes that link to a passage.
     Backlinks(Box<BacklinksTab>),
+    /// The reading log, newest first.
+    Log(Box<LogTab>),
     /// The plans (reading plans), read a day at a time.
     Plan(Box<PlanTab>),
 }
@@ -208,6 +212,8 @@ enum Choice {
     Search,
     Note,
     Plans,
+    /// The reading log.
+    Log,
 }
 
 /// A chapter being looked at, and since when.
@@ -334,6 +340,8 @@ struct LinkMenu {
 enum Message {
     Bible(TabId, BibleMsg),
     Note(TabId, NoteMsg),
+    /// The reading log's tab (the same messages as a note's, of which it lets few through).
+    Log(TabId, NoteMsg),
     Dict(TabId, DictMsg),
     Backlinks(TabId, BacklinksMsg),
     Plan(TabId, PlanMsg),
@@ -595,6 +603,11 @@ impl App {
         Tab::Note(Box::new(NoteTab::new(id, &self.sh, path)))
     }
 
+    fn new_log(&mut self) -> Tab {
+        let id = self.take_id();
+        Tab::Log(Box::new(LogTab::new(id, &mut self.sh)))
+    }
+
     fn new_blank(&mut self) -> Tab {
         Tab::Blank(self.take_id())
     }
@@ -615,6 +628,7 @@ impl App {
             Tab::Search(t) => t.id,
             Tab::Backlinks(t) => t.id,
             Tab::Plan(t) => t.id,
+            Tab::Log(t) => t.id(),
         }
     }
 
@@ -629,7 +643,7 @@ impl App {
             Tab::Bible(_) => self.last_bible = Some(id),
             Tab::Note(_) => self.last_note = Some(id),
             Tab::Dict(_) => self.last_dict = Some(id),
-            Tab::Blank(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) | Tab::Plan(_) => {}
+            Tab::Blank(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) | Tab::Plan(_) | Tab::Log(_) => {}
         }
         self.tabs.insert(id, tab);
         let pane = pane.min(self.panes.len() - 1);
@@ -905,9 +919,30 @@ impl App {
         Some(self.show_plans(Some(found)))
     }
 
+    /// Show the reading log: in its tab if it has one open, else in a new one in another pane.
+    fn show_log(&mut self) -> TabId {
+        let existing = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Log(_)).then_some(*id));
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let from_pane = self.pane_index(self.focus).unwrap_or(self.panes.len() - 1);
+                let pane = self.target_pane(from_pane, Dest::OtherPane);
+                let tab = self.new_log();
+                self.add_tab(pane, tab)
+            }
+        };
+        self.activate(id);
+        id
+    }
+
     /// Show a note in a note tab: the one already holding it, else the one last used (which
     /// follows the link), else a new one in the last pane.
     fn show_note(&mut self, path: String) -> Option<TabId> {
+        // The reading log is not a note: it has a tab of its own, and this is the way to it from the Bible tab's
+        // card of the days a chapter was read.
+        if path == shared::READING_LOG {
+            return Some(self.show_log());
+        }
         // The library's notes are plans' days: they are read in the plan tab.
         if shared::is_library(&path)
             && let Some(id) = self.show_plan_note(&path)
@@ -967,6 +1002,7 @@ impl App {
                 Tab::Bible(Box::new(tab))
             }
             Choice::Plans => Tab::Plan(Box::new(PlanTab::new(id))),
+            Choice::Log => Tab::Log(Box::new(LogTab::new(id, &mut self.sh))),
             Choice::Note => Tab::Note(Box::new(NoteTab::new(id, &self.sh, self.sh.first_ordinary_note()))),
             Choice::Commentary => {
                 let module = self.first_commentary();
@@ -1038,6 +1074,8 @@ impl App {
             Tab::Dict(t) => to(t.scroll_id(), t.scroll),
             Tab::Backlinks(t) => to(t.scroll_id(), t.scroll),
             Tab::Plan(t) => to(t.editor_id(), t.scroll),
+            // The log grows down: it is shown at its end, where the latest is, whatever it was scrolled to.
+            Tab::Log(t) => Some(snap_to(t.note.editor_id(), RelativeOffset::END)),
             Tab::Blank(_) => None,
         }))
     }
@@ -1123,7 +1161,7 @@ impl App {
                     t.margin_menu_open = false;
                     t.history_open = false;
                 }
-                Tab::Blank(_) | Tab::Dict(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) | Tab::Plan(_) => {}
+                Tab::Blank(_) | Tab::Dict(_) | Tab::Backlinks(_) | Tab::Commentary(_) | Tab::Search(_) | Tab::Plan(_) | Tab::Log(_) => {}
             }
         }
         match message {
@@ -1216,6 +1254,37 @@ impl App {
                     None => {}
                 }
                 task
+            }
+            Message::Log(id, msg) => {
+                self.touch(id);
+                let Some(Tab::Log(tab)) = self.tabs.get_mut(&id) else { return Task::none() };
+                let (task, request) = tab.update(&mut self.sh, msg);
+                let task = task.map(move |m| Message::Log(id, m));
+                // Another tab on the log shows what was written.
+                let text = tab.note.doc.source().to_string();
+                for (other, tab) in self.tabs.iter_mut() {
+                    if let Tab::Log(t) = tab
+                        && *other != id
+                        && t.note.doc.source() != text
+                    {
+                        t.note.reload(&self.sh);
+                    }
+                }
+                match request {
+                    Some(note_tab::Request::Open(spec)) => {
+                        let dest = Dest::from_modifiers(self.modifiers);
+                        Task::batch([task, self.open_spec(id, spec, dest)])
+                    }
+                    Some(note_tab::Request::Menu(spec, at)) => {
+                        self.link_menu = Some(LinkMenu { at, spec, from: id });
+                        task
+                    }
+                    Some(note_tab::Request::Drag(spec, at)) => {
+                        self.start_drag(Payload::Link(spec), at);
+                        task
+                    }
+                    _ => task,
+                }
             }
             Message::Note(id, msg) => {
                 self.touch(id);
@@ -2061,16 +2130,7 @@ impl App {
                 "Moved the note to the new selection"
             }
             None => {
-                let (style, color) = match self.sh.settings.pens.first() {
-                    Some(pen) => (
-                        match pen.style {
-                            state::PenStyle::Highlight => study_core::margin::MarkStyle::Highlight,
-                            state::PenStyle::Underline => study_core::margin::MarkStyle::Underline,
-                        },
-                        pen.color.clone(),
-                    ),
-                    None => (study_core::margin::MarkStyle::Highlight, "#F5D90A".to_string()),
-                };
+                let (style, color) = self.sh.default_look();
                 if self.sh.note_to_mark(&path, anchor, module, style, &color).is_none() {
                     return;
                 }
@@ -2103,6 +2163,12 @@ impl App {
                         {
                             t.path = new.clone();
                             t.reload(&self.sh);
+                        }
+                        // The reading log's tab, when the app has added a chapter to it.
+                        if let Tab::Log(t) = tab
+                            && (t.note.path == old || t.note.path == new)
+                        {
+                            t.note.reload(&self.sh);
                         }
                     }
                 }
@@ -2631,6 +2697,11 @@ impl App {
                 let reference = self.reference_bible_id().and_then(|b| self.bible_tab(b));
                 tab.view(&self.sh, reference).map(move |m| Message::Note(id, m))
             }
+            Some(Tab::Log(tab)) => {
+                let id = tab.id();
+                let reference = self.reference_bible_id().and_then(|b| self.bible_tab(b));
+                tab.note.log_view(&self.sh, reference).map(move |m| Message::Log(id, m))
+            }
             Some(Tab::Blank(id)) => self.blank_view(*id),
             None => space::vertical().into(),
         };
@@ -2714,6 +2785,7 @@ impl App {
                 Some(Tab::Search(t)) => t.title(&self.sh),
                 Some(Tab::Backlinks(t)) => t.title(&self.sh),
                 Some(Tab::Plan(t)) => t.title(&self.plan_cache),
+                Some(Tab::Log(t)) => t.title(),
                 _ => "New tab".to_string(),
             },
             Payload::Link(spec) => spec.label(),
@@ -2813,11 +2885,12 @@ impl App {
                 no_bible,
                 column![
                     kind("Bible", "Read a text, with its notes in the margin.", Choice::Bible, has_bible),
-                    kind("Dictionary", "Look up a Strong's number or a word.", Choice::Dict, has_dictionary),
-                    kind("Commentary", "Read a commentary, or write your own.", Choice::Commentary, true),
-                    kind("Search", "Find words in the Bible.", Choice::Search, has_bible),
-                    kind("Plans", "Follow a reading plan.", Choice::Plans, true),
                     kind("Notes", "Write and read your notes.", Choice::Note, true),
+                    kind("Search", "Find words in the Bible.", Choice::Search, has_bible),
+                    kind("Commentary", "Read a commentary, or write your own.", Choice::Commentary, true),
+                    kind("Dictionary", "Look up a Strong's number or a word.", Choice::Dict, has_dictionary),
+                    kind("Plans", "Follow a reading plan.", Choice::Plans, true),
+                    kind("Reading log", "The chapters you have read, day by day.", Choice::Log, true),
                 ]
                 .spacing(8),
             ]
@@ -2847,6 +2920,7 @@ impl App {
                 Tab::Search(t) => t.title(&self.sh),
                 Tab::Backlinks(t) => t.title(&self.sh),
                 Tab::Plan(t) => t.title(&self.plan_cache),
+                Tab::Log(t) => t.title(),
             };
             let title: String = if title.chars().count() > 24 {
                 title.chars().take(23).chain(['…']).collect()
@@ -3221,6 +3295,17 @@ mod tests {
         fn note(&self) -> &NoteTab {
             match self.tabs.get(&self.nid()) {
                 Some(Tab::Note(t)) => t,
+                _ => unreachable!(),
+            }
+        }
+
+        fn lid(&self) -> TabId {
+            self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Log(_)).then_some(*id)).expect("a log tab")
+        }
+
+        fn log(&self) -> &NoteTab {
+            match self.tabs.get(&self.lid()) {
+                Some(Tab::Log(t)) => &t.note,
                 _ => unreachable!(),
             }
         }
@@ -3922,17 +4007,57 @@ mod tests {
     }
 
     #[test]
-    fn unlink_in_the_note_lets_the_margin_note_go_from_the_text_and_stay_as_a_note() {
+    fn unlink_in_the_note_takes_from_it_only_what_only_a_mark_has() {
         let mut app = App::new();
         let index = app.sh.marks.iter().position(|m| !m.body.is_empty()).expect("a mark with a note");
-        let (path, marks) = (app.sh.marks[index].path(), app.sh.marks.len());
+        let before = app.sh.marks[index].clone();
+        let (path, marks) = (before.path(), app.sh.marks.len());
         app.open_note(path.clone());
         let id = app.nid();
         let _ = app.update(Message::Note(id, NoteMsg::Unlink));
         assert_eq!(app.sh.marks.len(), marks - 1);
         assert!(!app.sh.notes.contains_key(&path));
-        assert!(app.note().path.starts_with("notes/") && app.sh.notes[&app.note().path].contains("refs:"), "{}", app.note().path);
+        // The same name in notes/, the same words, tags and time; nothing of the mark's, and no added lines.
+        let name = path.rsplit('/').next().unwrap();
+        assert_eq!(app.note().path, format!("notes/{name}"));
+        let text = app.sh.notes[&app.note().path].clone();
+        assert!(text.ends_with(&format!("---\n{}\n", before.body)), "{text}");
+        for gone in ["type:", "anchor:", "quote:", "prefix:", "suffix:", "module:", "style:", "color:", "refs:", before.quote.as_str()] {
+            assert!(gone.is_empty() || !text.contains(gone), "{gone}");
+        }
+        assert!(before.created.is_empty() || text.contains(&format!("created: {}", before.created)));
+        assert!(before.tags.iter().all(|t| text.contains(t.as_str())));
         let _ = app.view();
+    }
+
+    #[test]
+    fn a_mark_set_plain_is_a_reference_with_no_look_and_set_back_takes_the_first_pens() {
+        use crate::reader_text::MarkKind;
+        let mut app = App::new();
+        let index = app.sh.marks.iter().position(|m| !m.body.is_empty() && m.style == MarkStyle::Highlight).expect("a highlight with a note");
+        app.open_note(app.sh.marks[index].path());
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::MarkColors));
+        assert!(app.note().mark_colors);
+        let _ = app.update(Message::Note(id, NoteMsg::MarkStyle(MarkStyle::None)));
+        let mark = app.sh.marks[index].clone();
+        assert_eq!((mark.style, mark.color.as_str()), (MarkStyle::None, ""), "no look");
+        assert!(!app.note().mark_colors, "the color panel is closed with it");
+        let file = &app.sh.notes[&mark.path()];
+        assert!(!file.contains("style:") && !file.contains("color:") && file.contains("anchor:") && file.contains("quote:"), "{file}");
+        assert_eq!(app.note().path, mark.path(), "the tab follows the file");
+        // The color cannot be set on it, and the reader still draws it, as the faint line.
+        let _ = app.update(Message::Note(id, NoteMsg::MarkColor(21)));
+        assert_eq!(app.sh.marks[index].color, "");
+        let _ = app.view();
+        let draws = app.mark_draws();
+        assert!(draws.iter().any(|d| d.mark == index && d.kind == MarkKind::Note), "drawn as a plain mark");
+        // Made a highlight again, it has the first pen's color.
+        let _ = app.update(Message::Note(id, NoteMsg::MarkStyle(MarkStyle::Highlight)));
+        let (style, color) = app.sh.default_look();
+        let _ = style;
+        assert_eq!((app.sh.marks[index].style, app.sh.marks[index].color.as_str()), (MarkStyle::Highlight, color.as_str()));
+        assert!(app.sh.notes[&app.sh.marks[index].path()].contains("style: highlight"));
     }
 
     #[test]
@@ -4427,7 +4552,8 @@ mod tests {
         assert!(h.center_of("John 3 was read on 2 days").is_some());
         assert!(h.center_of("2025-01-02").is_some() && h.center_of(&format!("{today}  \u{b7}  today")).is_some());
         let _ = h.app.update(Message::Bible(id, BibleMsg::OpenReadingLog));
-        assert_eq!(h.app.note().path, crate::shared::READING_LOG);
+        assert_eq!(h.app.log().path, crate::shared::READING_LOG, "the log has a tab of its own");
+        assert!(matches!(h.app.tabs.get(&h.app.panes.iter().find_map(|p| p.active.filter(|a| *a == h.app.lid())).unwrap()), Some(Tab::Log(_))), "and it is shown");
         // Pressing the check takes the mark back (from the log, and the day's note).
         let _ = h.app.update(Message::Bible(id, BibleMsg::LogChapter));
         assert!(!h.app.sh.read_on(Book::JOHN, 3, &now), "taken back");
@@ -4601,7 +4727,7 @@ mod tests {
         for action in [EditAction::Insert("x".into()), EditAction::Paste("y".into()), EditAction::Backspace, EditAction::Newline, EditAction::Wrap(md_editor::Wrap::Bold), EditAction::Undo] {
             let _ = app.update(Message::Note(id, NoteMsg::Action(action)));
         }
-        for message in [NoteMsg::AddTag, NoteMsg::TagDraft("t".into()), NoteMsg::AddProperties, NoteMsg::StartRename, NoteMsg::AskDelete, NoteMsg::ConfirmDelete, NoteMsg::ToggleProps] {
+        for message in [NoteMsg::AddTag, NoteMsg::TagDraft("t".into()), NoteMsg::AddProperties, NoteMsg::StartRename, NoteMsg::AskDelete, NoteMsg::ConfirmDelete, NoteMsg::ToggleFront] {
             let _ = app.update(Message::Note(id, message));
         }
         assert_eq!(app.note().doc.source(), text);
@@ -4732,7 +4858,9 @@ mod tests {
         assert!(!app.sh.notes.contains_key(&path));
         assert!(app.note().path.starts_with("notes/"), "{}", app.note().path);
         let text = &app.sh.notes[&app.note().path];
-        assert!(text.contains("[[John 3:16]]") && text.contains(&format!("> {quote}")), "{text}");
+        // Only its reference and quote are gone from it: no lines are added, and the file keeps its name.
+        assert!(!text.contains("[[John 3:16]]") && !text.contains(&quote) && !text.contains("anchor:") && !text.contains("type:"), "{text}");
+        assert_eq!(app.note().path, format!("notes/{}", path.rsplit('/').next().unwrap()));
         assert_eq!(&app.note().doc.source(), text);
     }
 
@@ -4944,7 +5072,7 @@ mod tests {
         assert!(app.bible().editing.is_none());
         let _ = app.update(app.b(BibleMsg::UnlinkMarkAt(0)));
         assert_eq!(app.sh.marks.len(), total - 2);
-        assert!(app.sh.notes.keys().any(|p| p.starts_with("notes/John 3.")), "the unlinked note stays");
+        assert!(app.sh.notes.keys().any(|p| p.starts_with("notes/") && p.ends_with("-a002.md")), "the unlinked note stays, under its name");
     }
 
     #[test]
@@ -5080,7 +5208,7 @@ mod tests {
     }
 
     /// Text only the note pane shows, to tell whether that pane is on screen.
-    const NOTE_PANE_MARK: &str = "No tags";
+    const NOTE_PANE_MARK: &str = "Add tag";
 
     #[test]
     fn the_selection_toolbar_offers_copy_reference_and_copy_quote() {
@@ -6272,7 +6400,7 @@ mod tests {
             let _ = app.update(Message::Note(id, NoteMsg::PickNote(NoteChoice(path))));
             let _ = app.update(Message::Note(id, NoteMsg::AddProperties));
             if std::env::var("SNAP_PROPS").is_ok() {
-                let _ = app.update(Message::Note(id, NoteMsg::ToggleProps));
+                let _ = app.update(Message::Note(id, NoteMsg::ToggleFront));
                 for (key, kind) in [("read", study_core::frontmatter::PropType::Bool), ("pages", study_core::frontmatter::PropType::Number), ("with", study_core::frontmatter::PropType::List), ("due", study_core::frontmatter::PropType::Date)] {
                     let _ = app.update(Message::Note(id, NoteMsg::NewKey(key.into())));
                     let _ = app.update(Message::Note(id, NoteMsg::NewType(kind)));
@@ -6298,9 +6426,39 @@ mod tests {
         if std::env::var("SNAP_TOAST").is_ok() {
             app.sh.toast("Copied [[John 3:2-5]]");
         }
+        if std::env::var("SNAP_PLAIN").is_ok() {
+            app.sh.set_mark_look(0, MarkStyle::None, "");
+        }
         if std::env::var("SNAP_MARGIN").is_ok() {
             let p = app.sh.marks[0].path();
             app.open_note(p);
+        }
+        if std::env::var("SNAP_LOG").is_ok() {
+            let log = format!(
+                "{}\n\n## 2026-10-13\n\n- [[Joshua 2]]\n- [[Joshua 3]]\n\n## 2026-10-14\n\n- [[John 3]]\n",
+                study_core::reading_log::new_log("Reading log", "2026-10-13T18:27:42-05:00").trim_end()
+            );
+            app.sh.notes.insert(crate::shared::READING_LOG.into(), log);
+            app.open_note(crate::shared::READING_LOG.into());
+        }
+        if std::env::var("SNAP_SECTIONS").is_ok() {
+            app.sh.notes.insert("notes/Plain.md".into(), "Thinking of [[John 3:16]], the heart of it.\n".into());
+            app.sh.notes.insert("notes/Pray.md".into(), "---\ntype: prayer\n---\nLord, [[John 3:16]]\n".into());
+            app.sh.notes.insert("notes/Preach.md".into(), "---\ntype: sermon\n---\n[[John 3:16]] again\n".into());
+            for plan in study_core::starter_plans::starter_plans() {
+                for (path, text) in plan.to_files() {
+                    app.sh.notes.insert(path, text);
+                }
+            }
+            let from = app.nid();
+            let _ = app.show_backlinks(from, backlinks_tab::Target::Passage(scripture::RefRange::parse("John 3").unwrap()));
+            // SNAP_PLANS: the plans open, the rest folded.
+            let tab = app.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Backlinks(_)).then_some(*id));
+            if std::env::var("SNAP_PLANS").is_ok()
+                && let Some(Tab::Backlinks(t)) = tab.and_then(|id| app.tabs.get_mut(&id))
+            {
+                t.folded = ["Margin notes", "Notes", "Prayer notes", "Sermon notes"].map(String::from).into_iter().collect();
+            }
         }
         if std::env::var("SNAP_VIM").is_ok() {
             app.sh.settings.vim_mode = true;
@@ -6867,17 +7025,40 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_opens_from_the_strip_and_shows_every_property() {
+    fn the_boxes_to_add_a_property_are_behind_a_plus_button_and_go_when_one_is_added() {
+        let mut app = App::new();
+        app.sh.notes.insert("notes/Few.md".into(), "---\ncreated: 2026-01-01T10:00:00\n---\nText\n".into());
+        app.open_note("notes/Few.md".into());
+        app.note_mut().front_open = true;
+        let id = app.nid();
+        let mut h = Harness::new(app);
+        assert!(h.center_of("New property").is_none() && h.center_of("+  Property").is_some(), "only the plus button");
+        let (x, y) = h.center_of("+  Property").unwrap();
+        h.click(x, y);
+        assert!(h.app.note().adding && h.center_of("New property").is_some(), "its boxes");
+        let _ = h.app.update(Message::Note(id, NoteMsg::NewKey("mood".into())));
+        let _ = h.app.update(Message::Note(id, NoteMsg::AddProp));
+        assert!(!h.app.note().adding && h.app.sh.notes["notes/Few.md"].contains("mood:"), "added, and put away");
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.center_of("New property").is_none());
+        // Put away without adding one: the cross.
+        let _ = h.app.update(Message::Note(id, NoteMsg::ToggleAddProp));
+        let _ = h.app.update(Message::Note(id, NoteMsg::NewKey("half".into())));
+        let _ = h.app.update(Message::Note(id, NoteMsg::ToggleAddProp));
+        assert!(!h.app.note().adding && h.app.note().new_key.is_empty());
+    }
+
+    #[test]
+    fn the_properties_editor_is_in_the_frontmatter_section_and_shows_every_property() {
         let (mut app, id) = props_app();
         let mut h = Harness::new({
             app.open_note("notes/Props.md".into());
-            app.note_mut().front_open = true;
             app
         });
-        assert!(h.center_of("Properties").is_some(), "a button for the editor");
-        assert!(h.center_of("New property").is_none(), "closed to begin with");
-        let _ = h.app.update(Message::Note(id, NoteMsg::ToggleProps));
+        assert!(h.center_of("Type").is_none(), "folded to begin with");
+        let _ = h.app.update(Message::Note(id, NoteMsg::ToggleFront));
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.center_of("Type").is_some(), "it is in the section, with no button of its own");
         assert!(h.center_of("Type").is_some() && h.center_of("Title").is_none(), "no Title: the name and the heading are it");
         assert!(h.center_of("chapters \u{00B7} number").is_some());
         assert!(h.center_of("with \u{00B7} list").is_some());
@@ -6926,22 +7107,22 @@ mod tests {
     }
 
     #[test]
-    fn the_frontmatter_is_folded_to_a_line_that_says_what_is_in_it_until_it_is_asked_for() {
+    fn the_tags_are_above_the_fold_and_the_frontmatter_under_them_is_folded_to_a_line_that_says_what_is_in_it() {
         let mut app = App::new();
         app.open_note(app.sh.marks[0].path());
         assert!(!app.note().front_open, "folded to begin with");
         let anchor = app.sh.marks[0].anchor.to_string();
         let mut h = Harness::new(app);
-        assert!(h.center_of("Add tag").is_none() && h.center_of("Reselect").is_none() && h.center_of("Mark").is_none(), "none of it shows");
-        let summary = format!("#promise  \u{b7}  {anchor}");
-        let (x, y) = h.center_of(&summary).expect("its tags and passage, in a line");
+        assert!(h.center_of("Add tag").is_some() && h.center_of("#promise").is_some(), "the tags are not in the fold");
+        assert!(h.center_of("Reselect").is_none() && h.center_of("Unlink").is_none(), "the passage section is");
+        let (x, y) = h.center_of(&anchor).expect("the passage, in a line");
         h.click(x, y);
         assert!(h.app.note().front_open);
-        assert!(h.center_of("Add tag").is_some() && h.center_of("Reselect").is_some() && h.center_of("Frontmatter").is_some(), "all of it shows");
-        assert!(h.center_of(&summary).is_none(), "the line is the section's title now");
+        assert!(h.center_of("Reselect").is_some() && h.center_of("Frontmatter").is_some() && h.center_of("Add tag").is_some());
+        assert!(h.center_of(&format!("{anchor}  ")).is_none());
         let (x, y) = h.center_of("Frontmatter").unwrap();
         h.click(x, y);
-        assert!(!h.app.note().front_open && h.center_of("Add tag").is_none());
+        assert!(!h.app.note().front_open && h.center_of("Reselect").is_none());
         // Waiting for a selection is said on the line, with the way out, as the button that asked is hidden.
         let id = h.app.nid();
         let _ = h.app.update(Message::Note(id, NoteMsg::PickText));
@@ -6949,12 +7130,240 @@ mod tests {
         let (x, y) = h.center_of("Cancel").expect("a way out");
         h.click(x, y);
         assert!(!h.app.note().picking);
-        // A note with no tags says so, and the fold is the tab's: another note keeps it as it is.
+        // An ordinary note's line says when it was made and how many properties it has; with neither, only what it is.
         let mut app = App::new();
+        app.sh.notes.insert("notes/Props.md".into(), "---\ncreated: 2026-01-01T10:00:00\ntags: [a]\nmood: calm\nread: true\n---\nText\n".into());
         app.sh.notes.insert("notes/Bare.md".into(), "Words.\n".into());
-        app.open_note("notes/Bare.md".into());
+        app.open_note("notes/Props.md".into());
         let mut h = Harness::new(app);
-        assert!(h.center_of("No tags").is_some());
+        let line = format!("Created {}  \u{00B7}  2 properties", study_core::frontmatter::display("2026-01-01T10:00:00"));
+        assert!(h.center_of(&line).is_some(), "{line}");
+        assert!(h.center_of("Add tag").is_some(), "its tags show");
+        let id = h.app.nid();
+        let _ = h.app.update(Message::Note(id, NoteMsg::PickNote(NoteChoice("notes/Bare.md".into()))));
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.center_of("Frontmatter").is_some());
+    }
+
+    fn log_text() -> String {
+        format!(
+            "{}\n\n## 2026-10-13\n\n- [[Joshua 2]]\n\n## 2026-10-14\n\n- [[John 3]]\n- [[John 4]]\n",
+            study_core::reading_log::new_log("Reading log", "2026-10-13T18:27:42-05:00").trim_end()
+        )
+    }
+
+    #[test]
+    fn the_reading_log_has_a_tab_of_its_own_that_grows_down_and_is_written_in_but_for_its_title_name_and_properties() {
+        use crate::shared::READING_LOG;
+        let mut app = App::new();
+        let log = log_text();
+        app.sh.notes.insert(READING_LOG.into(), log.clone());
+        let id = app.show_log();
+        assert!(matches!(app.tabs.get(&id), Some(Tab::Log(_))) && app.log().is_log());
+        // The text starts under the title and the blank line below it, the earliest day first and the latest last.
+        let top = app.log().doc.front_end();
+        assert!(app.log().doc.source()[..top].ends_with("# Reading log\n\n"));
+        assert!(app.log().doc.source()[top..].starts_with("## 2026-10-13\n\n- [[Joshua 2]]\n\n## 2026-10-14\n\n- [[John 3]]\n- [[John 4]]\n"));
+        assert_eq!(app.log().doc.selection().head, log.len(), "the caret is at the end, where the days are added");
+        // No properties, no way to choose a note, no header: the words and the bar under them.
+        let mut h = Harness::new(app);
+        for gone in ["No tags", "Frontmatter", "Properties", "Add tag", "Mark", "Create note"] {
+            assert!(h.center_of(gone).is_none(), "{gone}");
+        }
+        for message in [
+            NoteMsg::TagDraft("x".into()),
+            NoteMsg::AddTag,
+            NoteMsg::RemoveTag("reading-log".into()),
+            NoteMsg::AddProperties,
+            NoteMsg::SetKind(KindChoice(Some("prayer".into()))),
+            NoteMsg::PickText,
+            NoteMsg::StartRename,
+            NoteMsg::TogglePicker,
+            NoteMsg::ToggleMenu,
+            NoteMsg::PickNote(NoteChoice("notes/Memory verses.md".into())),
+        ] {
+            let _ = h.app.update(Message::Log(id, message));
+        }
+        assert_eq!(h.app.sh.notes[READING_LOG], log, "nothing of it changed");
+        assert!(h.app.log().picker.is_none() && h.app.log().renaming.is_none() && !h.app.log().menu_open && h.app.log().path == READING_LOG);
+        // Writing at the end is as in any note; the caret cannot go into the title, and backspace stops at it.
+        let _ = h.app.update(Message::Log(id, NoteMsg::Action(EditAction::Insert("A thought.\n".into()))));
+        assert!(h.app.sh.notes[READING_LOG].ends_with("- [[John 4]]\nA thought.\n"), "{}", h.app.sh.notes[READING_LOG]);
+        let _ = h.app.update(Message::Log(id, NoteMsg::Action(EditAction::SetCaret { offset: 3, extend: false })));
+        assert_eq!(h.app.log().doc.selection().head, top, "the caret is as near the title as it can be");
+        for _ in 0..4 {
+            let _ = h.app.update(Message::Log(id, NoteMsg::Action(EditAction::Backspace)));
+        }
+        assert!(h.app.sh.notes[READING_LOG].starts_with(&log[..top]), "backspace stops at the title");
+        // A chapter the app adds is at the end, under a heading for today, in the open tab.
+        let now = chrono::TimeZone::with_ymd_and_hms(&chrono::Local, 2026, 11, 1, 9, 0, 0).unwrap();
+        assert!(h.app.sh.log_reading(Book::JOHN, 5, &now));
+        h.app.settle();
+        let text = h.app.log().doc.source().to_string();
+        assert!(text.ends_with("## 2026-11-01\n\n- [[John 5]]\n"), "{text}");
+        assert!(h.app.log().doc.selection().head >= h.app.log().doc.front_end());
+        let _ = h.app.view();
+    }
+
+    #[test]
+    fn no_note_leads_to_the_reading_log_and_it_leads_to_no_note() {
+        use crate::shared::READING_LOG;
+        let mut app = App::new();
+        app.sh.notes.insert(READING_LOG.into(), log_text());
+        app.sh.notes.insert("notes/Linker.md".into(), "See [[Reading log]] and [[John 3]].\n".into());
+        // It is not among the notes: not listed, not found by searching, not first, not linked to, not a backlink.
+        assert!(!app.sh.note_paths().iter().any(|p| p == READING_LOG));
+        let none = std::collections::BTreeSet::new();
+        for query in ["", "reading", "joshua"] {
+            assert!(note_tab::groups(&app.sh, query, &none).iter().all(|g| g.notes.iter().all(|n| n.0 != READING_LOG)), "{query:?}");
+        }
+        assert_ne!(app.sh.first_ordinary_note(), READING_LOG);
+        let backlinks = app.sh.backlinks(&scripture::RefRange::parse("John 3").unwrap());
+        assert!(backlinks.iter().all(|b| b.path != READING_LOG) && backlinks.iter().any(|b| b.path == "notes/Linker.md"));
+        // A note tab refuses to show it, and a link to it finds no note.
+        app.open_note("notes/Linker.md".into());
+        let note = app.nid();
+        let _ = app.update(Message::Note(note, NoteMsg::PickNote(NoteChoice(READING_LOG.into()))));
+        assert_eq!(app.note().path, "notes/Linker.md");
+        app.open_note_link(note, "Reading log", Dest::Here);
+        assert!(app.sh.status.contains("No note named"), "{}", app.sh.status);
+        assert!(!app.tabs.values().any(|t| matches!(t, Tab::Log(_))), "no log tab was made by it");
+        // From the log, a link to a note goes nowhere; a link to a verse and a web address do.
+        let id = app.show_log();
+        let (mut asked, mut spec) = (None, None);
+        for target in [
+            study_core::markdown::LinkTarget::Note("Memory verses".into()),
+            study_core::markdown::LinkTarget::Verse { range: scripture::RefRange::parse("John 3:16").unwrap(), module: None },
+        ] {
+            let Some(Tab::Log(tab)) = app.tabs.get_mut(&id) else { unreachable!() };
+            let (_, request) = tab.update(&mut app.sh, NoteMsg::OpenLink(target.clone()));
+            if matches!(target, study_core::markdown::LinkTarget::Note(_)) { asked = Some(request.is_none()) } else { spec = request }
+        }
+        assert_eq!(asked, Some(true), "a link to a note does nothing in the log");
+        assert!(matches!(spec, Some(note_tab::Request::Open(opening::Spec::Verse { .. }))), "a verse opens");
+    }
+
+    #[test]
+    fn the_log_tab_is_offered_in_a_new_tab_and_kept_with_the_workspace_and_an_old_session_gets_it_for_the_log_note() {
+        use crate::shared::READING_LOG;
+        let mut app = App::new();
+        let blank = app.new_blank();
+        let id = app.add_tab(0, blank);
+        let _ = app.update(Message::Open(id, Choice::Log));
+        assert!(matches!(app.tabs.get(&id), Some(Tab::Log(_))), "chosen in a new tab");
+        assert!(app.sh.notes.contains_key(READING_LOG), "the log is made if there was none");
+        let saved = app.workspace();
+        assert!(saved.panes.iter().any(|p| p.tabs.contains(&state::TabSave::Log)));
+        // An older session kept it as a note.
+        let mut older = saved.clone();
+        for pane in &mut older.panes {
+            for tab in &mut pane.tabs {
+                if *tab == state::TabSave::Log {
+                    *tab = state::TabSave::Note { path: READING_LOG.into() };
+                }
+            }
+        }
+        let mut fresh = App::new();
+        fresh.sh.notes.insert(READING_LOG.into(), log_text());
+        let _ = fresh.apply_workspace(&older);
+        assert!(fresh.tabs.values().any(|t| matches!(t, Tab::Log(_))));
+        assert!(!fresh.tabs.values().any(|t| matches!(t, Tab::Note(n) if n.path == READING_LOG)));
+    }
+
+    #[test]
+    fn a_log_made_newest_first_is_put_right_when_its_tab_opens() {
+        use crate::shared::READING_LOG;
+        let mut app = App::new();
+        app.sh.notes.insert(READING_LOG.into(), "---\ncreated: x\ntags: [reading-log]\norder: newest-first\n---\n# Reading log\n\n## 2026-10-14\n\n- [[Psalm 23]]\n\n## 2026-10-13\n\n- [[John 4]]\n- [[John 3]]\n".into());
+        let _ = app.show_log();
+        let text = app.log().doc.source();
+        assert!(!text.contains("order:"));
+        assert!(text.find("2026-10-13").unwrap() < text.find("2026-10-14").unwrap() && text.find("[[John 3]]").unwrap() < text.find("[[John 4]]").unwrap(), "{text}");
+        assert_eq!(app.sh.notes[READING_LOG], text);
+    }
+
+    #[test]
+    fn the_tags_the_app_gives_its_own_notes_are_not_offered_to_search_by_or_to_pick() {
+        use crate::shared::{PLAN_LOG, READING_LOG};
+        let mut app = App::new();
+        app.sh.notes.insert(READING_LOG.into(), study_core::reading_log::new_log("Reading log", "2026-10-13T18:27:42-05:00"));
+        app.sh.notes.insert(PLAN_LOG.into(), study_core::plan_log::new_log("Plan log", "2026-10-13T18:27:42-05:00"));
+        app.sh.notes.insert("notes/Mine.md".into(), "---\ntags: [reading-log, comfort]\n---\nWords.\n".into());
+        let tags: Vec<String> = app.sh.tag_counts().into_iter().map(|(t, _)| t).collect();
+        assert!(!tags.contains(&"plan-log".to_string()), "{tags:?}");
+        assert!(tags.contains(&"comfort".to_string()), "the person's own are");
+        // (A tag of that name on a note of the person's is theirs, and is counted once, not for the log as well.)
+        assert_eq!(app.sh.tag_counts().into_iter().find(|(t, _)| t == "reading-log"), Some(("reading-log".to_string(), 1)));
+        assert!(app.sh.tag_suggestions("plan", &[], 8).iter().all(|(t, _)| t != "plan-log"));
+    }
+
+    #[test]
+    fn backlinks_are_in_sections_margin_notes_then_notes_by_type_then_plans_with_each_plans_days_together() {
+        use crate::backlinks_tab::{Entry, sections};
+        let mut app = App::new();
+        app.sh.notes.insert("notes/Plain.md".into(), "Thinking of [[John 3:16]].\n".into());
+        app.sh.notes.insert("notes/Pray.md".into(), "---\ntype: prayer\ntags: [a, comfort]\n---\nLord, [[John 3:16]]\n".into());
+        app.sh.notes.insert("notes/Preach.md".into(), "---\ntype: sermon\n---\n[[John 3:16]] again\n".into());
+        app.sh.notes.insert("notes/Pray too.md".into(), "---\ntype: prayer\n---\n[[John 3:16]]\n".into());
+        for plan in study_core::starter_plans::starter_plans() {
+            for (path, text) in plan.to_files() {
+                app.sh.notes.insert(path, text);
+            }
+        }
+        let passage = scripture::RefRange::parse("John 3").unwrap();
+        let links = app.sh.backlinks(&passage);
+        let found = sections(&app.sh, &links, Some(&passage));
+        let titles: Vec<&str> = found.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Margin notes", "Notes", "Prayer notes", "Sermon notes", "Plans"]);
+        assert_eq!(found[2].entries.len(), 2, "both prayers are under Prayer");
+        // Each note has its tags, to show beside its name: the notes', and the margin notes' (the marks').
+        let tags_of = |section: &crate::backlinks_tab::Section, path: &str| section.entries.iter().find_map(|e| match e {
+            Entry::Note { path: p, tags, .. } if p == path => Some(tags.clone()),
+            _ => None,
+        });
+        assert_eq!(tags_of(&found[2], "notes/Pray.md"), Some(vec!["a".to_string(), "comfort".to_string()]));
+        assert_eq!(tags_of(&found[0], &app.sh.marks[0].path()), Some(app.sh.marks[0].tags.clone()));
+        // A plan is one entry, with the days of it that read the chapter.
+        let plans = &found[4];
+        let names: Vec<(&str, usize)> = plans.entries.iter().filter_map(|e| match e {
+            Entry::Plan { name, days } => Some((name.as_str(), days.len())),
+            Entry::Note { .. } => None,
+        }).collect();
+        assert!(plans.entries.iter().all(|e| matches!(e, Entry::Plan { .. })));
+        // The days are named as a person says them, not by their files.
+        use crate::backlinks_tab::plan_day_label;
+        assert_eq!(plan_day_label("Day 087"), "Day 87");
+        assert_eq!(plan_day_label("01-05"), "Jan 5");
+        assert_eq!(plan_day_label("12-31"), "Dec 31");
+        assert_eq!(plan_day_label("2026-02-18"), "Feb 18, 2026");
+        assert_eq!(plan_day_label("Overview"), "Overview");
+        assert_eq!(plan_day_label("13-40"), "13-40", "not a date");
+        let days: Vec<&str> = plans.entries.iter().filter_map(|e| match e {
+            Entry::Plan { name, days } if name == "M'Cheyne" => Some(days.iter().map(|d| d.1.as_str())),
+            _ => None,
+        }).flatten().collect();
+        assert!(days.iter().all(|d| d.len() >= 5 && !d.starts_with("0") && d.chars().next().is_some_and(char::is_alphabetic)), "{days:?}");
+        assert!(names.contains(&("M'Cheyne", 2)) && names.contains(&("Bible in a year", 1)) && names.contains(&("Chronological", 1)), "{names:?}");
+        assert_eq!(plans.notes(), names.iter().map(|(_, n)| n).sum::<usize>());
+        // Drawn: the sections and what is in them.
+        let from = app.nid();
+        let _ = app.show_backlinks(from, backlinks_tab::Target::Passage(passage));
+        let tab = app.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Backlinks(_)).then_some(*id)).unwrap();
+        let mut h = Harness::new(app);
+        for shown in ["Margin notes", "Notes", "Prayer notes", "Sermon notes", "Plans"] {
+            assert!(h.center_of(shown).is_some(), "{shown}");
+        }
+        // The plans are folded to their header to begin with; the other sections are open. A header folds and opens its section.
+        assert!(h.center_of("M'Cheyne").is_none() && h.center_of("Pray").is_some(), "plans are folded, notes are not");
+        let folded = |h: &Harness| matches!(h.app.tabs.get(&tab), Some(Tab::Backlinks(t)) if t.folded.contains("Plans"));
+        assert!(folded(&h), "the plans are folded");
+        // (The words "Plans" are also the top bar's button: the header's message is sent as it is pressed.)
+        let _ = h.app.update(Message::Backlinks(tab, backlinks_tab::BacklinksMsg::ToggleSection("Plans".into())));
+        assert!(!folded(&h), "and open when asked for");
+        let (x, y) = h.center_of("Prayer notes").unwrap();
+        h.click(x, y);
+        assert!(h.center_of("Pray").is_none() && h.center_of("Prayer notes").is_some(), "a section folds to its header");
+        let _ = tab;
     }
 
     #[test]
@@ -7002,7 +7411,7 @@ mod tests {
         let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMarks(false)));
         assert!(h.app.bible().menu_open);
         let note = h.app.nid();
-        let _ = h.app.update(Message::Note(note, NoteMsg::ToggleProps));
+        let _ = h.app.update(Message::Note(note, NoteMsg::ToggleFront));
         assert!(!h.app.bible().menu_open, "a pop-up closes when something else is used");
         let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleMenu));
         h.click(60.0, 300.0);
@@ -7445,7 +7854,7 @@ mod tests {
         assert!(!was.starts_with("margins/"), "a note tab on some other note");
         let _ = app.update(app.b(BibleMsg::UnlinkMarkAt(0)));
         let shown = app.note().path.clone();
-        assert!(shown.starts_with("notes/John 3."), "the plain note that was left: {shown}");
+        assert!(shown.starts_with("notes/") && shown.contains("-note-"), "the plain note that was left, under its name: {shown}");
         assert!(app.sh.notes.contains_key(&shown));
     }
 

@@ -156,6 +156,9 @@ impl App {
     fn build_tab(&mut self, saved: &TabSave) -> Option<Tab> {
         match saved {
             TabSave::Blank => Some(self.new_blank()),
+            // (Sessions from before the log had a tab of its own saved it as a note.)
+            TabSave::Log => Some(self.new_log()),
+            TabSave::Note { path } if path == crate::shared::READING_LOG => Some(self.new_log()),
             TabSave::Note { path } => {
                 self.sh.notes.contains_key(path).then(|| self.new_note(path.clone()))
             }
@@ -248,6 +251,7 @@ fn save_tab(tab: &Tab) -> TabSave {
             in_margin: t.in_margin,
         },
         Tab::Note(t) => TabSave::Note { path: t.path.clone() },
+        Tab::Log(_) => TabSave::Log,
         Tab::Dict(t) => TabSave::Dict { module: t.module.0.clone(), key: t.key.clone() },
         Tab::Search(t) => TabSave::Search { module: t.module.0.clone(), query: t.draft.clone(), case: t.options.case, stem: t.options.stem, best: t.options.by_relevance },
         Tab::Commentary(t) => TabSave::Commentary { module: t.module.0.clone(), book: t.book.osis().to_string(), chapter: t.chapter },

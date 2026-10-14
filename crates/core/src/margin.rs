@@ -82,7 +82,16 @@ pub struct Resolved {
     pub slices: Vec<Slice>,
 }
 
+/// The faint grey a plain mark is drawn in: it has no color of its own.
+pub const PLAIN_COLOR: &str = "#8A9099";
+
 impl Mark {
+    /// The color to draw the mark in: its own, or for a plain mark (a reference with no look of its own, drawn as a
+    /// faint line), a grey.
+    pub fn shown_color(&self) -> &str {
+        if self.style == MarkStyle::None || self.color.is_empty() { PLAIN_COLOR } else { &self.color }
+    }
+
     /// Whether the mark covers whole verses (tied to the reference, visible in any module)
     /// rather than quoted words in one module.
     pub fn is_verse_level(&self) -> bool {
@@ -248,29 +257,23 @@ impl Mark {
         )
     }
 
-    /// What this mark becomes when it is unlinked from the text: an ordinary note in
-    /// `notes/` that keeps the quote, the comment and a reference link, with no highlight.
+    /// What this mark becomes when it is unlinked from the text: the same note, with the same name and words, out of
+    /// `margins/` (to `notes/`), without the properties that only a mark has: `type: margin`, its reference and quote
+    /// (`anchor`, `module`, `quote`, `prefix`, `suffix`) and its look (`style`, `color`). Nothing else of it is changed:
+    /// its created time, tags and words stay.
     pub fn unlinked_note(&self) -> (String, String) {
-        let verses = match self.anchor.verses {
-            Some((a, z)) if a == z => format!("{a}"),
-            Some((a, z)) => format!("{a}-{z}"),
-            None => "all".to_string(),
-        };
-        let path = format!("notes/{} {}.{verses} {}.md", self.anchor.book.name(), self.anchor.chapter, self.id);
-        // The note is new, whenever the mark was made.
-        let mut text = format!(
-            "---\ncreated: {}\nrefs: [{}]\n---\n[[{}]]\n",
-            crate::frontmatter::now(),
-            self.anchor.osis(),
-            self.anchor
-        );
-        if !self.quote.is_empty() {
-            text.push_str(&format!("\n> {}\n", self.quote));
+        let name = self.path();
+        let name = name.rsplit('/').next().unwrap_or(&name).to_string();
+        let mut out = String::from("---\n");
+        if !self.created.is_empty() {
+            out.push_str(&format!("created: {}\n", self.created));
         }
-        if !self.body.trim().is_empty() {
-            text.push_str(&format!("\n{}\n", self.body));
+        out.push_str(&format!("tags: [{}]\n---\n", self.tags.join(", ")));
+        if !self.body.is_empty() {
+            out.push_str(&self.body);
+            out.push('\n');
         }
-        (path, text)
+        (format!("notes/{name}"), out)
     }
 
     pub fn to_markdown(&self) -> String {
@@ -285,8 +288,11 @@ impl Mark {
             out.push_str(&format!("prefix: {}\n", yaml_quote(&self.prefix)));
             out.push_str(&format!("suffix: {}\n", yaml_quote(&self.suffix)));
         }
-        out.push_str(&format!("style: {}\n", self.style.as_str()));
-        out.push_str(&format!("color: {}\n", yaml_quote(&self.color)));
+        // A plain mark has no look: no `style`, no `color` (a file with none is a plain mark).
+        if self.style != MarkStyle::None {
+            out.push_str(&format!("style: {}\n", self.style.as_str()));
+            out.push_str(&format!("color: {}\n", yaml_quote(&self.color)));
+        }
         out.push_str(&format!("tags: [{}]\n---\n", self.tags.join(", ")));
         // The file's last line ends with a newline; the body itself does not carry it.
         if !self.body.is_empty() {
@@ -322,8 +328,12 @@ impl Mark {
             quote: get("quote").map(yaml_unquote).unwrap_or_default(),
             prefix: get("prefix").map(yaml_unquote).unwrap_or_default(),
             suffix: get("suffix").map(yaml_unquote).unwrap_or_default(),
-            style: MarkStyle::parse(get("style")?)?,
-            color: yaml_unquote(get("color")?),
+            // (With no `style` it is a plain mark; one that is there and unknown is not read.)
+            style: match get("style") {
+                Some(style) => MarkStyle::parse(style)?,
+                None => MarkStyle::None,
+            },
+            color: get("color").map(yaml_unquote).unwrap_or_default(),
             tags,
             body: body.strip_suffix('\n').unwrap_or(body).to_string(),
             created: get("created").map(yaml_unquote).unwrap_or_default(),
@@ -455,6 +465,30 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_mark_is_a_reference_with_no_look_and_its_file_has_no_style_or_color() {
+        let mut m = mark("John 3:16", "so loved the world", "For God ", ", that");
+        m.style = MarkStyle::None;
+        m.color = String::new();
+        m.body = "A note.".into();
+        let text = m.to_markdown();
+        assert!(!text.contains("style:") && !text.contains("color:"), "{text}");
+        assert!(text.contains("anchor: John.3.16") && text.contains("quote:"), "it is still on the words");
+        let back = Mark::from_markdown("k3f9", &text).expect("read back");
+        assert_eq!((back.style, back.color.as_str(), back.quote.as_str()), (MarkStyle::None, "", "so loved the world"));
+        assert_eq!(back.shown_color(), PLAIN_COLOR, "drawn in grey");
+        // A file from before has `style: none` and a color: it is as plain, and loses them when it is written again.
+        let old = text.replace("tags:", "style: none\ncolor: \"#8A9099\"\ntags:");
+        let old = Mark::from_markdown("k3f9", &old).expect("an older file");
+        assert_eq!(old.style, MarkStyle::None);
+        assert!(!old.to_markdown().contains("style:"));
+        // A look that is there but not known is not read, as before; a highlight keeps its look.
+        assert!(Mark::from_markdown("k3f9", &text.replace("tags:", "style: sparkly\ntags:")).is_none());
+        let lit = mark("John 3:16", "so loved", "", "");
+        assert!(lit.to_markdown().contains("style: highlight") && lit.to_markdown().contains("color:"));
+        assert_eq!(lit.shown_color(), lit.color);
+    }
+
+    #[test]
     fn bare_highlight_has_no_body_and_a_readable_path() {
         let m = mark("John 3:16", "so loved", "", "");
         let text = m.to_markdown();
@@ -506,25 +540,28 @@ mod tests {
     }
 
     #[test]
-    fn unlinking_keeps_the_words_and_the_comment_but_drops_the_mark() {
+    fn unlinking_changes_nothing_of_the_note_but_the_properties_that_put_it_on_the_text() {
         let mut m = mark("John 3:16", "so loved the world", "For God ", ", that");
-        m.body = "My note.".into();
+        m.body = "# My note\n\nMy words.".into();
+        m.created = "2026-10-12T18:03:00".into();
+        m.tags = vec!["promise".into()];
+        let before = m.to_markdown();
         let (path, text) = m.unlinked_note();
-        assert_eq!(path, "notes/John 3.16 k3f9.md");
-        // The note is new, so it is stamped with when it was made; the rest is the mark's.
-        let created = crate::frontmatter::parse(&text).front.created.expect("a created time");
-        assert_eq!(
-            text,
-            format!("---\ncreated: {created}\nrefs: [John.3.16]\n---\n[[John 3:16]]\n\n> so loved the world\n\nMy note.\n")
-        );
+        // The same name (out of margins/), and the same words.
+        assert_eq!(path, format!("notes/{}", m.path().rsplit('/').next().unwrap()));
+        assert_eq!(text, "---\ncreated: 2026-10-12T18:03:00\ntags: [promise]\n---\n# My note\n\nMy words.\n");
+        for gone in ["type:", "anchor:", "module:", "quote:", "prefix:", "suffix:", "style:", "color:", "so loved the world", "[[John"] {
+            assert!(!text.contains(gone), "{gone}");
+        }
         assert!(Mark::from_markdown("k3f9", &text).is_none(), "no longer a mark");
-
-        // A verse-level mark has no quote to keep.
+        // What was in the file besides those properties, and the words, is what is left: the same lines, minus the mark's.
+        let kept: Vec<&str> = before.lines().filter(|l| !["type:", "anchor:", "module:", "quote:", "prefix:", "suffix:", "style:", "color:"].iter().any(|k| l.starts_with(k))).collect();
+        assert_eq!(text.lines().collect::<Vec<_>>(), kept);
+        // A verse-level mark (no quote) and a bare highlight (no words) are the same.
         let a = anchor_for_verses(Book::JOHN, 3, 16, 17);
-        let v = Mark { anchor: a.range, quote: String::new(), module: String::new(), ..m };
-        let (path, text) = v.unlinked_note();
-        assert_eq!(path, "notes/John 3.16-17 k3f9.md");
-        assert!(text.contains("[[John 3:16-17]]") && !text.contains("> "), "{text}");
+        let bare = Mark { anchor: a.range, quote: String::new(), module: String::new(), body: String::new(), ..m };
+        let (_, text) = bare.unlinked_note();
+        assert!(text.ends_with("tags: [promise]\n---\n"), "{text}");
     }
 
     #[test]

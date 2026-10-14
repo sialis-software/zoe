@@ -1,6 +1,6 @@
 //! The reading log: a note that chapters are added to, as they are read, in the order and at the time
-//! they were. It is an ordinary note (open it, link to it, search it): each day is a heading, each
-//! chapter read that day a bullet with a link.
+//! they were: it grows down, the latest day and chapter last (the tab, `log_tab`, opens at the end). It is an ordinary
+//! file in the vault (search it, back it up): each day is a heading, each chapter read that day a bullet with a link.
 //!
 //! ```text
 //! ## 2025-10-13
@@ -21,6 +21,50 @@ fn day_heading(now: &DateTime<Local>) -> String {
 /// The log as it begins: its properties and title.
 pub fn new_log(title: &str, created: &str) -> String {
     format!("---\ncreated: {created}\ntags: [reading-log]\n---\n# {title}\n")
+}
+
+/// `log` turned back to oldest first if it was made newest first (`order: newest-first` in its frontmatter, which a
+/// version of the app that is not in use wrote): the days and the chapters of each are put in reverse order, and the
+/// property is taken out. `None` for a log that is as it should be.
+pub fn oldest_first(log: &str) -> Option<String> {
+    let lines: Vec<&str> = log.lines().collect();
+    let marker = lines.iter().position(|l| l.trim() == "order: newest-first")?;
+    if lines.first() != Some(&"---") || lines[..marker].iter().skip(1).any(|l| l.trim_end() == "---") {
+        return None;
+    }
+    let is_day = |l: &str| l.starts_with("## ");
+    let first_day = lines.iter().position(|l| is_day(l)).unwrap_or(lines.len());
+    let mut sections: Vec<Vec<String>> = Vec::new();
+    for line in &lines[first_day..] {
+        if is_day(line) {
+            sections.push(Vec::new());
+        }
+        if let Some(section) = sections.last_mut() {
+            section.push(line.to_string());
+        }
+    }
+    for section in &mut sections {
+        while section.last().is_some_and(|l| l.trim().is_empty()) {
+            section.pop();
+        }
+        let at: Vec<usize> = (0..section.len()).filter(|&i| section[i].trim_start().starts_with("- ")).collect();
+        let bullets: Vec<String> = at.iter().rev().map(|&i| section[i].clone()).collect();
+        for (&i, bullet) in at.iter().zip(bullets) {
+            section[i] = bullet;
+        }
+    }
+    sections.reverse();
+    let mut head: Vec<String> = lines[..first_day].iter().enumerate().filter(|(i, _)| *i != marker).map(|(_, l)| l.to_string()).collect();
+    while head.last().is_some_and(|l| l.trim().is_empty()) {
+        head.pop();
+    }
+    let mut out = head.join("\n");
+    for section in sections {
+        out.push_str("\n\n");
+        out.push_str(&section.join("\n"));
+    }
+    out.push('\n');
+    Some(out)
 }
 
 /// `log` with a line for `link` (`[[John 3]]`), read on the day of `now`, added to the end, under the
@@ -183,6 +227,15 @@ mod tests {
         let log = "# My log\n\nSome words.\n";
         let made = add_entry(log, "[[John 3]]", &at(13, 9, 0)).unwrap();
         assert_eq!(made, "# My log\n\nSome words.\n\n## 2025-10-13\n\n- [[John 3]]\n");
+    }
+
+    #[test]
+    fn a_log_made_newest_first_is_put_back_oldest_first_once() {
+        let new = "---\ncreated: x\ntags: [reading-log]\norder: newest-first\n---\n# Reading log\n\n## 2025-10-14\n\n- [[Psalm 25]]\n- [[Psalm 24]]\n\n## 2025-10-13\n\n- [[John 4]]\n- [[John 3]]\n";
+        let old = oldest_first(new).expect("it was newest first");
+        assert_eq!(old, "---\ncreated: x\ntags: [reading-log]\n---\n# Reading log\n\n## 2025-10-13\n\n- [[John 3]]\n- [[John 4]]\n\n## 2025-10-14\n\n- [[Psalm 24]]\n- [[Psalm 25]]\n");
+        assert_eq!(oldest_first(&old), None);
+        assert_eq!(oldest_first(&new_log("Reading log", "x")), None, "a new log is as it should be");
     }
 
     #[test]

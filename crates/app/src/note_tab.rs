@@ -36,6 +36,47 @@ const PANEL_TOP: f32 = 8.0 + CONTROL_HEIGHT + 3.0;
 /// end: a 28 px button and the corner's own margin of 10 on each side.
 const PANE_BUTTONS: f32 = 48.0;
 
+/// A note's document, with the caret where writing starts. The reading log's is written in like any note but for its
+/// title (shown) and its frontmatter (not shown), which are out of reach.
+fn open_doc(path: &str, text: &str) -> Document {
+    if path != crate::shared::READING_LOG {
+        return start_of_note(text);
+    }
+    // The caret starts at the end, where the days are added (the tab shows that end).
+    let mut doc = Document::new(text).lock_title();
+    let end = doc.source().len();
+    doc.perform(EditAction::SetCaret { offset: end, extend: false });
+    doc
+}
+
+/// What a note's properties are changed by: the messages of the frontmatter section, and renaming.
+fn changes_properties(message: &NoteMsg) -> bool {
+    matches!(
+        message,
+        NoteMsg::MarkStyle(_)
+            | NoteMsg::MarkColors
+            | NoteMsg::MarkColor(_)
+            | NoteMsg::TagDraft(_)
+            | NoteMsg::PickTag(_)
+            | NoteMsg::AddTag
+            | NoteMsg::RemoveTag(_)
+            | NoteMsg::AddProperties
+            | NoteMsg::PickText
+            | NoteMsg::Unlink
+            | NoteMsg::ToggleFront
+            | NoteMsg::SetKind(_)
+            | NoteMsg::PropEdit(..)
+            | NoteMsg::PropBool(..)
+            | NoteMsg::PropRemove(_)
+            | NoteMsg::NewKey(_)
+            | NoteMsg::NewType(_)
+            | NoteMsg::ToggleAddProp
+            | NoteMsg::AddProp
+            | NoteMsg::StartRename
+            | NoteMsg::CommitRename
+    )
+}
+
 fn dropdown_style(theme: &Theme, status: button::Status) -> button::Style {
     use iced::widget::pick_list;
     let status = match status {
@@ -137,7 +178,6 @@ pub enum NoteMsg {
     /// Let a margin note go from its passage: the highlight goes, the note stays as an ordinary note.
     Unlink,
     // The properties editor
-    ToggleProps,
     /// Open or fold the whole frontmatter section (tags, passage, properties) above the text.
     ToggleFront,
     SetKind(KindChoice),
@@ -145,6 +185,8 @@ pub enum NoteMsg {
     PropEdit(usize, String),
     PropBool(usize, bool),
     PropRemove(usize),
+    /// Show the boxes to add a property (the plus button), or put them away.
+    ToggleAddProp,
     NewKey(String),
     NewType(PropType),
     AddProp,
@@ -230,7 +272,7 @@ fn tag_chip_style(theme: &Theme, status: button::Status, on: bool, color: Option
 }
 
 /// The color of tag `tag`, if it has one.
-fn tag_color(sh: &Shared, tag: &str) -> Option<iced::Color> {
+pub(crate) fn tag_color(sh: &Shared, tag: &str) -> Option<iced::Color> {
     sh.tag_color(tag).and_then(|hex| crate::bible_tab::hex_color(&hex, 1.0))
 }
 
@@ -315,7 +357,7 @@ pub struct StyleChoice(pub MarkStyle);
 
 impl StyleChoice {
     /// The looks a mark can be given here.
-    pub const ALL: [StyleChoice; 2] = [StyleChoice(MarkStyle::Highlight), StyleChoice(MarkStyle::Underline)];
+    pub const ALL: [StyleChoice; 3] = [StyleChoice(MarkStyle::Highlight), StyleChoice(MarkStyle::Underline), StyleChoice(MarkStyle::None)];
 }
 
 impl fmt::Display for StyleChoice {
@@ -394,8 +436,6 @@ pub struct NoteTab {
     pub renaming: Option<String>,
     /// The hamburger menu is open.
     pub menu_open: bool,
-    /// The full properties editor is open.
-    pub props_open: bool,
     /// The frontmatter section above the text is open (it is folded to one line until it is asked for).
     pub front_open: bool,
     /// Waiting for a selection in a Bible to be this note's passage (`PickText`).
@@ -410,6 +450,8 @@ pub struct NoteTab {
     /// The new property being named.
     pub new_key: String,
     pub new_type: PropType,
+    /// The boxes to add a property are showing (they are behind a plus button).
+    pub adding: bool,
 }
 
 /// One type of note in the selector, with its notes.
@@ -494,6 +536,10 @@ pub fn groups(sh: &Shared, query: &str, tags: &BTreeSet<String>) -> Vec<Group> {
         if !words.iter().all(|w| name.contains(w) || path.to_lowercase().contains(w) || text.contains(w) || tag_text.contains(w)) {
             continue;
         }
+        // The reading log is not a note to open from here (it has its own tab).
+        if path == crate::shared::READING_LOG {
+            continue;
+        }
         // The templates are not among the notes found: changing what a kind of note starts with
         // is for those who go looking (the pencil by a kind in the New note dialog).
         if templates::is_template(path) {
@@ -548,7 +594,7 @@ impl Picker {
 
 impl NoteTab {
     pub fn new(id: TabId, sh: &Shared, path: String) -> Self {
-        let doc = start_of_note(sh.notes.get(&path).map_or("", String::as_str));
+        let doc = open_doc(&path, sh.notes.get(&path).map_or("", String::as_str));
         NoteTab {
             id,
             history: History::new(path.clone()),
@@ -563,7 +609,6 @@ impl NoteTab {
             tag_draft: String::new(),
             renaming: None,
             menu_open: false,
-            props_open: false,
             front_open: false,
             picking: false,
             scroll: 0.0,
@@ -571,6 +616,7 @@ impl NoteTab {
             drafts: BTreeMap::new(),
             new_key: String::new(),
             new_type: PropType::Text,
+            adding: false,
         }
     }
 
@@ -592,6 +638,10 @@ impl NoteTab {
 
     /// Go to a note, as a move to a new place (Back returns).
     pub fn open(&mut self, sh: &mut Shared, path: String) {
+        // The reading log is not shown by a note tab: it has a tab of its own.
+        if path == crate::shared::READING_LOG && !self.is_log() {
+            return;
+        }
         self.show(sh, path.clone());
         self.history.go(path, |a, b| a == b);
     }
@@ -610,7 +660,7 @@ impl NoteTab {
     /// Show a note, with the history left as it is.
     fn show(&mut self, sh: &mut Shared, path: String) {
         let text = sh.notes.get(&path).cloned().unwrap_or_default();
-        self.doc = start_of_note(&text);
+        self.doc = open_doc(&path, &text);
         self.scroll = 0.0;
         self.path = path;
         self.picker = None;
@@ -619,6 +669,7 @@ impl NoteTab {
         self.tag_draft.clear();
         self.mark_colors = false;
         self.picking = false;
+        self.adding = false;
         self.drafts.clear();
         sh.status.clear();
     }
@@ -640,7 +691,7 @@ impl NoteTab {
             return;
         }
         let head = self.doc.selection().head;
-        self.doc = start_of_note(new);
+        self.doc = open_doc(&self.path, new);
         // The caret stays where it was in the words that did not change: before what was changed
         // as it was, after it as far on as the change moved things.
         let prefix = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
@@ -697,6 +748,11 @@ impl NoteTab {
         sh.mark_index_of(&self.path)
     }
 
+    /// Whether this is the reading log: the app's own note, whose name, title and properties are the app's.
+    pub fn is_log(&self) -> bool {
+        self.path == crate::shared::READING_LOG
+    }
+
     /// Whether the note is one that is only read: the library's.
     pub fn read_only(&self) -> bool {
         crate::shared::is_library(&self.path)
@@ -734,19 +790,23 @@ impl NoteTab {
                 | NoteMsg::AddProperties
                 | NoteMsg::PickText
                 | NoteMsg::Unlink
-                | NoteMsg::ToggleProps
                 | NoteMsg::SetKind(_)
                 | NoteMsg::PropEdit(..)
                 | NoteMsg::PropBool(..)
                 | NoteMsg::PropRemove(_)
                 | NoteMsg::NewKey(_)
                 | NoteMsg::NewType(_)
+                | NoteMsg::ToggleAddProp
                 | NoteMsg::AddProp => true,
                 _ => false,
             };
             if changes {
                 return (Task::none(), None);
             }
+        }
+        // The reading log is written in, but its properties, its name and its title are the app's.
+        if self.is_log() && changes_properties(&message) {
+            return (Task::none(), None);
         }
         let mut task = Task::none();
         match message {
@@ -881,7 +941,15 @@ impl NoteTab {
             }
             NoteMsg::MarkStyle(style) => {
                 if let Some(i) = self.open_mark_index(sh) {
-                    let color = sh.marks[i].color.clone();
+                    // A plain mark has no color: it is let go of, and is not offered again. A mark made a highlight or an
+                    // underline again, with no color of its own, takes the first pen's.
+                    let had = sh.marks[i].color.clone();
+                    let color = match style {
+                        MarkStyle::None => String::new(),
+                        _ if crate::bible_tab::hex_color(&had, 1.0).is_some() => had,
+                        _ => sh.default_look().1,
+                    };
+                    self.mark_colors = false;
                     sh.set_mark_look(i, style, &color);
                 }
             }
@@ -889,7 +957,9 @@ impl NoteTab {
             NoteMsg::CloseColors => self.mark_colors = false,
             NoteMsg::MarkColor(n) => {
                 self.mark_colors = false;
-                if let (Some(i), Some(color)) = (self.open_mark_index(sh), crate::state::PEN_COLORS.get(n)) {
+                if let (Some(i), Some(color)) = (self.open_mark_index(sh), crate::state::PEN_COLORS.get(n))
+                    && sh.marks[i].style != MarkStyle::None
+                {
                     let style = sh.marks[i].style;
                     sh.set_mark_look(i, style, color);
                 }
@@ -927,7 +997,6 @@ impl NoteTab {
                     sh.toast("Unlinked: it is an ordinary note now");
                 }
             }
-            NoteMsg::ToggleProps => self.props_open = !self.props_open,
             NoteMsg::ToggleFront => self.front_open = !self.front_open,
             NoteMsg::Scrolled(y) => self.scroll = y,
             NoteMsg::SetKind(KindChoice(kind)) => self.change_properties(sh, |f| f.kind = kind),
@@ -966,6 +1035,10 @@ impl NoteTab {
             }
             NoteMsg::NewKey(key) => self.new_key = key,
             NoteMsg::NewType(kind) => self.new_type = kind,
+            NoteMsg::ToggleAddProp => {
+                self.adding = !self.adding;
+                self.new_key.clear();
+            }
             NoteMsg::AddProp => {
                 let key = self.new_key.trim().to_string();
                 let taken = |f: &Frontmatter| f.props.iter().any(|p| p.key.eq_ignore_ascii_case(&key));
@@ -975,6 +1048,7 @@ impl NoteTab {
                     self.drafts.clear();
                     self.change_properties(sh, |f| f.props.push(Property { key, value: Value::empty(kind) }));
                     self.new_key.clear();
+                    self.adding = false;
                 }
             }
             NoteMsg::PickerTag(tag) => {
@@ -1001,6 +1075,33 @@ impl NoteTab {
     }
 
     /// `reference` is the Bible tab this note works with: its module serves quotes and previews.
+    /// The reading log's tab (`log_tab`): its words, written in like a note's, over the bottom bar. There is no header
+    /// (the tab and the title in the text say what it is) and no way to choose, rename or change a note, and no properties.
+    pub fn log_view<'a>(&'a self, sh: &'a Shared, reference: Option<&'a BibleTab>) -> Element<'a, NoteMsg> {
+        let module = reference.map(|b| b.module.clone()).or_else(|| sh.backend.modules().first().map(|m| m.id.clone())).unwrap_or(ModuleId(String::new()));
+        let mut editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
+            .id(self.editor_id())
+            .on_action(NoteMsg::Action)
+            .follow_links(true)
+            .on_link(NoteMsg::OpenLink)
+            .on_link_menu(NoteMsg::LinkMenu)
+            .on_link_drag(NoteMsg::LinkDrag)
+            .on_scroll(NoteMsg::Scrolled)
+            .embed(move |target| sh.embed_for(&module, target))
+            .placeholder("Nothing read yet")
+            .size(sh.settings.notes_size)
+            .font(sh.settings.text_font())
+            .padding(16)
+            .height(Length::Fill);
+        if sh.settings.vim_mode {
+            editor = editor.vim(&self.vim, NoteMsg::Vim);
+        }
+        // The bottom bar: the Vim mode line at its left and the pane's own buttons over its right end.
+        let status: Element<'a, NoteMsg> = if sh.settings.vim_mode { self.vim_status() } else { space::horizontal().into() };
+        let bar = container(status).width(Length::Fill).height(PANE_BUTTONS).align_y(iced::Center).padding([0, 16]);
+        column![editor, rule::horizontal(1), bar].into()
+    }
+
     pub fn view<'a>(&'a self, sh: &'a Shared, reference: Option<&'a BibleTab>) -> Element<'a, NoteMsg> {
         // The header bar, like the Bible tab's: the selector on the left, actions on the right.
         // Controls are as tall as the Bible tab's pickers so the two bars line up.
@@ -1084,15 +1185,17 @@ impl NoteTab {
             pane = pane.push(
                 container(text("Part of the library: it is kept as it was imported, to read and link to.").size(12).style(text::secondary)).padding([6, 16]),
             );
-        } else {
+        } else if !self.is_log() {
             pane = pane.push(self.properties(sh));
         }
-        // A clear line between the note's frontmatter (above) and its words (below).
-        pane = pane.push(container(rule::horizontal(2).style(|theme: &Theme| rule::Style {
+        // A clear line between the note's frontmatter (above) and its words (below): the log has no frontmatter to show.
+        if !self.is_log() {
+            pane = pane.push(container(rule::horizontal(2).style(|theme: &Theme| rule::Style {
             color: theme.extended_palette().background.strong.color,
             ..rule::default(theme)
         }))
         .padding([4, 0]));
+        }
 
             let module = reference.map(|b| b.module.clone()).or_else(|| sh.backend.modules().first().map(|m| m.id.clone()));
             let module = module.unwrap_or(ModuleId(String::new()));
@@ -1200,7 +1303,7 @@ impl NoteTab {
         items = items.push(item(crate::icons::Icon::Link, "Copy link", NoteMsg::CopyLink));
         if self.open_mark_index(sh).is_none() {
             items = items.push(item(crate::icons::Icon::Backlinks, "Backlinks", NoteMsg::OpenBacklinks));
-            if !self.read_only() {
+            if !self.read_only() && !self.is_log() {
                 items = items.push(item(crate::icons::Icon::Pencil, "Rename", NoteMsg::StartRename));
             }
         }
@@ -1256,8 +1359,13 @@ impl NoteTab {
     fn properties<'a>(&'a self, sh: &'a Shared) -> Element<'a, NoteMsg> {
         let front = frontmatter::parse(self.doc.source()).front;
         let mark = self.open_mark_index(sh).and_then(|i| sh.marks.get(i));
-        // The fold: one line that says what is in the section, and opens it.
-        let tags_shown: &[String] = mark.map_or(&front.tags, |m| &m.tags);
+        // The tags are above the fold, always there: the one thing most often changed. Under it is the section that
+        // folds: the note's passage (or the way to give it one), when it was made, and the rest of the properties.
+        let tags: &[String] = mark.map_or(&front.tags, |m| &m.tags);
+        let created = match (mark, &front.created) {
+            (Some(mark), _) => (!mark.created.is_empty()).then(|| mark.created.clone()),
+            (None, created) => created.clone(),
+        };
         let fold = |label: String| -> Element<'a, NoteMsg> {
             button(
                 row![crate::icons::Icon::chevron(self.front_open).view(14.0), text(label).size(12).style(text::secondary)]
@@ -1269,15 +1377,22 @@ impl NoteTab {
             .on_press(NoteMsg::ToggleFront)
             .into()
         };
+        let mut out = column![self.tags_block(sh, tags)];
         if !self.front_open {
-            let mut parts: Vec<String> = tags_shown.iter().take(4).map(|t| format!("#{t}")).collect();
-            if tags_shown.len() > 4 {
-                parts.push("\u{2026}".into());
+            // One line that says what is in the section, and opens it.
+            let mut parts: Vec<String> = Vec::new();
+            match mark {
+                Some(mark) => parts.push(mark.anchor.to_string()),
+                None => {
+                    if let Some(created) = &created {
+                        parts.push(format!("Created {}", frontmatter::display(created)));
+                    }
+                    if !front.props.is_empty() {
+                        parts.push(format!("{} propert{}", front.props.len(), if front.props.len() == 1 { "y" } else { "ies" }));
+                    }
+                }
             }
-            if let Some(mark) = mark {
-                parts.push(mark.anchor.to_string());
-            }
-            let summary = if parts.is_empty() { "No tags".to_string() } else { parts.join("  \u{00B7}  ") };
+            let summary = if parts.is_empty() { "Frontmatter".to_string() } else { parts.join("  \u{00B7}  ") };
             let mut bar = row![fold(summary)].spacing(8).align_y(iced::Center);
             // Waiting for a selection is said here too, as the button that asked is out of sight.
             if self.picking {
@@ -1285,19 +1400,14 @@ impl NoteTab {
                     .push(text("Select text in a Bible\u{2026}").size(12).style(text::secondary))
                     .push(button(text("Cancel").size(12)).padding([2, 8]).style(button::text).on_press(NoteMsg::CancelPick));
             }
-            return container(bar).padding([4, 8]).into();
+            return out.push(container(bar).padding([0, 8])).into();
         }
-        let tags: &[String] = mark.map_or(&front.tags, |m| &m.tags);
-        let mut out = column![container(fold("Frontmatter".to_string())).padding([2, 8]), self.tags_block(sh, tags)];
+        out = out.push(container(fold("Frontmatter".to_string())).padding([0, 8]));
         if let Some(mark) = mark {
             out = out.push(self.reference_section(mark));
         } else if !templates::is_template(&self.path) {
             out = out.push(self.mark_section());
         }
-        let created = match (mark, &front.created) {
-            (Some(mark), _) => (!mark.created.is_empty()).then(|| mark.created.clone()),
-            (None, created) => created.clone(),
-        };
         let mut strip = row![].spacing(8).align_y(iced::Center);
         match &created {
             Some(created) => {
@@ -1310,24 +1420,10 @@ impl NoteTab {
                 }
             }
         }
-        // (A margin file has only the mark's own properties, which have their controls above.)
-        let mut bar = row![scrollable(strip).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0))).width(Length::Fill)]
-            .spacing(8)
-            .align_y(iced::Center);
+        out = out.push(container(strip).padding([4, 16]));
+        // The rest of the properties, to read and to change (a margin file has only the mark's own, which have their
+        // controls above).
         if mark.is_none() {
-            bar = bar.push(
-                button(
-                    row![text("Properties").size(12), crate::icons::Icon::chevron(self.props_open).view(14.0)]
-                        .spacing(4)
-                        .align_y(iced::Center),
-                )
-                .padding([2, 8])
-                .style(button::text)
-                .on_press(NoteMsg::ToggleProps),
-            );
-        }
-        out = out.push(container(bar).padding([4, 16]));
-        if self.props_open && mark.is_none() {
             out = out.push(self.properties_editor(&front));
         }
         out.into()
@@ -1441,7 +1537,12 @@ impl NoteTab {
             .style(crate::popup_style)
             .into()
         });
-        let look = row![style, popover(dot, panel, NoteMsg::CloseColors)].spacing(8).align_y(iced::Center);
+        // (A plain mark has no color to choose.)
+        let look: Element<'a, NoteMsg> = if mark.style == MarkStyle::None {
+            row![style].into()
+        } else {
+            row![style, popover(dot, panel, NoteMsg::CloseColors)].spacing(8).align_y(iced::Center).into()
+        };
         let unlink = button(text("Unlink").size(12)).padding([3, 10]).style(button::secondary).on_press(NoteMsg::Unlink).into();
         // The section is called what the other kind of note has the button for.
         let mut body = column![text("Mark").size(11).style(text::secondary), heading].spacing(4);
@@ -1495,7 +1596,7 @@ impl NoteTab {
         let mut block = column![reference_link].spacing(6);
         if let Some(found) = found {
             let font = sh.settings.text_font();
-            let marked = crate::bible_tab::hex_color(&mark.color, if sh.is_dark() { 0.4 } else { 0.5 }).unwrap_or(iced::Color::TRANSPARENT);
+            let marked = crate::bible_tab::hex_color(mark.shown_color(), if sh.is_dark() { 0.4 } else { 0.5 }).unwrap_or(iced::Color::TRANSPARENT);
             let mut spans: Vec<iced::widget::text::Span<'a, ()>> = Vec::new();
             match (!mark.quote.is_empty()).then(|| found.body.find(&mark.quote)).flatten() {
                 Some(at) => {
@@ -1567,16 +1668,30 @@ impl NoteTab {
             && !self.new_key.contains(':')
             && !reserved
             && !front.props.iter().any(|p| p.key.eq_ignore_ascii_case(self.new_key.trim()));
-        rows = rows.push(
+        // The way to add one is a plus button; its boxes show when it is pressed (and go when one is added).
+        rows = rows.push(if self.adding {
             row![
                 label("New property"),
                 text_input("name", &self.new_key).on_input(NoteMsg::NewKey).on_submit(NoteMsg::AddProp).size(13).padding([3, 6]).width(140),
                 pick_list(PropType::ALL.to_vec(), Some(self.new_type), NoteMsg::NewType).text_size(13).padding([3, 8]),
                 button(text("Add").size(12)).padding([3, 10]).style(button::secondary).on_press_maybe(ok.then_some(NoteMsg::AddProp)),
+                button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(NoteMsg::ToggleAddProp),
             ]
             .spacing(8)
-            .align_y(iced::Center),
-        );
+            .align_y(iced::Center)
+        } else {
+            // In the color of the names of the rows above it, and under them: not a button to look at, a place to press.
+            row![
+                button(text("+  Property").size(12))
+                    .padding([2, 0])
+                    .style(|theme: &Theme, status| {
+                        let faint = text::secondary(theme).color.unwrap_or(theme.extended_palette().background.base.text);
+                        let shown = if matches!(status, button::Status::Hovered | button::Status::Pressed) { theme.extended_palette().background.base.text } else { faint };
+                        button::Style { text_color: shown, ..button::Style::default() }
+                    })
+                    .on_press(NoteMsg::ToggleAddProp)
+            ]
+        });
         // It scrolls inside a limited height, so a long list never leaves the text no room.
         container(scrollable(container(rows).padding(iced::Padding { top: 4.0, right: 12.0, bottom: 4.0, left: 0.0 })))
             .padding(iced::Padding { top: 0.0, right: 4.0, bottom: 0.0, left: 16.0 })

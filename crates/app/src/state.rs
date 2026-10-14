@@ -219,6 +219,8 @@ pub enum TabSave {
         in_margin: MarginKinds,
     },
     Note { path: String },
+    /// The reading log.
+    Log,
     Dict { module: String, key: String },
     Commentary { module: String, book: String, chapter: u16 },
     /// A Bible search: the words typed and how they match.

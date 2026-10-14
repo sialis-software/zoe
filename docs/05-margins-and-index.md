@@ -16,16 +16,21 @@ A **highlight or underline is a margin note with no body**: frontmatter only. A 
 note with a comment is the same file with markdown text. One model, one file type.
 
 Users will misjudge which kind they meant, so the writer (the note tab) treats the two as one note with one interface, and
-the passage is a section of it. In both, the **tags come first** at the top, then the passage section, then when it was made
-(and, for an ordinary note, the *Properties* drop-down with everything else the app does not give its own control).
+the passage is a section of it. In both, the **tags come first** at the top, outside and above a **Frontmatter** section that
+folds (folded to begin with, to one line that says what is in it: the passage of a margin note; when an ordinary note was
+made, and how many other properties it has). In the section are the passage (or the way to give the note one), when it was
+made and, for an ordinary note, the rest of the properties (the *type* and every other one, each edited by its kind, and the way to
+add one): those the app gives no control of their own.
 
 - A **margin note** has a *Reference* section in the place the other has its *Mark* button: the passage and the words marked (shown,
   not edited here; nothing is said of a mark on whole verses, and the quote is shown only if there is one), how it marks them (a
   drop-down of the styles, and a color swatch whose panel floats over the note instead of making it taller), and two buttons. **Reselect** waits for the next
   selection to settle in a Bible reader and makes it the note's passage (its reference, quote and context, and the module the words
   were chosen in); the note's text, tags, look and time stay, and its file is renamed for the new passage, the links to it following.
-  **Unlink** lets it go from the text: the highlight goes, the note stays. The file moves out of `margins/` to `notes/` as an
-  ordinary document that keeps the quote (as a blockquote), the comment, and a `[[reference]]` link back to the verses.
+  **Unlink** lets it go from the text, and takes **only** what only a mark has from the note: the file moves out of `margins/`
+  to `notes/` under the **same name**, with the **same words**, tags and time, and without `type: margin`, its reference and
+  quote (`anchor`, `module`, `quote`, `prefix`, `suffix`) and its look (`style`, `color`). Nothing is added to it (no link, no
+  blockquote). It is an ordinary note; putting it on a passage again is **Mark**, as for any note.
 - An **ordinary note** has *Not on a passage* and **Mark**, which waits for a selection the same way and makes the note a margin
   note on it, as a pen would (the first pen's look, else a yellow highlight): the note's words become the comment, its tags and
   time are kept, and its frontmatter is the mark's, made fresh (other properties it had are not kept: a margin file has only the
@@ -57,13 +62,19 @@ module: KJV              # module the marked words were chosen in
 quote: "For God so loved"
 prefix: ""               # a few characters of context before and after
 suffix: " the world"
-style: highlight         # highlight | underline | none (a plain margin note)
+style: highlight         # highlight | underline; no `style` at all is a plain mark (below)
 color: "#F5D90A"
 tags: [promise]
 created: 2026-10-12T18:03:00
 ---
 Optional markdown comment, with [[links]] like any document.
 ```
+
+**Plain marks.** A mark can be set *Plain* (in the note's style drop-down, or made by *Add Note*): a reference with no look, the
+words or verses a note is about and nothing painted on them but a faint grey line (and its card, if it has a comment). A plain
+mark's file has **no `style` and no `color`** (they are taken out when it is set plain, and the color choice is not offered); a
+file with neither is a plain mark, and an older file with `style: none` is read as one and loses them when written again. Set
+back to a highlight or an underline it takes the first pen's color.
 
 **Verse-level marks.** If the selection when a pen is applied is whole verses (from a verse
 number, a triple-click, or a drag that happens to cover them exactly), the mark is tied to

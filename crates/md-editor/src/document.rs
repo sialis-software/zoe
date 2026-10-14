@@ -124,6 +124,8 @@ pub struct Document {
     /// The frontmatter cannot be reached by the caret, the selection or any edit; only
     /// [`Document::replace_frontmatter`] changes it.
     front_locked: bool,
+    /// The first heading (the note's title) is as out of reach as the frontmatter, but is shown.
+    title_locked: bool,
 }
 
 impl Document {
@@ -139,6 +141,7 @@ impl Document {
             redo: Vec::new(),
             group: None,
             front_locked: false,
+            title_locked: false,
         }
     }
 
@@ -146,6 +149,16 @@ impl Document {
     /// properties are changed by the app's own controls.
     pub fn lock_frontmatter(mut self) -> Self {
         self.front_locked = true;
+        self.keep_out_of_frontmatter();
+        self
+    }
+
+    /// Keep the title (the first heading of level 1, below the frontmatter if there is any) out of reach of the
+    /// caret, the selection and editing too, for a note whose name is not for changing. It stays shown. Needs the
+    /// frontmatter to be locked (this does that).
+    pub fn lock_title(mut self) -> Self {
+        self.front_locked = true;
+        self.title_locked = true;
         self.keep_out_of_frontmatter();
         self
     }
@@ -167,12 +180,15 @@ impl Document {
     /// that separates them, which belongs to the frontmatter.
     pub fn front_end(&self) -> usize {
         let n = self.front_blocks();
-        if n == 0 {
-            return 0;
-        }
-        let blank_after = self.blocks.get(n).is_some_and(|b| b.kind == Kind::Blank);
+        let blank_after = n > 0 && self.blocks.get(n).is_some_and(|b| b.kind == Kind::Blank);
         let next = n + usize::from(blank_after);
-        self.blocks.get(next).map_or(self.source.len(), |b| b.range.start)
+        let start_of = |index: usize| self.blocks.get(index).map_or(self.source.len(), |b| b.range.start);
+        // A locked title is part of what the text starts below, with the blank line under it.
+        if self.title_locked && self.blocks.get(next).is_some_and(|b| b.kind == Kind::Heading(1)) {
+            let blank_under = self.blocks.get(next + 1).is_some_and(|b| b.kind == Kind::Blank);
+            return start_of(next + 1 + usize::from(blank_under));
+        }
+        if n == 0 { 0 } else { start_of(next) }
     }
 
     /// How many leading blocks a locked document does not show at all (the frontmatter and the
@@ -1205,6 +1221,45 @@ mod tests {
         let mut d = Document::new(NOTE).lock_frontmatter();
         d.perform(Action::SetCaret { offset: NOTE.find("Text").unwrap(), extend: false });
         d
+    }
+
+    const LOG: &str = "---\ncreated: x\ntags: [reading-log]\n---\n# Reading log\n\n## 2026-10-13\n\n- [[John 3]]\n";
+
+    #[test]
+    fn a_locked_title_is_shown_but_the_caret_selection_and_edits_stay_out_of_it() {
+        let mut d = Document::new(LOG).lock_title();
+        assert_eq!(d.front_end(), LOG.find("## 2026").unwrap(), "the text starts below the title and the blank line under it");
+        assert_eq!(d.hidden_blocks(), 4, "the four lines of frontmatter are not shown: the title is");
+        assert!(d.selection().head >= d.front_end());
+        for action in [
+            Action::SetCaret { offset: 2, extend: false },
+            Action::SetCaret { offset: LOG.find("Reading log").unwrap() + 3, extend: false },
+            Action::SelectAll,
+            Action::Move { motion: Motion::DocStart, extend: false },
+            Action::Move { motion: Motion::DocStart, extend: true },
+        ] {
+            d.perform(action.clone());
+            let s = d.selection();
+            assert!(s.anchor >= d.front_end() && s.head >= d.front_end(), "{action:?} -> {s:?}");
+        }
+        // Backspace at the edge deletes nothing; the words below are written in as usual.
+        d.perform(Action::SetCaret { offset: d.front_end(), extend: false });
+        assert!(!d.perform(Action::Backspace));
+        assert!(!d.perform(Action::DeleteToLineStart));
+        assert!(d.perform(Action::Insert("A note. ".into())));
+        assert!(d.source().starts_with("---\ncreated: x\ntags: [reading-log]\n---\n# Reading log\n\nA note. ## 2026"), "{:?}", d.source());
+        d.perform(Action::Undo);
+        assert_eq!(d.source(), LOG);
+        assert!(d.selection().head >= d.front_end(), "undo does not leave the caret in the title");
+    }
+
+    #[test]
+    fn a_locked_title_with_no_frontmatter_and_nothing_below_it_leaves_the_end_to_write_at() {
+        let d = Document::new("# Log\n").lock_title();
+        assert_eq!(d.front_end(), "# Log\n".len());
+        assert_eq!(d.selection().head, "# Log\n".len());
+        let plain = Document::new("# Log\n\ntext\n").lock_frontmatter();
+        assert_eq!(plain.front_end(), 0, "without the lock a title is text like any other");
     }
 
     #[test]

@@ -865,7 +865,7 @@ impl BibleTab {
                 MarkStyle::Underline => (MarkKind::Underline, 1.0),
                 MarkStyle::None => (MarkKind::Note, 0.7),
             };
-            let Some(color) = hex_color(&mark.color, alpha) else { continue };
+            let Some(color) = hex_color(mark.shown_color(), alpha) else { continue };
             for s in slices {
                 out.push(MarkDraw {
                     mark: index,
@@ -919,7 +919,8 @@ impl BibleTab {
             prefix: anchor.prefix,
             suffix: anchor.suffix,
             style,
-            color: color.to_string(),
+            // (A plain mark has no color: it is drawn in a grey.)
+            color: if style == MarkStyle::None { String::new() } else { color.to_string() },
             tags,
             body: String::new(),
             created: study_core::frontmatter::now(),
@@ -1620,7 +1621,7 @@ impl BibleTab {
             out.push(CardSpec {
                 key: index as u64,
                 anchor: CanonSlice { verse: first.verse, start: first.start, end: first.end },
-                color: hex_color(&mark.color, 1.0).unwrap_or(Color::WHITE),
+                color: hex_color(mark.shown_color(), 1.0).unwrap_or(Color::WHITE),
                 pinned: writing,
                 follows_link: false,
                 header: false,
@@ -1846,7 +1847,7 @@ impl BibleTab {
     /// there is nowhere else to reach them; in the margin only while it is being written.
     pub fn card_view<'a>(&'a self, sh: &'a Shared, index: usize, popup: bool) -> Element<'a, BibleMsg> {
         let mark = &sh.marks[index];
-        let color = hex_color(&mark.color, 1.0).unwrap_or(Color::WHITE);
+        let color = hex_color(mark.shown_color(), 1.0).unwrap_or(Color::WHITE);
         let writing = self.editing == Some(index);
 
         let meta = card_size(sh) * 0.7;

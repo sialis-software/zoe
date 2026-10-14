@@ -391,8 +391,10 @@ impl Shared {
         let mut cache = self.tag_cache.borrow_mut();
         if cache.0 != revision {
             let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-            for (path, text) in self.notes.iter().filter(|(path, _)| !templates::is_template(path) && !path.starts_with("library/")) {
-                let _ = path;
+            // Not the app's own notes (the reading log and the plan log, with the tags the app gives them) nor the
+            // library's: the tags offered, to search by and to pick, are the person's.
+            let own = |path: &str| path == READING_LOG || path == PLAN_LOG;
+            for (_, text) in self.notes.iter().filter(|(path, _)| !templates::is_template(path) && !path.starts_with("library/") && !own(path)) {
                 for tag in frontmatter::parse(text).front.tags {
                     *counts.entry(frontmatter::normalize_tag(&tag)).or_default() += 1;
                 }
@@ -435,12 +437,13 @@ impl Shared {
     }
 
     pub fn note_paths(&self) -> Vec<String> {
-        self.notes.keys().cloned().collect()
+        // (The reading log has its own tab, and is not a note to link to or to open from one.)
+        self.notes.keys().filter(|p| p.as_str() != READING_LOG).cloned().collect()
     }
 
     /// The first note that is not a margin file: what a note tab opens when it has nothing.
     pub fn first_ordinary_note(&self) -> String {
-        self.notes.keys().find(|p| !p.starts_with("margins/") && !p.starts_with("library/") && !templates::is_template(p)).cloned().unwrap_or_default()
+        self.notes.keys().find(|p| !p.starts_with("margins/") && !p.starts_with("library/") && !templates::is_template(p) && p.as_str() != READING_LOG).cloned().unwrap_or_default()
     }
 
     /// The kinds of note there are: the templates in the vault, by name.
@@ -490,7 +493,8 @@ impl Shared {
                 }
         };
         let mut out = Vec::new();
-        for (path, body) in self.notes.iter().filter(|(path, _)| !templates::is_template(path)) {
+        // (Not the reading log, which would be among the notes that link to every chapter there is.)
+        for (path, body) in self.notes.iter().filter(|(path, _)| !templates::is_template(path) && path.as_str() != READING_LOG) {
             let lines: Vec<String> = body
                 .lines()
                 .filter(|line| {
@@ -735,6 +739,20 @@ impl Shared {
         self.relink(path, &new);
         self.events.push(Event::NoteRemoved { old: path.to_string(), next: new });
         Some(self.marks.len() - 1)
+    }
+
+    /// The look a new mark gets when none is asked for: the first pen's (else a yellow highlight).
+    pub fn default_look(&self) -> (MarkStyle, String) {
+        match self.settings.pens.first() {
+            Some(pen) => (
+                match pen.style {
+                    crate::state::PenStyle::Highlight => MarkStyle::Highlight,
+                    crate::state::PenStyle::Underline => MarkStyle::Underline,
+                },
+                pen.color.clone(),
+            ),
+            None => (MarkStyle::Highlight, "#F5D90A".to_string()),
+        }
     }
 
     /// Give mark `index` another look: how it marks the text, and in what color (`#RRGGBB`). A bare

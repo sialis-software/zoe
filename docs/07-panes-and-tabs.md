@@ -58,6 +58,15 @@ at a time) listing the notes that link to any of the selected verses, each with 
 a click shows the note. The tab follows the notes as they are written, and comes back with the
 workspace.
 
+The list is in **sections**, in this order: the **margin notes** on the passage (those with something written in them, with the
+words they are on and the start of what is written: they are on it by where they are, not by a link in their words), the **notes**
+with no type, then **each type of note** (prayer notes, sermon notes, daily notes... by `type:`, by name), and last the **plans**
+that read it, each plan once with a button for each of its days (named as a person says them: `Day 87`, `Jan 5`, not by their
+files). A section's header is a bar of its own, with a chevron and how many notes it holds, and a click on it **folds** the section
+to that bar or opens it; the plans are folded to begin with. The notes under a header are indented, with a line down their side,
+and are links, each with its tags beside its name. The heading says how many notes there are in all. The reading log is not
+among them.
+
 The note tab's hamburger menu has **Backlinks** too: the same tab, for the notes that link to the note by
 name (`[[Nicodemus]]`, whatever the link shows), not the note itself or the templates.
 
@@ -291,6 +300,15 @@ opens a card with the days the chapter was read, latest first, and a way to the 
 it has been in front of the reader for a chosen number of seconds (10 to 600, thirty to begin with);
 that is **off** to begin with, and so is nothing else: the button is always there. A note open in the writer
 while something is added to it keeps the caret in the words it was in.
+
+The log has a **tab of its own** (*Reading log* in a new tab, or the way to it from the clock card of a chapter): it is the
+app's note, not one of the notes. It grows **down** (the earliest day first, the latest last), and the tab is shown scrolled to the
+end, where the caret is. No note leads to it and it leads to none: the notes selector, links (`[[Reading log]]` finds no note),
+searching the notes and a chapter's backlinks all leave it out, a note tab will not show it, and a link to a note in the log
+does nothing (a link to a verse, or a web address, does what it does anywhere). The tab is written in with everything a note
+has (the Vim keys, links, embeds), but it has no header, no selector, history or menu, no frontmatter section, no rename, and
+its title (`# Reading log`) is shown but out of reach of the caret, the selection and editing, like the frontmatter every note
+has (a `Document::lock_title`). A session saved when the log was a note tab opens the new tab.
 
 The same page of the settings has *Add each new highlight or note to today's note, under Bookmarks* (off
 to begin with): a new mark (made with a pen, Add Note, or a verse number's toolbar) adds a line such as
