@@ -68,6 +68,22 @@ pub struct EmbedContent {
 
 type EmbedFn<'a> = dyn Fn(&LinkTarget) -> Option<EmbedContent> + 'a;
 
+/// What was done with the list.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompletionEvent {
+    /// The arrows: the choice moves by this much.
+    Move(isize),
+    /// Enter or Tab: the choice is taken.
+    Accept,
+    /// Escape: the list is put away.
+    Dismiss,
+    /// A click on a row.
+    Pick(usize),
+}
+
+/// The widest the card of choices for a link being written goes.
+const OVERLAY_WIDTH: f32 = 420.0;
+
 pub struct LiveEditor<'a, Message> {
     doc: Cow<'a, Document>,
     /// A rendered view that cannot be typed into (a margin card at rest): no caret, no focus,
@@ -105,6 +121,10 @@ pub struct LiveEditor<'a, Message> {
     /// Vim key bindings: what the modal state looks like, and where its keys go.
     vim: Option<VimView>,
     on_vim_key: Option<Box<dyn Fn(VimKey) -> Message + 'a>>,
+    /// A card by the caret, over the text (the choices for a link being written): an element of its own, laid out,
+    /// drawn and given events as the reader's floating cards are. And where the keys that move among them go.
+    overlay: Option<Element<'a, Message>>,
+    on_completion: Option<Box<dyn Fn(CompletionEvent) -> Message + 'a>>,
 }
 
 /// What the widget needs to know of the Vim state to route keys and draw its cursor.
@@ -157,6 +177,8 @@ fn editor<'a, Message>(doc: Cow<'a, Document>, pal: Palette, read_only: bool) ->
         copy_as: None,
         vim: None,
         on_vim_key: None,
+        overlay: None,
+        on_completion: None,
     }
 }
 
@@ -245,6 +267,14 @@ impl<'a, Message> LiveEditor<'a, Message> {
 
     pub fn placeholder(mut self, text: impl Into<String>) -> Self {
         self.placeholder = Some(text.into());
+        self
+    }
+
+    /// Show a card by the caret, over the text, while there is one (the arrows, Enter or Tab and Escape go to
+    /// `on_completion`; the card takes the wheel and the clicks itself).
+    pub fn completion(mut self, card: Option<Element<'a, Message>>, on_completion: impl Fn(CompletionEvent) -> Message + 'a) -> Self {
+        self.overlay = card;
+        self.on_completion = Some(Box::new(on_completion));
         self
     }
 
@@ -456,6 +486,8 @@ struct State {
     preedit: Option<String>,
     /// The last moment something happened that should show the caret solid.
     activity: Option<Instant>,
+    /// The card's laid-out size (positioned at draw time, by the caret).
+    overlay_node: Option<layout::Node>,
 }
 
 impl State {
@@ -631,6 +663,24 @@ impl<Message> LiveEditor<'_, Message> {
         Some(Rectangle::new(Point::new(l.x + x, l.y + top), Size::new(1.5, height)))
     }
 
+    /// Offset to lay the card out at, and the rectangle it then covers, when it should be showing: below the caret (above
+    /// it where there is no room below), inside the editor, and not at all while the caret is scrolled out of sight.
+    fn overlay_geometry(&self, state: &State, bounds: Rectangle) -> Option<(iced::Vector, Rectangle)> {
+        self.overlay.as_ref()?;
+        let node = state.overlay_node.as_ref()?;
+        let caret = self.caret_rect(state, self.doc.selection().head)?;
+        let at = Point::new(bounds.x + self.padding.left + caret.x, bounds.y + self.padding.top + caret.y - state.scroll);
+        if at.y + caret.height < bounds.y || at.y > bounds.y + bounds.height {
+            return None;
+        }
+        let size = node.size();
+        let x = at.x.min(bounds.x + bounds.width - size.width - 8.0).max(bounds.x + 8.0);
+        let below = at.y + caret.height + 4.0;
+        let y = if below + size.height <= bounds.y + bounds.height { below } else { (at.y - size.height - 4.0).max(bounds.y) };
+        let origin = Point::new(x, y);
+        Some((origin - node.bounds().position(), Rectangle::new(origin, size)))
+    }
+
     /// Where Up or Down from the caret lands, keeping the horizontal position.
     fn vertical_target(&self, state: &mut State, up: bool) -> Option<usize> {
         let rect = self.caret_rect(state, self.doc.selection().head)?;
@@ -681,6 +731,14 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
 
     fn size(&self) -> Size<Length> {
         Size::new(self.width, self.height)
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        self.overlay.iter().map(|card| Tree::new(card.as_widget())).collect()
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(self.overlay.as_slice());
     }
 
     fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
@@ -809,6 +867,12 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         } else {
             width
         };
+        // The card of choices, laid out where it can be as wide as it likes and as tall as the editor is.
+        let room = Size::new(OVERLAY_WIDTH.min((width - 16.0).max(80.0)), (view_h - 16.0).max(60.0));
+        state.overlay_node = match (self.overlay.as_mut(), tree.children.get_mut(0)) {
+            (Some(card), Some(child)) => Some(card.as_widget_mut().layout(child, renderer, &layout::Limits::new(Size::ZERO, room))),
+            _ => None,
+        };
         layout::Node::new(Size::new(width, view_h))
     }
 
@@ -816,7 +880,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         &self,
         tree: &Tree,
         renderer: &mut iced::Renderer,
-        _theme: &Theme,
+        theme: &Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
@@ -1012,7 +1076,14 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
                 );
             }
         });
-        let _ = cursor;
+        // The card of choices goes in a layer of its own, so that it paints over the text beneath it.
+        if let Some((offset, _)) = self.overlay_geometry(state, bounds)
+            && let (Some(card), Some(node), Some(child)) = (self.overlay.as_ref(), state.overlay_node.as_ref(), tree.children.first())
+        {
+            renderer.with_layer(*viewport, |renderer| {
+                card.as_widget().draw(child, renderer, theme, style, Layout::with_offset(offset, node), cursor, viewport);
+            });
+        }
     }
 
     fn update(
@@ -1024,7 +1095,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
-        _viewport: &Rectangle,
+        viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
         if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_) | mouse::Event::CursorMoved { .. }) | Event::Keyboard(_)) {
@@ -1041,6 +1112,41 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
 
         if let Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
             state.modifiers = *m;
+        }
+
+        // The card of choices for a link being written: the arrows, Enter, Tab and Escape move among them (the editor keeps
+        // the keyboard), and the card gets every other event first, as the reader's floating cards do: its wheel scrolls
+        // it, a click on a row is its own, and nothing pressed on it reaches the text.
+        if let Some((offset, rect)) = self.overlay_geometry(state, bounds)
+            && let Some(on) = &self.on_completion
+            && let (Some(card), Some(node), Some(child)) = (self.overlay.as_mut(), state.overlay_node.clone(), tree.children.get_mut(0))
+        {
+            if let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event
+                && state.focused
+                && let Some(done) = {
+                    use keyboard::key::Named;
+                    match key.as_ref() {
+                        _ if modifiers.command() || modifiers.alt() || modifiers.control() => None,
+                        keyboard::Key::Named(Named::ArrowDown) => Some(CompletionEvent::Move(1)),
+                        keyboard::Key::Named(Named::ArrowUp) => Some(CompletionEvent::Move(-1)),
+                        keyboard::Key::Named(Named::Enter | Named::Tab) => Some(CompletionEvent::Accept),
+                        keyboard::Key::Named(Named::Escape) => Some(CompletionEvent::Dismiss),
+                        _ => None,
+                    }
+                }
+            {
+                shell.publish(on(done));
+                shell.capture_event();
+                return;
+            }
+            card.as_widget_mut().update(child, event, Layout::with_offset(offset, &node), cursor, renderer, clipboard, shell, viewport);
+            if shell.is_event_captured() {
+                return;
+            }
+            if matches!(event, Event::Mouse(e) if !matches!(e, mouse::Event::WheelScrolled { .. })) && cursor.is_over(rect) {
+                shell.capture_event();
+                return;
+            }
         }
 
         // Tell the input method where the caret is, so candidate windows sit beside it.
@@ -1346,6 +1452,12 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
     ) -> mouse::Interaction {
         let state = tree.state.downcast_ref::<State>();
         let bounds = layout.bounds();
+        if let Some((offset, rect)) = self.overlay_geometry(state, bounds)
+            && cursor.is_over(rect)
+            && let (Some(card), Some(node), Some(child)) = (self.overlay.as_ref(), state.overlay_node.as_ref(), tree.children.first())
+        {
+            return card.as_widget().mouse_interaction(child, Layout::with_offset(offset, node), cursor, _viewport, _renderer);
+        }
         if !cursor.is_over(bounds) {
             return mouse::Interaction::None;
         }
@@ -1365,7 +1477,17 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         }
     }
 
-    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, _renderer: &iced::Renderer, operation: &mut dyn Operation) {
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
+        if let Some((offset, _)) = self.overlay_geometry(tree.state.downcast_ref::<State>(), layout.bounds())
+            && let Some(node) = tree.state.downcast_ref::<State>().overlay_node.clone()
+            && let (Some(card), Some(child)) = (self.overlay.as_mut(), tree.children.get_mut(0))
+        {
+            // (The card's scrollable can be told where to scroll.)
+            operation.container(None, layout.bounds());
+            operation.traverse(&mut |operation| {
+                card.as_widget_mut().operate(child, Layout::with_offset(offset, &node), renderer, operation);
+            });
+        }
         if self.read_only {
             // Not a place to type: just report the text it shows.
             operation.text(self.id.as_ref(), layout.bounds(), self.doc.source());
@@ -1525,7 +1647,7 @@ mod tests {
 
     #[test]
     fn a_rendered_link_wraps_as_one_piece_at_every_width() {
-        let line = "aaaaaaaaaaaa [[John 3:16@KJV]] bbbb [[Notes on Nicodemus]] tail";
+        let line = "aaaaaaaaaaaa [[@John 3:16@KJV]] bbbb [[Notes on Nicodemus]] tail";
         let blocks = md_editor::blocks::parse(line);
         let rendered = render(line, &blocks[0], &Reveal::none());
         let spans = spans_for(&rendered, 17.0, &Palette::for_theme(&Theme::Dark), fonts::UI);
@@ -1569,7 +1691,7 @@ mod tests {
 
     #[test]
     fn underlines_on_a_line_share_one_depth_whatever_the_size_of_each_run() {
-        let line = "[[John 3:3@KJV]]";
+        let line = "[[@John 3:3@KJV]]";
         let blocks = md_editor::blocks::parse(line);
         let r = render(line, &blocks[0], &Reveal::none());
         let small = r.runs.iter().find(|x| x.text == "KJV").unwrap().style.scale;

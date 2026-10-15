@@ -89,10 +89,10 @@ impl Spec {
     /// The link as it is written in a note, for "Copy link".
     pub fn link_text(&self) -> String {
         match self {
-            Spec::Verse { range, module: None } => format!("[[{range}]]"),
-            Spec::Verse { range, module: Some(m) } => format!("[[{range}@{m}]]"),
-            Spec::Word { key } => format!("[[sword:Strongs/{key}]]"),
-            Spec::Dict { module, key } => format!("[[sword:{module}/{key}]]"),
+            Spec::Verse { range, module: None } => format!("[[@{range}]]"),
+            Spec::Verse { range, module: Some(m) } => format!("[[@{range}@{m}]]"),
+            Spec::Word { key } => format!("[[%{key}]]"),
+            Spec::Dict { module, key } => format!("[{module}/{key}](sword:{module}/{key})"),
             Spec::Note(name) => format!("[[{name}]]"),
             Spec::Web(url) => url.clone(),
         }
@@ -116,10 +116,11 @@ mod tests {
     #[test]
     fn links_are_copied_as_they_are_written_in_notes() {
         let range = RefRange::parse("John 3:16").unwrap();
-        assert_eq!(Spec::Verse { range, module: None }.link_text(), "[[John 3:16]]");
-        assert_eq!(Spec::Verse { range, module: Some("LSB".into()) }.link_text(), "[[John 3:16@LSB]]");
+        assert_eq!(Spec::Verse { range, module: None }.link_text(), "[[@John 3:16]]");
+        assert_eq!(Spec::Verse { range, module: Some("LSB".into()) }.link_text(), "[[@John 3:16@LSB]]");
         assert_eq!(Spec::Note("Creation".into()).link_text(), "[[Creation]]");
-        assert_eq!(Spec::Dict { module: "StrongsGreek".into(), key: "G25".into() }.link_text(), "[[sword:StrongsGreek/G25]]");
+        assert_eq!(Spec::Dict { module: "StrongsGreek".into(), key: "G25".into() }.link_text(), "[StrongsGreek/G25](sword:StrongsGreek/G25)");
+        assert_eq!(Spec::Word { key: "G25".into() }.link_text(), "[[%G25]]");
     }
 
     #[test]

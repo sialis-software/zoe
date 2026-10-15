@@ -127,12 +127,23 @@ the app where possible.
 
 | Purpose | Syntax | Notes |
 |---|---|---|
-| Verse / range / chapter | `[[John 3:16]]`, `[[Jn 3:16-18]]`, `[[Rom 8]]` | Parsed by a lenient reference parser; stored as written, indexed as OSIS (`John.3.16`). Display text via `[[John 3:16\|this verse]]`. One range per link. |
-| Another document | `[[Nicodemus]]` / `[[notes/Nicodemus]]` | Wikilink, resolved by title/alias/path; Obsidian-compatible. |
-| SWORD non-Bible entry | `[[sword:Module/key]]` e.g. `[[sword:StrongsGreek/G5547]]` | Dictionary key or GenBook tree path. |
-| Verse in a specific module | `[[John 3:16@KJV]]` | Pins translation; otherwise reader's default. |
-| Quote verse text (transclusion) | `![[John 3:16]]` | Rendered live from the module — **text is never copied into the file**, avoiding licensing and staleness. |
+| Verse / range / chapter | `[[@John 3:16]]`, `[[@Jn 3:16-18]]`, `[[@Rom 8]]` | The `@` marks a passage. Parsed by a lenient reference parser; stored as written, indexed as OSIS (`John.3.16`). Display text via `[[@John 3:16\|this verse]]`. One range per link. |
+| Another document | `[[Nicodemus]]` / `[[notes/Nicodemus]]` | Wikilink, resolved by title/alias/path; Obsidian-compatible. With no marker a link is always a note, whatever it is spelt like (`[[John 3]]` is the note called "John 3"). |
+| Strong's entry | `[[%G5547]]`, `[[%H215\|light]]` | The `%` marks a dictionary entry: a letter and up to four digits, opened in whichever installed dictionary has it. |
+| SWORD non-Bible entry | `[Module/key](sword:Module/key)` e.g. `[Webster/grace](sword:Webster/grace)` | An ordinary markdown link with a `sword:` address: dictionary key or GenBook tree path. Not a wikilink. |
+| Verse in a specific module | `[[@John 3:16@KJV]]` | Pins translation; otherwise reader's default. |
+| Quote verse text (transclusion) | `![[@John 3:16]]` | Rendered live from the module — **text is never copied into the file**, avoiding licensing and staleness. |
 | Plain markdown link | `[x](https://…)`, `[x](../notes/a.md)` | Standard; `bible:John.3.16` accepted as a URI scheme in portable exports. |
+
+A note's name may not begin with `%` or `@`: they begin the links above, so no note can be mistaken for a passage
+or an entry, and a note may be called anything else, however much it looks like a reference. The editor offers
+choices as a link is written: after `[[` the notes, after `[[%` the Strong's entries by number, and after `[[@`
+the passage, step by step (the book, then the chapter, then the verse, then a Bible after a second `@`); the
+arrow keys choose, Enter or Tab takes, Escape puts the list away.
+
+Vaults made before the markers had plain `[[John 3:16]]` and `[[sword:…]]` links. The first time this app opens such
+a vault of its own it writes them in the new form, once, keeping the old files in a folder beside the index (a vault
+that is another program's is left alone).
 
 The reference parser is the single source of truth for turning prose into links. It also
 **auto-detects bare references** in prose (`see John 3:16`) as a *suggestion*
@@ -148,11 +159,11 @@ The reference parser is the single source of truth for turning prose into links.
   prefix, so reading a module's own `osisRef`s should go through the same parser.
 - **Interchange URL: `sword://MODULE/OSISREF`** (the form Xiphos opens, e.g. `sword://ESV/Gen.1.1`).
   Not a written specification, only a convention, but it is the nearest thing to a cross-app
-  link in this ecosystem. `[[John 3:16@KJV]]` maps onto it directly; support it for copy-as-link
+  link in this ecosystem. `[[@John 3:16@KJV]]` maps onto it directly; support it for copy-as-link
   and for being opened by the OS.
-- **What we write by hand** (no standard exists): the human-typed form `[[John 3:16]]` (the
+- **What we write by hand** (no standard exists): the human-typed form `[[@John 3:16]]` (the
   `[[...]]` wrapper is the wiki/Obsidian convention; the book names and abbreviations are ours),
-  the `@MODULE` pin, `[[sword:Module/key]]`, and the anchor of a margin mark. The anchor's
+  the `@MODULE` pin, `[[%G5547]]`, `[x](sword:Module/key)`, and the anchor of a margin mark. The anchor's
   `quote`/`prefix`/`suffix` are the W3C Web Annotation *TextQuoteSelector*'s
   `exact`/`prefix`/`suffix` under friendlier names.
 - **Not adopted:** USFM/USX book codes (`JHN`, `MAT`) differ from OSIS ids; relevant only when

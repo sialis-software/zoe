@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn file_round_trip_keeps_awkward_characters() {
         let mut m = mark("John 3:16-17", "He said, \"Go\" \\ now: here", "a: b", "line\nbreak");
-        m.body = "A **note** with [[John 3:16]].".into();
+        m.body = "A **note** with [[@John 3:16]].".into();
         m.tags = vec!["promise".into(), "topic/grace".into()];
         let text = m.to_markdown();
         assert!(text.starts_with("---\ntype: margin\nanchor: John.3.16-John.3.17\n"), "{text}");

@@ -204,7 +204,8 @@ pub fn file_name(title: &str) -> String {
         .chars()
         .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { ' ' } else { c })
         .collect();
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ").trim_matches('.').trim().to_string()
+    // (A name cannot begin with `%` or `@`: those begin links to dictionary entries and to passages.)
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ").trim_matches('.').trim_start_matches(['%', '@']).trim().to_string()
 }
 
 /// The path and text for a new note from `template`, with the title the person gave (none, or

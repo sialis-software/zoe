@@ -130,15 +130,15 @@ fn numbers_21() -> Chapter {
 const NOTES: [(&str, &str); 3] = [
     (
         "notes/Nicodemus.md",
-        "---\ntitle: Notes on Nicodemus\ntags: [john, new-birth]\n---\n\n# Nicodemus\n\nHe came by night ([[John 3:2]]). Jesus answers a question he never asked, in [[John 3:3@KJV]]:\n\n![[John 3:3-5@KJV]]\n\n## Questions\n\n- [ ] What does **born again** mean for Nicodemus, a teacher?\n- [x] Compare with [[Num 21:9]] and the bronze serpent.\n- [ ] Look up `agapao` in [[sword:StrongsGreek/G25]].\n\nSee also [[Memory verses]] and [[Prayer list|my prayers]].\n",
+        "---\ntitle: Notes on Nicodemus\ntags: [john, new-birth]\n---\n\n# Nicodemus\n\nHe came by night ([[@John 3:2]]). Jesus answers a question he never asked, in [[@John 3:3@KJV]]:\n\n![[@John 3:3-5@KJV]]\n\n## Questions\n\n- [ ] What does **born again** mean for Nicodemus, a teacher?\n- [x] Compare with [[@Num 21:9]] and the bronze serpent.\n- [ ] Look up `agapao` in [[%G25]].\n\nSee also [[Memory verses]] and [[Prayer list|my prayers]].\n",
     ),
     (
         "notes/Memory verses.md",
-        "# Memory verses\n\n1. [[John 3:16]] — learned with the kids, October.\n2. [[Ps 23:1-3@KJV]] — the shepherd psalm.\n\nBack to [[Nicodemus]]. This link goes nowhere yet: [[Unwritten note]].\n",
+        "# Memory verses\n\n1. [[@John 3:16]] — learned with the kids, October.\n2. [[@Ps 23:1-3@KJV]] — the shepherd psalm.\n\nBack to [[Nicodemus]]. This link goes nowhere yet: [[Unwritten note]].\n",
     ),
     (
         "prayers/Prayer list.md",
-        "---\ntype: prayer\ntags: [prayer]\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[Ps 23]]\n",
+        "---\ntype: prayer\ntags: [prayer]\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[@Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[@Ps 23]]\n",
     ),
 ];
 
@@ -247,7 +247,7 @@ impl StudyBackend for MockBackend {
             sample_mark_with(&john, "a001", 16, "so loved the world", MarkStyle::Highlight, "#F5D90A", "promise",
                 "The heart of the gospel. Learn this one by heart."),
             sample_mark_with(&john, "a002", 16, "everlasting life", MarkStyle::Underline, "#4DA3FF", "promise",
-                "Eternal life begins now, not only after death. Compare [[John 17:3]]."),
+                "Eternal life begins now, not only after death. Compare [[@John 17:3]]."),
             sample_mark_with(&john, "a003", 3, "born again", MarkStyle::Highlight, "#FF7AB6", "prayer",
                 "\"Again\" can also mean \"from above\". Nicodemus hears the first; Jesus may mean both."),
             sample_mark(&psalm, "a004", 1, "is my shepherd", MarkStyle::Highlight, "#5FD38D", "growth"),

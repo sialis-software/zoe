@@ -29,7 +29,7 @@ const MARKS: &[SeedMark] = &[
         body: "The heart of the gospel. Learn this one by heart." },
     SeedMark { id: "s002", book: Book::JOHN, chapter: 3, verse: 16, quotes: &["eternal life", "everlasting life"],
         style: MarkStyle::Underline, color: "#4DA3FF", tag: "promise",
-        body: "Eternal life begins now, not only after death. Compare [[John 17:3]]." },
+        body: "Eternal life begins now, not only after death. Compare [[@John 17:3]]." },
     SeedMark { id: "s003", book: Book::JOHN, chapter: 3, verse: 3, quotes: &["born anew", "born again", "born from above"],
         style: MarkStyle::Highlight, color: "#FF7AB6", tag: "prayer",
         body: "\"Again\" can also mean \"from above\". Nicodemus hears the first; Jesus may mean both." },
@@ -47,26 +47,26 @@ const MARKS: &[SeedMark] = &[
         body: "Add to the [[Prayer list]] instead of carrying it." },
     SeedMark { id: "s009", book: Book::JOHN, chapter: 1, verse: 1, quotes: &["the Word was God"],
         style: MarkStyle::None, color: "#FFFFFF", tag: "question",
-        body: "What does Word (*logos*) carry for a Greek reader? See [[sword:StrongsGreek/G3056]]." },
+        body: "What does Word (*logos*) carry for a Greek reader? See [[%G3056]]." },
 ];
 
 /// Sample notes. `{module}` is the Bible they pin their quotes to.
 const NOTES: &[(&str, &str)] = &[
     (
         "notes/Nicodemus.md",
-        "---\ntitle: Notes on Nicodemus\ntags: [john, new-birth]\n---\n\n# Nicodemus\n\nHe came by night ([[John 3:2]]). Jesus answers a question he never asked, in [[John 3:3@{module}]]:\n\n![[John 3:3-5@{module}]]\n\n## Questions\n\n- [ ] What does **born again** mean for Nicodemus, a teacher?\n- [x] Compare with [[Num 21:9]] and the bronze serpent.\n- [ ] Look up `agapao` in [[sword:StrongsGreek/G25]].\n\nSee also [[Memory verses]] and [[Prayer list|my prayers]].\n",
+        "---\ntitle: Notes on Nicodemus\ntags: [john, new-birth]\n---\n\n# Nicodemus\n\nHe came by night ([[@John 3:2]]). Jesus answers a question he never asked, in [[@John 3:3@{module}]]:\n\n![[@John 3:3-5@{module}]]\n\n## Questions\n\n- [ ] What does **born again** mean for Nicodemus, a teacher?\n- [x] Compare with [[@Num 21:9]] and the bronze serpent.\n- [ ] Look up `agapao` in [[%G25]].\n\nSee also [[Memory verses]] and [[Prayer list|my prayers]].\n",
     ),
     (
         "notes/Memory verses.md",
-        "# Memory verses\n\n1. [[John 3:16]] — learned with the kids, October.\n2. [[Ps 23:1-3@{module}]] — the shepherd psalm.\n3. [[Rom 8:28]]\n\nBack to [[Nicodemus]]. This link goes nowhere yet: [[Unwritten note]].\n",
+        "# Memory verses\n\n1. [[@John 3:16]] — learned with the kids, October.\n2. [[@Ps 23:1-3@{module}]] — the shepherd psalm.\n3. [[@Rom 8:28]]\n\nBack to [[Nicodemus]]. This link goes nowhere yet: [[Unwritten note]].\n",
     ),
     (
         "notes/Creation.md",
-        "# Creation\n\n[[Gen 1:1]] opens everything. Compare [[John 1:1-3]]: the Word was there \"in the beginning\" too.\n\n- [ ] Read [[Gen 1]] aloud, slowly\n- [ ] Does [[Ps 33:6]] say the same?\n",
+        "# Creation\n\n[[@Gen 1:1]] opens everything. Compare [[@John 1:1-3]]: the Word was there \"in the beginning\" too.\n\n- [ ] Read [[@Gen 1]] aloud, slowly\n- [ ] Does [[@Ps 33:6]] say the same?\n",
     ),
     (
         "prayers/Prayer list.md",
-        "---\ntype: prayer\ntags: [prayer]\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[Ps 23]], [[Phil 4:6-7]]\n",
+        "---\ntype: prayer\ntags: [prayer]\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[@Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[@Ps 23]], [[@Phil 4:6-7]]\n",
     ),
 ];
 
@@ -211,6 +211,6 @@ mod tests {
     fn notes_pin_to_the_chosen_module() {
         let notes = seed_notes("ASV");
         let nic = &notes.iter().find(|(p, _)| p.ends_with("Nicodemus.md")).unwrap().1;
-        assert!(nic.contains("![[John 3:3-5@ASV]]") && !nic.contains("{module}"));
+        assert!(nic.contains("![[@John 3:3-5@ASV]]") && !nic.contains("{module}"));
     }
 }

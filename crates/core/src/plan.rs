@@ -257,7 +257,7 @@ impl Plan {
             }
             out.push_str("\n\n");
             for span in spans(&day.passages, false) {
-                out.push_str(&format!("- [[{span}]]\n"));
+                out.push_str(&format!("- [[@{span}]]\n"));
             }
         }
         out
@@ -323,7 +323,7 @@ impl Plan {
             if !links.is_empty() {
                 text.push_str("\n## Reading\n\n");
                 for link in links {
-                    text.push_str(&format!("- [[{link}]]\n"));
+                    text.push_str(&format!("- [[@{link}]]\n"));
                 }
             }
             files.push((format!("{folder}/{}.md", file_key(day.key, width)), text));
@@ -622,7 +622,9 @@ fn unlink(text: &str) -> String {
         let Some(close) = rest[open..].find("]]") else { break };
         out.push_str(&rest[..open]);
         let inner = &rest[open + 2..open + close];
-        out.push_str(inner.split('|').next().unwrap_or(inner));
+        let target = inner.split('|').next().unwrap_or(inner);
+        // (A passage's link has its `@` marker, which is not part of what is read.)
+        out.push_str(target.strip_prefix('@').unwrap_or(target));
         rest = &rest[open + close + 2..];
     }
     out.push_str(rest);
@@ -1051,7 +1053,7 @@ mod tests {
         plan.days.iter().map(|d| d.passages.clone()).collect()
     }
 
-    const SEQUENTIAL: &str = "---\ntype: reading-plan\nname: Gospels in 30 days\nstart: 2026-01-01        # optional\ntags: [reading-plan]\n---\n# Gospels in 30 days\n\n## Day 1\n\n- [[Matthew 1]]\n- [[Matthew 2]]\n\n## Day 2\n\n- Matthew 3-4; Psalm 1\n";
+    const SEQUENTIAL: &str = "---\ntype: reading-plan\nname: Gospels in 30 days\nstart: 2026-01-01        # optional\ntags: [reading-plan]\n---\n# Gospels in 30 days\n\n## Day 1\n\n- [[@Matthew 1]]\n- [[@Matthew 2]]\n\n## Day 2\n\n- Matthew 3-4; Psalm 1\n";
 
     #[test]
     fn the_chapter_table_has_every_book_and_the_known_counts() {
@@ -1102,7 +1104,7 @@ mod tests {
 
     #[test]
     fn readings_in_a_bullet_are_split_linked_or_plain_and_notes_are_dropped() {
-        let plan = Plan::parse("# P\n\n## Day 1\n\n- Genesis 1-3; [[Matthew 1]], Psalm 119:1-88 — the long one\n- * x\n* [[1 Cor 13|love]] - the chapter\n- Gen 1:1\n");
+        let plan = Plan::parse("# P\n\n## Day 1\n\n- Genesis 1-3; [[@Matthew 1]], Psalm 119:1-88 — the long one\n- * x\n* [[@1 Cor 13|love]] - the chapter\n- Gen 1:1\n");
         let got: Vec<String> = plan.days[0].passages.iter().map(|p| p.to_string()).collect();
         assert_eq!(got, ["Genesis 1", "Genesis 2", "Genesis 3", "Matthew 1", "Psalms 119:1-88", "1 Corinthians 13", "Genesis 1:1"]);
         assert_eq!(plan.problems.len(), 1, "{:?}", plan.problems);
@@ -1166,7 +1168,7 @@ mod tests {
             assert_eq!(Plan::parse(&text).render(), text, "rendering is stable");
         }
         let text = Plan::parse(SEQUENTIAL).render();
-        assert!(text.starts_with("---\ntype: reading-plan\nname: Gospels in 30 days\nstart: 2026-01-01\ntags: [reading-plan]\n---\n# Gospels in 30 days\n\n## Day 1\n\n- [[Matthew 1]]\n- [[Matthew 2]]\n\n## Day 2\n\n- [[Matthew 3]]\n"), "{text}");
+        assert!(text.starts_with("---\ntype: reading-plan\nname: Gospels in 30 days\nstart: 2026-01-01\ntags: [reading-plan]\n---\n# Gospels in 30 days\n\n## Day 1\n\n- [[@Matthew 1]]\n- [[@Matthew 2]]\n\n## Day 2\n\n- [[@Matthew 3]]\n"), "{text}");
     }
 
     #[test]
@@ -1318,7 +1320,7 @@ mod tests {
         assert_eq!(files[0].0, "library/Gospels in 30 days/Gospels in 30 days.md");
         assert_eq!(files[0].1, "---\ntype: plan\nname: Gospels in 30 days\nkind: sequential\nstart: 2026-01-01\ntags: [plan]\n---\n# Gospels in 30 days\n");
         assert_eq!(files[1].0, "library/Gospels in 30 days/Day 1.md");
-        assert_eq!(files[1].1, "---\ntype: plan-day\nplan: Gospels in 30 days\nday: 1\nreadings: [Matthew 1-2]\ntags: [plan-day]\n---\n# Day 1\n\n## Reading\n\n- [[Matthew 1]]\n- [[Matthew 2]]\n");
+        assert_eq!(files[1].1, "---\ntype: plan-day\nplan: Gospels in 30 days\nday: 1\nreadings: [Matthew 1-2]\ntags: [plan-day]\n---\n# Day 1\n\n## Reading\n\n- [[@Matthew 1]]\n- [[@Matthew 2]]\n");
         let long = Plan::parse(&(1..=12).map(|n| format!("## Day {n}\n\n- Gen {n}\n\n")).collect::<String>());
         let paths: Vec<String> = long.to_files().into_iter().skip(1).map(|f| f.0).collect();
         assert_eq!(paths[0], "library/Plan/Day 01.md");

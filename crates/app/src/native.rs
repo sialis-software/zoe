@@ -97,10 +97,9 @@ mod imp {
             '[' => Code::BracketLeft,
             ']' => Code::BracketRight,
             ',' => Code::Comma,
-            '1' => Code::Digit1,
-            '2' => Code::Digit2,
-            '3' => Code::Digit3,
-            '4' => Code::Digit4,
+            's' => Code::KeyS,
+            'm' => Code::KeyM,
+            'r' => Code::KeyR,
             _ => return None,
         };
         let mut mods = Modifiers::META;

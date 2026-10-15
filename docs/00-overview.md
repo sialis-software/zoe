@@ -62,8 +62,8 @@ vocabulary: **canonical scripture references** (OSIS-style IDs like `John.3.16`)
 
 ```
  SWORD modules (read-only)            Vault of markdown (read-write)
- Bibles, commentaries, lexicons  <--  [[John 3:16]]  verse links
- general books (GenBook)         <--  [[sword:Josephus/War/1/1]] doc links
+ Bibles, commentaries, lexicons  <--  [[@John 3:16]]  verse links, [[%G25]] entries
+ general books (GenBook)         <--  [War](sword:Josephus/War/1/1) doc links
         |                                   |
         +--------- reference index ---------+
               verse -> notes, notes -> verses, word -> verses

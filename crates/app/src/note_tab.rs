@@ -4,7 +4,7 @@
 //! Each note tab holds one document.
 
 use crate::bible_tab::{BibleTab, start_of_note};
-use crate::live_editor::live_editor;
+use crate::live_editor::{CompletionEvent, live_editor};
 use crate::history::History;
 use crate::opening::Spec;
 use crate::palette::Palette;
@@ -14,6 +14,7 @@ use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, rule, scrollable, space, stack, text,
     text_input,
 };
+use iced::widget::operation::{AbsoluteOffset, scroll_to};
 use iced::{Element, Length, Task, Theme};
 use md_editor::{Action as EditAction, Document, Vim, VimKey, VimMode};
 use std::collections::BTreeSet;
@@ -27,6 +28,11 @@ use study_core::templates;
 
 /// Height of a header bar control: a pick list in the Bible tab's toolbar is this tall, so the
 /// bars of the two tab types match.
+/// Height of a row of the card of choices for a link, relative to the notes' text size; how many rows show at once; how wide.
+const CHOICE_ROW: f32 = 1.7;
+const CHOICES_SHOWN: usize = 8;
+const CHOICES_WIDTH: f32 = 420.0;
+
 const CONTROL_HEIGHT: f32 = 31.0;
 /// Where the selector panel starts: just under the selector (its padding, its height, a gap).
 const PANEL_TOP: f32 = 8.0 + CONTROL_HEIGHT + 3.0;
@@ -104,6 +110,10 @@ impl fmt::Display for NoteChoice {
 #[derive(Debug, Clone)]
 pub enum NoteMsg {
     Action(EditAction),
+    /// Something done with the list of choices for the link being written.
+    Completion(CompletionEvent),
+    /// The card of choices was scrolled this far.
+    ChoicesScrolled(f32),
     /// A key the Vim bindings take (see `Settings::vim_mode`).
     Vim(VimKey),
     /// Open the link under the editor cursor, or one clicked in the text.
@@ -457,6 +467,12 @@ pub struct NoteTab {
     /// What a value box shows while what is typed is not (yet) a value of its type: a number
     /// half typed, a list with its comma still to be followed. By place in the properties.
     pub drafts: BTreeMap<usize, String>,
+    /// The choices for the link being written at the caret, if there is one (see `completion`).
+    pub completion: Option<crate::completion::Completion>,
+    /// Where the choices were put away with Escape: they stay away until the link is left or changed.
+    completion_dismissed: Option<usize>,
+    /// How far the card of choices is scrolled.
+    pub choices_offset: f32,
     /// The new property being named.
     pub new_key: String,
     pub new_type: PropType,
@@ -624,6 +640,9 @@ impl NoteTab {
             scroll: 0.0,
             mark_colors: false,
             drafts: BTreeMap::new(),
+            completion: None,
+            completion_dismissed: None,
+            choices_offset: 0.0,
             new_key: String::new(),
             new_type: PropType::Text,
             adding: false,
@@ -760,6 +779,149 @@ impl NoteTab {
         sh.mark_index_of(&self.path)
     }
 
+    /// Work out the choices for the link being written (none in Vim's other modes, in the log, in the library, or with a
+    /// selection).
+    fn refresh_completion(&mut self, sh: &Shared) -> Task<NoteMsg> {
+        let before = self.completion.as_ref().map(|c| (c.from, c.items.clone()));
+        let head = self.doc.selection().head;
+        // (With Vim bindings, while typing: in Insert mode.)
+        let typing = !sh.settings.vim_mode || self.vim.mode() == VimMode::Insert;
+        let wanted = typing && !self.is_log() && !self.read_only() && self.doc.selection().is_empty();
+        let found = if wanted { crate::completion::complete(sh, self.doc.source(), head, None) } else { None };
+        self.completion = match found {
+            Some(mut found) if self.completion_dismissed != Some(found.from) => {
+                // The same list, still: the choice stays where it was.
+                if let Some(old) = self.completion.as_ref().filter(|old| old.from == found.from && old.items == found.items) {
+                    found.selected = old.selected;
+                }
+                Some(found)
+            }
+            Some(_) => None,
+            None => {
+                self.completion_dismissed = None;
+                None
+            }
+        };
+        // A new list begins at its top.
+        if self.completion.as_ref().map(|c| (c.from, c.items.clone())) != before && self.choices_offset != 0.0 {
+            self.choices_offset = 0.0;
+            return scroll_to(self.choices_id(), AbsoluteOffset { x: 0.0, y: 0.0 });
+        }
+        Task::none()
+    }
+
+    pub fn choices_id(&self) -> iced::widget::Id {
+        iced::widget::Id::from(format!("choices-{}", self.id))
+    }
+
+    /// The card of choices for the link being written, to float by the caret: a scrolling list of rows (the one
+    /// that will be taken lit), as the reader's floating cards are elements of their own.
+    fn choices_card<'a>(&'a self, sh: &Shared) -> Option<Element<'a, NoteMsg>> {
+        let list = self.completion.as_ref()?;
+        let size = sh.settings.notes_size;
+        let row_height = size * CHOICE_ROW;
+        let mut rows = column![];
+        for (i, item) in list.items.iter().enumerate() {
+            let chosen = i == list.selected;
+            let words = row![
+                text(item.label.clone()).size(size * 0.92),
+                space::horizontal(),
+                text(item.detail.clone()).size(size * 0.78).style(text::secondary),
+            ]
+            .spacing(12)
+            .align_y(iced::Center);
+            rows = rows.push(
+                button(words)
+                    .width(Length::Fill)
+                    .height(row_height)
+                    .padding([0, 10])
+                    .style(move |theme: &Theme, status| {
+                        let p = theme.extended_palette();
+                        let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: (chosen || lit).then(|| iced::Color { a: if chosen { 0.28 } else { 0.14 }, ..p.primary.base.color }.into()),
+                            text_color: p.background.base.text,
+                            border: iced::Border { radius: 4.0.into(), ..iced::Border::default() },
+                            ..button::Style::default()
+                        }
+                    })
+                    .on_press(NoteMsg::Completion(CompletionEvent::Pick(i))),
+            );
+        }
+        let shown = list.items.len().min(CHOICES_SHOWN) as f32 * row_height;
+        let scrolling = scrollable(rows)
+            .id(self.choices_id())
+            .on_scroll(|v| NoteMsg::ChoicesScrolled(v.absolute_offset().y))
+            .height(Length::Fixed(shown));
+        Some(container(scrolling).padding(4).width(Length::Fixed(CHOICES_WIDTH)).style(crate::popup_style).into())
+    }
+
+    /// The link just closed with `]]` put right in its capitals and spacing (see `completion::correct`).
+    fn put_link_right(&mut self, sh: &Shared) -> bool {
+        if self.is_log() || self.read_only() {
+            return false;
+        }
+        let caret = self.doc.selection().head;
+        let Some((range, new)) = crate::completion::correct(sh, self.doc.source(), caret) else { return false };
+        let delta = new.len() as isize - range.len() as isize;
+        self.doc.perform(EditAction::Select(range));
+        self.doc.perform(EditAction::Insert(new));
+        self.doc.perform(EditAction::SetCaret { offset: (caret as isize + delta) as usize, extend: false });
+        true
+    }
+
+    /// What is done with the choices: the arrows move among them, Enter or Tab takes one, Escape puts them away.
+    fn complete(&mut self, sh: &mut Shared, event: CompletionEvent) -> Task<NoteMsg> {
+        let Some(list) = self.completion.as_mut() else { return Task::none() };
+        let len = list.items.len() as isize;
+        match event {
+            CompletionEvent::Move(by) => {
+                list.selected = (list.selected as isize + by).rem_euclid(len.max(1)) as usize;
+                // The row chosen is kept in the card's view.
+                let row = sh.settings.notes_size * CHOICE_ROW;
+                let (top, view) = (list.selected as f32 * row, list.items.len().min(CHOICES_SHOWN) as f32 * row);
+                let at = self.choices_offset;
+                let wanted = if top < at { Some(top) } else if top + row > at + view { Some(top + row - view) } else { None };
+                match wanted {
+                    Some(y) => {
+                        self.choices_offset = y;
+                        scroll_to(self.choices_id(), AbsoluteOffset { x: 0.0, y })
+                    }
+                    None => Task::none(),
+                }
+            }
+            CompletionEvent::Dismiss => {
+                self.completion_dismissed = Some(list.from);
+                self.completion = None;
+                Task::none()
+            }
+            CompletionEvent::Pick(i) => {
+                list.selected = i.min(list.items.len().saturating_sub(1));
+                self.complete(sh, CompletionEvent::Accept)
+            }
+            CompletionEvent::Accept => {
+                let (from, item) = (list.from, list.items[list.selected].clone());
+                let head = self.doc.selection().head;
+                self.doc.perform(EditAction::Select(from..head));
+                self.doc.perform(EditAction::Insert(item.insert));
+                if item.close {
+                    // Past the closing brackets (made as `[[` was typed, or now).
+                    let end = self.doc.selection().head;
+                    if self.doc.source()[end..].starts_with("]]") {
+                        self.doc.perform(EditAction::SetCaret { offset: end + 2, extend: false });
+                    } else {
+                        self.doc.perform(EditAction::Insert("]]".into()));
+                    }
+                }
+                sh.notes.insert(self.path.clone(), self.doc.source().to_string());
+                let path = self.path.clone();
+                sh.sync_mark(&path);
+                self.completion_dismissed = None;
+                self.refresh_completion(sh)
+            }
+        }
+    }
+
     /// Whether this is the reading log: the app's own note, whose name, title and properties are the app's.
     pub fn is_log(&self) -> bool {
         self.path == crate::shared::READING_LOG
@@ -789,6 +951,7 @@ impl NoteTab {
             let changes = match &message {
                 NoteMsg::Action(a) => !selects(a),
                 NoteMsg::Vim(_)
+                | NoteMsg::Completion(_)
                 | NoteMsg::AskDelete
                 | NoteMsg::ConfirmDelete
                 | NoteMsg::StartRename
@@ -826,7 +989,25 @@ impl NoteTab {
                 if matches!(action, EditAction::Undo | EditAction::Redo) {
                     self.drafts.clear();
                 }
-                if self.doc.perform(action) {
+                // Choices come with typing; moving the caret (into a link already written, say) puts them away.
+                let typing = !matches!(
+                    action,
+                    EditAction::Move { .. }
+                        | EditAction::SetCaret { .. }
+                        | EditAction::Select(_)
+                        | EditAction::SelectBetween { .. }
+                        | EditAction::SelectAll
+                        | EditAction::SelectWord(_)
+                        | EditAction::SelectLine(_)
+                );
+                let closes = matches!(&action, EditAction::Insert(t) if t == "]");
+                let mut changed = self.doc.perform(action);
+                // (Typing the second `]` may only step over the one that was there already: the link is put right
+                // all the same.)
+                if closes {
+                    changed |= self.put_link_right(sh);
+                }
+                if changed {
                     sh.notes.insert(self.path.clone(), self.doc.source().to_string());
                     let path = self.path.clone();
                     sh.sync_mark(&path);
@@ -835,14 +1016,26 @@ impl NoteTab {
                 if sh.settings.vim_mode {
                     self.vim.sync(&mut self.doc);
                 }
+                if typing {
+                    task = self.refresh_completion(sh);
+                } else {
+                    self.completion = None;
+                }
             }
+            NoteMsg::Completion(event) => task = self.complete(sh, event),
+            NoteMsg::ChoicesScrolled(y) => self.choices_offset = y,
             NoteMsg::Vim(key) => {
+                let closes = matches!(key, VimKey::Char(']'));
                 let out = self.vim.key(&mut self.doc, key);
-                if out.changed {
+                let fixed = closes && self.put_link_right(sh);
+                if out.changed || fixed {
                     self.drafts.clear();
                     sh.notes.insert(self.path.clone(), self.doc.source().to_string());
                     let path = self.path.clone();
                     sh.sync_mark(&path);
+                    task = self.refresh_completion(sh);
+                } else {
+                    self.completion = None;
                 }
             }
             NoteMsg::ToggleMenu => {
@@ -1205,9 +1398,12 @@ impl NoteTab {
             let module = reference.map(|b| b.module.clone()).or_else(|| sh.backend.modules().first().map(|m| m.id.clone()));
             let module = module.unwrap_or(ModuleId(String::new()));
             let embed_module = module.clone();
+            // The choices for a link being written, floating by the caret.
+            let choices = self.choices_card(sh);
             let mut editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
                 .id(self.editor_id())
                 .on_action(NoteMsg::Action)
+                .completion(choices, NoteMsg::Completion)
                 .follow_links(true)
                 .on_link(NoteMsg::OpenLink)
                 .on_link_menu(NoteMsg::LinkMenu)

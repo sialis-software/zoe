@@ -294,9 +294,9 @@ mod tests {
 
     fn sample() -> BTreeMap<String, String> {
         files(&[
-            ("notes/Nic.md", "---\ntitle: On Nicodemus\n---\n# Nic\nHe came ([[John 3:2]]).\n\n![[John 3:3-5@ASV]]\nSee [[Memory verses]] and [[sword:StrongsGreek/G25]].\n"),
-            ("notes/Memory verses.md", "# Memory verses\n\n1. [[John 3:16]]\n2. [[Ps 23]]\nBack to [[Nic]].\n"),
-            ("margins/John/03/16-note-s1.md", "---\ntype: margin\nanchor: John.3.16\nstyle: none\ncolor: \"#FFFFFF\"\ntags: []\n---\nSee [[Rom 5:8]].\n"),
+            ("notes/Nic.md", "---\ntitle: On Nicodemus\n---\n# Nic\nHe came ([[@John 3:2]]).\n\n![[@John 3:3-5@ASV]]\nSee [[Memory verses]] and [[%G25]].\n"),
+            ("notes/Memory verses.md", "# Memory verses\n\n1. [[@John 3:16]]\n2. [[@Ps 23]]\nBack to [[Nic]].\n"),
+            ("margins/John/03/16-note-s1.md", "---\ntype: margin\nanchor: John.3.16\nstyle: none\ncolor: \"#FFFFFF\"\ntags: []\n---\nSee [[@Rom 5:8]].\n"),
         ])
     }
 
@@ -342,7 +342,7 @@ mod tests {
         let mut f = sample();
         assert_eq!(ix.sync(&f).unwrap(), Stats { added: 3, ..Stats::default() });
         assert_eq!(ix.sync(&f).unwrap(), Stats { unchanged: 3, ..Stats::default() });
-        f.get_mut("notes/Nic.md").unwrap().push_str("More about [[Luke 1:1]].\n");
+        f.get_mut("notes/Nic.md").unwrap().push_str("More about [[@Luke 1:1]].\n");
         f.remove("margins/John/03/16-note-s1.md");
         assert_eq!(ix.sync(&f).unwrap(), Stats { updated: 1, removed: 1, unchanged: 1, added: 0 });
         assert_eq!(ix.file_count().unwrap(), 2);
@@ -391,8 +391,8 @@ mod tests {
     #[test]
     fn single_file_updates_and_removals() {
         let mut ix = Index::in_memory().unwrap();
-        ix.update("notes/A.md", "[[John 1:1]]").unwrap();
-        ix.update("notes/A.md", "[[John 1:2]]").unwrap();
+        ix.update("notes/A.md", "[[@John 1:1]]").unwrap();
+        ix.update("notes/A.md", "[[@John 1:2]]").unwrap();
         assert!(ix.touching(&r("John 1:1")).unwrap().is_empty());
         assert_eq!(ix.touching(&r("John 1:2")).unwrap().len(), 1);
         ix.remove("notes/A.md").unwrap();

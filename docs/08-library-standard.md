@@ -47,7 +47,7 @@ Frontmatter first, as in docs/02, with at least these properties:
 - `type`: what the note is (`plan` for a work's manifest, `plan-day` for a day).
 - `tags`: a list holding the type, such as `[plan-day]`.
 
-Then a `# ` title and the body. Scripture is a `[[Book 1:1]]` link the verse-link parser reads
+Then a `# ` title and the body. Scripture is a `[[@Book 1:1]]` link the verse-link parser reads
 (`study_core::markdown::find_links`). Text is markdown with the marks a note's text may not use
 written literally with a backslash (`\*`, `\_`, `\[`, `\]`, `` \` ``, `\<`, `\>`, `\~`, `\|`,
 `\\`), as the commentary tab does. No markup from the source (OSIS, ThML) is left in.

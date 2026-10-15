@@ -36,14 +36,14 @@ out what one tab asks of another, so tab types never reach into each other:
 ## Taking verses to a note: the clipboard
 
 Notes are plain text, so verses travel by the clipboard. The toolbar under a selection in a
-Bible tab has **Copy reference** (`[[John 3:3-5]]`) and **Copy quote** (`![[John 3:3-5@LSB]]`,
+Bible tab has **Copy reference** (`[[@John 3:3-5]]`) and **Copy quote** (`![[@John 3:3-5@LSB]]`,
 pinned to the module it was taken from); paste them into any note. Copying puts the selection and
 its toolbar away and shows a toast (`Shared::toast`, a line over the bottom of the window for
 about two seconds; a clock subscription runs only while one is showing). A selector panel or other
 pop-up closes when anything outside it is clicked, in any pane.
 
 A margin note opened in a note tab shows its mark's details in place of the properties strip: the verse it is
-on (a link: it shows that verse in the reader, as a `[[John 3:16]]` does: right click for where to open it, pull it away to carry it to a tab or pane), the style, module, created time
+on (a link: it shows that verse in the reader, as a `[[@John 3:16]]` does: right click for where to open it, pull it away to carry it to a tab or pane), the style, module, created time
 and tags.
 
 A new tab asks only what *kind* of tab it is to be (Bible, Dictionary or Notes); which module, dictionary or
@@ -52,7 +52,7 @@ dictionary, and the first note.
 
 ## Backlinks
 
-A verse number is green when some note links to it (`[[John 3:16]]`; not the templates). Selecting
+A verse number is green when some note links to it (`[[@John 3:16]]`; not the templates). Selecting
 such verses adds a **backlinks** button to the selection toolbar: it opens a tab (in the other pane, one
 at a time) listing the notes that link to any of the selected verses, each with the lines that do;
 a click shows the note. The tab follows the notes as they are written, and comes back with the
@@ -201,7 +201,7 @@ numbers, marks (their highlights and cards), footnotes, and references. **Refere
 module's own cross references (`<note type="crossReference">`): a ↗ marker where the module has
 them, which opens a pop-over listing each passage as a link with the start of its text.
 Dictionary entries are always pop-overs, never margin cards; the Strong's pop-over has an **Open
-in tab** button that opens the definition in a dictionary tab. `[[sword:Module/key]]` links open
+in tab** button that opens the definition in a dictionary tab. `[[%G25]]` (a Strong's number) and `[x](sword:Module/key)` links open
 there too.
 
 ## Saved state (`state.rs`, `workspace.rs`)
@@ -290,7 +290,7 @@ commentary installed the tab opens on this one.
 ## The reading log
 
 A chapter is added to the note `Reading log.md` (made the first time, tagged `reading-log`) under a
-heading for the day, as a bullet with a link and no time (`- [[John 3]]`); a chapter is in a day once, however
+heading for the day, as a bullet with a link and no time (`- [[@John 3]]`); a chapter is in a day once, however
 often it is read. When today's note already exists (the daily note: a one-a-day kind of note made
 without asking a title) the chapter is also added under its `## Reading` heading, filling the empty
 bullet the template starts with (and never making the note). A button at the foot of a chapter's text,

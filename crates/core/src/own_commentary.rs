@@ -156,7 +156,7 @@ pub fn chapter_source(text: &str, book: Book, chapter: u16, edit: impl Fn(&Secti
     let mut out = Vec::new();
     for section in sections(text, book).iter().filter(|s| s.range.chapter == chapter) {
         let body = text[section.body.clone()].trim().to_string();
-        let head = format!("[[{}]]  \u{b7}  {}", section.range, edit(section));
+        let head = format!("[[@{}]]  \u{b7}  {}", section.range, edit(section));
         out.push(if body.is_empty() { head } else { format!("{head}\n\n{body}") });
     }
     out.join("\n\n")
@@ -230,7 +230,7 @@ mod tests {
     fn a_chapter_is_read_as_links_over_what_was_written() {
         let text = text_of(&["## John 3\n\nWhole chapter.\n\n### John 3:16\n\nLove.\n\n## John 4\n\nWell."]);
         let source = chapter_source(&text, Book::JOHN, 3, |s| format!("[[x#{}|Edit]]", s.range));
-        assert_eq!(source, "[[John 3]]  \u{b7}  [[x#John 3|Edit]]\n\nWhole chapter.\n\n[[John 3:16]]  \u{b7}  [[x#John 3:16|Edit]]\n\nLove.");
+        assert_eq!(source, "[[@John 3]]  \u{b7}  [[x#John 3|Edit]]\n\nWhole chapter.\n\n[[@John 3:16]]  \u{b7}  [[x#John 3:16|Edit]]\n\nLove.");
         assert_eq!(chapter_source(&text, Book::JOHN, 5, |_| String::new()), "");
     }
 }

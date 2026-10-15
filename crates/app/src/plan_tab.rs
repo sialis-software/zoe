@@ -419,7 +419,7 @@ fn day_source(sh: &Shared, day: &Day) -> String {
                 seen.push((p.book, p.chapter));
                 new
             })
-            .map(|p| format!("[[{}]]", RefRange::chapter(p.book, p.chapter)))
+            .map(|p| format!("[[@{}]]", RefRange::chapter(p.book, p.chapter)))
             .collect()
     };
     let body = day.note.as_ref().and_then(|n| sh.notes.get(n)).map(|text| {

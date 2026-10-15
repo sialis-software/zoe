@@ -14,6 +14,7 @@ mod bundled;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod commands;
 mod commentary_tab;
+mod completion;
 mod dict_tab;
 mod drag;
 mod fonts;
@@ -1651,6 +1652,11 @@ impl App {
             }
             Message::Dict(id, msg) => {
                 self.touch(id);
+                // A number in an entry's text opens its entry, as any link does.
+                if let DictMsg::Link(target) = &msg {
+                    let dest = Dest::from_modifiers(self.modifiers);
+                    return self.open_spec(id, Spec::from_target(target), dest);
+                }
                 if let DictMsg::OpenVerse(range, module, words) = msg {
                     let dest = Dest::from_modifiers(self.modifiers);
                     let task = self.open_verse(id, range, dest);
@@ -2687,23 +2693,23 @@ impl App {
             // ⌘[ and ⌘] (Ctrl elsewhere), and the mouse's own back and forward buttons. With shift
             // they change tab instead (the shifted keys are { and } on some layouts), and ⌘W closes one.
             // (On a Mac these are the menu bar's, which takes the keys before they get here.)
-            // The settings of the reader (option with the command key and a digit): matched by the key
+            // The settings of the reader (option with the command key and S, M, F or R): matched by the key
             // on the keyboard, as option changes the character. (Where Ctrl and Alt together make
             // AltGr, a layout may take these keys for itself.)
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { physical_key, modifiers, .. })
                 if modifiers.command() && modifiers.alt() && !cfg!(target_os = "macos") =>
             {
                 use iced::keyboard::key::{Code, Physical};
-                let digit = match physical_key {
-                    Physical::Code(Code::Digit1) => '1',
-                    Physical::Code(Code::Digit2) => '2',
-                    Physical::Code(Code::Digit3) => '3',
-                    Physical::Code(Code::Digit4) => '4',
+                let letter = match physical_key {
+                    Physical::Code(Code::KeyS) => 's',
+                    Physical::Code(Code::KeyM) => 'm',
+                    Physical::Code(Code::KeyF) => 'f',
+                    Physical::Code(Code::KeyR) => 'r',
                     _ => return None,
                 };
                 commands::Command::ALL
                     .into_iter()
-                    .find(|c| c.shortcut().is_some_and(|s| s.alt && s.key == digit && s.shift == modifiers.shift()))
+                    .find(|c| c.shortcut().is_some_and(|s| s.alt && s.key == letter && s.shift == modifiers.shift()))
                     .map(Message::Command)
             }
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) if modifiers.command() && !cfg!(target_os = "macos") => {
@@ -3957,10 +3963,9 @@ mod tests {
             &self,
             label: &str,
             body: Element<'a, BibleMsg>,
-            closable: bool,
             fill: bool,
         ) -> Element<'a, BibleMsg> {
-            crate::bible_tab::reference_card(&self.sh, label, body, closable, fill, None)
+            crate::bible_tab::reference_card(&self.sh, label, body, fill, None)
         }
 
     }
@@ -4713,7 +4718,7 @@ mod tests {
         let notes = tab.notes(&app.sh);
         assert!(notes.iter().any(|(v, _)| *v == 16) && notes.windows(2).all(|w| w[0].0 < w[1].0), "in verse order");
         let head = tab.doc.selection().head;
-        assert!(tab.doc.source()[head..].starts_with("[[John 3:16]]"), "the text is at the verse asked for");
+        assert!(tab.doc.source()[head..].starts_with("[[@John 3:16]]"), "the text is at the verse asked for");
         let _ = app.update(Message::Bible(bid, BibleMsg::OpenCommentary));
         assert_eq!(app.tabs.values().filter(|t| matches!(t, Tab::Commentary(_))).count(), 1, "the same tab");
 
@@ -5168,13 +5173,13 @@ mod tests {
         assert!(!app.sh.settings.reading_log_auto, "by itself only when asked for");
         assert!(!app.sh.read_on(Book::JOHN, 3, &now));
         let _ = app.update(Message::Bible(id, BibleMsg::LogChapter));
-        assert!(app.sh.notes[crate::shared::READING_LOG].contains("- [[John 3]]"), "a line with no time");
+        assert!(app.sh.notes[crate::shared::READING_LOG].contains("- [[@John 3]]"), "a line with no time");
         assert!(app.sh.read_on(Book::JOHN, 3, &now));
         // The check mark stays: it is whether the chapter is in today's log.
         let mut h = Harness::new(app);
         assert!(h.center_of("\u{2713} Marked as read").is_some() && h.center_of("Mark as read").is_none());
         // Another day's reading is in the history, and a chapter not read today has the words.
-        let log = format!("{}\n## 2025-01-02\n\n- [[John 3]]\n- [[John 5]]\n", h.app.sh.notes[crate::shared::READING_LOG].trim_end());
+        let log = format!("{}\n## 2025-01-02\n\n- [[@John 3]]\n- [[@John 5]]\n", h.app.sh.notes[crate::shared::READING_LOG].trim_end());
         h.app.sh.notes.insert(crate::shared::READING_LOG.into(), log);
         let today = now.format("%Y-%m-%d").to_string();
         assert_eq!(h.app.sh.days_read(Book::JOHN, 3).len(), 2);
@@ -5229,21 +5234,21 @@ mod tests {
         assert!(log.contains("tags: [reading-log]") && log.contains("# Reading log"), "{log}");
         // (Today's note exists, so the day's heading is a link to it.)
         let day = now.format("%Y-%m-%d");
-        assert!(log.contains(&format!("## [[{}|{day}]]", daily_path.trim_end_matches(".md"))) && log.contains("- [[John 3]]"), "{log}");
-        assert!(app.sh.notes[&daily_path].contains("## Reading\n\n- [[John 3]]"), "{}", app.sh.notes[&daily_path]);
+        assert!(log.contains(&format!("## [[{}|{day}]]", daily_path.trim_end_matches(".md"))) && log.contains("- [[@John 3]]"), "{log}");
+        assert!(app.sh.notes[&daily_path].contains("## Reading\n\n- [[@John 3]]"), "{}", app.sh.notes[&daily_path]);
         app.note_reading(t0 + Duration::from_secs(120));
-        assert_eq!(app.sh.notes[crate::shared::READING_LOG].matches("[[John 3]]").count(), 1);
+        assert_eq!(app.sh.notes[crate::shared::READING_LOG].matches("[[@John 3]]").count(), 1);
         let id = app.bid();
         let _ = app.update(Message::Bible(id, BibleMsg::PickChapter(ChapterChoice(Book::JOHN, 4))));
         app.note_reading(t0 + Duration::from_secs(130));
         app.note_reading(t0 + Duration::from_secs(170));
         let log = &app.sh.notes[crate::shared::READING_LOG];
-        assert!(log.find("[[John 3]]").unwrap() < log.find("[[John 4]]").unwrap(), "in the order read");
+        assert!(log.find("[[@John 3]]").unwrap() < log.find("[[@John 4]]").unwrap(), "in the order read");
         let _ = app.update(Message::SetReadingAuto(false));
         let _ = app.update(Message::Bible(id, BibleMsg::PickChapter(ChapterChoice(Book::JOHN, 5))));
         app.note_reading(t0 + Duration::from_secs(200));
         app.note_reading(t0 + Duration::from_secs(300));
-        assert!(!app.sh.notes[crate::shared::READING_LOG].contains("[[John 5]]"));
+        assert!(!app.sh.notes[crate::shared::READING_LOG].contains("[[@John 5]]"));
     }
 
     #[test]
@@ -5326,8 +5331,8 @@ mod tests {
         let _ = app.update(Message::Commentary(id, CommentaryMsg::PickChapter(3)));
         let Some(Tab::Commentary(tab)) = app.tabs.get(&id) else { unreachable!() };
         let shown = tab.doc.source().to_string();
-        assert!(shown.starts_with("[[John 3]]  \u{b7}  [[notes/Commentary on John#John 3|Edit]]"), "{shown}");
-        assert!(shown.contains("[[John 3:16]]  \u{b7}  [[notes/Commentary on John#John 3:16|Edit]]\n\nGod's love is the root."), "{shown}");
+        assert!(shown.starts_with("[[@John 3]]  \u{b7}  [[notes/Commentary on John#John 3|Edit]]"), "{shown}");
+        assert!(shown.contains("[[@John 3:16]]  \u{b7}  [[notes/Commentary on John#John 3:16|Edit]]\n\nGod's love is the root."), "{shown}");
         assert!(!shown.contains("John 4"), "only this chapter");
         let _ = app.update(Message::Commentary(id, CommentaryMsg::Passage("John 3:16".into())));
         let _ = app.update(Message::Commentary(id, CommentaryMsg::Begin));
@@ -5496,7 +5501,7 @@ mod tests {
         assert!(app.note().path.starts_with("notes/"), "{}", app.note().path);
         let text = &app.sh.notes[&app.note().path];
         // Only its reference and quote are gone from it: no lines are added, and the file keeps its name.
-        assert!(!text.contains("[[John 3:16]]") && !text.contains(&quote) && !text.contains("anchor:") && !text.contains("type:"), "{text}");
+        assert!(!text.contains("[[@John 3:16]]") && !text.contains(&quote) && !text.contains("anchor:") && !text.contains("type:"), "{text}");
         assert_eq!(app.note().path, format!("notes/{}", path.rsplit('/').next().unwrap()));
         assert_eq!(&app.note().doc.source(), text);
     }
@@ -5591,7 +5596,7 @@ mod tests {
     }
 
     const HEART: &str = "The heart of the gospel. Learn this one by heart.";
-    const ETERNAL: &str = "Eternal life begins now, not only after death. Compare [[John 17:3]].";
+    const ETERNAL: &str = "Eternal life begins now, not only after death. Compare [[@John 17:3]].";
 
     #[test]
     fn a_wide_reader_shows_a_margin_with_every_card() {
@@ -5832,8 +5837,8 @@ mod tests {
         select_verses(&mut app, &[3, 4, 5, 8]);
         let refs = app.selected_refs();
         let module = app.module_abbreviation();
-        assert_eq!(copy_text(&refs, &module, false), "[[John 3:3-5]], [[John 3:8]]");
-        assert_eq!(copy_text(&refs, &module, true), "![[John 3:3-5@KJV]]\n\n![[John 3:8@KJV]]");
+        assert_eq!(copy_text(&refs, &module, false), "[[@John 3:3-5]], [[@John 3:8]]");
+        assert_eq!(copy_text(&refs, &module, true), "![[@John 3:3-5@KJV]]\n\n![[@John 3:8@KJV]]");
         assert_eq!(copy_text(&[], &module, false), "");
         // The messages exist and, with a selection, ask for something to be done (a clipboard write).
         let (task, _) = {
@@ -6018,6 +6023,97 @@ mod tests {
     }
 
     #[test]
+    fn typing_a_link_in_the_writer_offers_choices_that_the_keys_take() {
+        let mut h = Harness::new(app_with_writer(""));
+        focus_writer(&mut h);
+        h.type_text("see [[mem");
+        assert!(h.app.note().completion.as_ref().is_some_and(|c| c.items[0].label == "Memory verses"), "the choices are there");
+        h.named(Named::Enter);
+        assert_eq!(h.app.note().doc.source(), "see [[Memory verses]]", "Enter took the first choice");
+        assert!(h.app.note().completion.is_none());
+        // Escape puts them away without taking one.
+        h.type_text(" [[nic");
+        assert!(h.app.note().completion.is_some());
+        h.named(Named::Escape);
+        assert!(h.app.note().completion.is_none());
+        assert_eq!(h.app.note().doc.source(), "see [[Memory verses]] [[nic]]");
+    }
+
+    #[test]
+    fn a_link_closed_by_typing_is_put_right_in_its_capitals_and_the_caret_stays_after_it() {
+        let mut h = Harness::new(app_with_writer(""));
+        focus_writer(&mut h);
+        h.type_text("a [[@john 3:16]]");
+        assert_eq!(h.app.note().doc.source(), "a [[@John 3:16]]");
+        assert_eq!(h.app.note().doc.selection().head, h.app.note().doc.source().len());
+        h.type_text(" b [[%g25]] c [[nicodemus]] d");
+        assert_eq!(h.app.note().doc.source(), "a [[@John 3:16]] b [[%G25]] c [[Nicodemus]] d");
+        assert_eq!(h.app.sh.notes[&h.app.note().path], "a [[@John 3:16]] b [[%G25]] c [[Nicodemus]] d", "the note is kept in step");
+    }
+
+    #[test]
+    fn the_choices_are_a_card_that_scrolls_with_the_wheel_and_takes_clicks() {
+        let mut app = app_with_writer("");
+        for i in 0..30 {
+            app.sh.notes.insert(format!("notes/Topic {i:02}.md"), "x\n".into());
+        }
+        let mut h = Harness::new(app);
+        focus_writer(&mut h);
+        h.type_text("see [[topic");
+        assert_eq!(h.app.note().completion.as_ref().map(|c| c.items.len()), Some(30));
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        // Only the first rows are there to see (the rest are scrolled to).
+        let first = h.center_of("Topic 00").expect("the first row shows");
+        assert!(h.center_of("Topic 29").is_none() || h.bounds_of_text("Topic 29").is_some_and(|b| b.y > first.1), "the last is out of the card's view or below it");
+        // The wheel over the card scrolls it, not the page.
+        h.move_to(first.0, first.1);
+        let page_before = h.app.note().scroll;
+        h.feed(Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Lines { x: 0.0, y: -4.0 } }));
+        assert!(h.app.note().choices_offset > 0.0, "the card scrolled");
+        assert_eq!(h.app.note().scroll, page_before, "and the page did not");
+        // Arrow down past the rows shown keeps the choice in view.
+        for _ in 0..12 {
+            h.named(Named::ArrowDown);
+        }
+        assert_eq!(h.app.note().completion.as_ref().map(|c| c.selected), Some(12));
+        let row = h.app.sh.settings.notes_size * 1.7;
+        assert!(h.app.note().choices_offset + 8.0 * row >= 13.0 * row - 0.5, "row 12 is within the eight shown: {}", h.app.note().choices_offset);
+        // A click on a row takes it.
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let (x, y) = h.center_of("Topic 12").expect("the chosen row shows");
+        h.click(x, y);
+        assert_eq!(h.app.note().doc.source(), "see [[Topic 12]]");
+    }
+
+    #[test]
+    fn with_vim_bindings_a_link_typed_in_insert_mode_offers_choices_too() {
+        let mut app = app_with_writer("");
+        let _ = app.update(Message::SetVimMode(true));
+        let mut h = Harness::new(app);
+        focus_writer(&mut h);
+        h.type_text("i");
+        h.type_text("see [[mem");
+        assert!(h.app.note().completion.as_ref().is_some_and(|c| c.items[0].label == "Memory verses"), "Insert mode: the choices are there");
+        h.named(Named::Enter);
+        assert_eq!(h.app.note().doc.source(), "see [[Memory verses]]");
+        // Not in Normal mode: nothing is being typed.
+        h.named(Named::Escape);
+        assert!(h.app.note().completion.is_none());
+    }
+
+    #[test]
+    fn an_embedded_dictionary_entry_shows_the_word_and_what_it_means() {
+        let app = App::new();
+        let module = app.bible().module.clone();
+        let target = LinkTarget::Sword { module: "Strongs".into(), key: "G2316".into() };
+        let shown = app.sh.embed_for(&module, &target).expect("an entry for G2316");
+        assert!(shown.title.starts_with("G2316 · "), "{}", shown.title);
+        assert!(shown.body.contains("θεός"), "{}", shown.body);
+        assert!(app.sh.embed_for(&module, &LinkTarget::Sword { module: "Strongs".into(), key: "G99999".into() }).is_none());
+        assert!(study_core::markdown::find_links("![[%G2316]]")[0].embed);
+    }
+
+    #[test]
     fn escape_lets_go_of_the_keyboard() {
         let mut h = Harness::new(app_with_writer(""));
         focus_writer(&mut h);
@@ -6178,13 +6274,13 @@ mod tests {
         assert!(h.app.note().doc.source().contains("Nicodemus"), "the writer now holds that note");
 
         // A verse link shows the passage in the reader on screen and leaves the writer's text and caret alone.
-        let mut h = Harness::new(app_with_writer("see [[Ps 23:1]] now\nlast"));
+        let mut h = Harness::new(app_with_writer("see [[@Ps 23:1]] now\nlast"));
         let end = h.app.note().doc.selection().head;
         let (x, y) = h.in_editor(h.app.note().editor_id(), 16.0, 60.0, 12.0);
         h.click(x, y);
         assert_eq!((h.app.bible().book, h.app.bible().chapter_no), (Book::PSALMS, 23));
         assert_eq!(h.app.note().doc.selection().head, end, "following does not move the caret first");
-        assert_eq!(h.app.note().doc.source(), "see [[Ps 23:1]] now\nlast");
+        assert_eq!(h.app.note().doc.source(), "see [[@Ps 23:1]] now\nlast");
     }
 
     #[test]
@@ -6264,7 +6360,7 @@ mod tests {
 
     #[test]
     fn an_embed_line_shows_the_passage_and_pushes_the_text_below_it_down() {
-        let mut h = Harness::new(app_with_writer("![[John 3:16]]\nlast line"));
+        let mut h = Harness::new(app_with_writer("![[@John 3:16]]\nlast line"));
         assert!(h.app.embed_for(&LinkTarget::Verse { range: RefRange::parse("John 3:16").unwrap(), module: None }).is_some());
         // Without the passage, "last line" would start at the top. With it, that spot is the
         // embed (belonging to line 0), and the last line starts lower.
@@ -6442,7 +6538,7 @@ mod tests {
 
     #[test]
     fn the_title_of_an_embedded_passage_links_to_its_source() {
-        let mut h = Harness::new(app_with_writer("![[John 3:16]]\nlast"));
+        let mut h = Harness::new(app_with_writer("![[@John 3:16]]\nlast"));
         let end = h.app.note().doc.selection().head;
         // The first line of the embed is its title ("John 3:16 · KJV").
         let (x, y) = h.in_editor(h.app.note().editor_id(), 16.0, 40.0, 14.0);
@@ -6450,7 +6546,7 @@ mod tests {
         assert_eq!((h.app.bible().book, h.app.bible().chapter_no), (Book::JOHN, 3));
         assert_eq!(h.app.bible().select_request.map(|(_, a, z)| (a, z)), Some((16, 16)), "the passage is shown in the reader");
         assert_eq!(h.app.note().doc.selection().head, end, "the writer's caret did not move");
-        assert_eq!(h.app.note().doc.source(), "![[John 3:16]]\nlast");
+        assert_eq!(h.app.note().doc.source(), "![[@John 3:16]]\nlast");
     }
 
     #[test]
@@ -6542,9 +6638,7 @@ mod tests {
         assert!(note.contains("by night"), "{note}");
         let card = h.bounds_of_text("Footnote").expect("floating under the click");
         assert!(card.y > y - 4.0, "under the line it came from: {} vs {y}", card.y);
-        let (cx, cy) = h.center_of("✕").expect("a close button");
-        h.click(cx, cy);
-        assert!(h.app.bible().note_card.is_none(), "the close button dismisses it");
+        assert!(h.center_of("✕").is_none(), "no close button: it goes with Escape or a click elsewhere");
     }
 
     #[test]
@@ -6682,16 +6776,14 @@ mod tests {
     }
 
     #[test]
-    fn a_dictionary_popover_closes_on_a_click_in_the_text_and_by_its_button() {
+    fn a_dictionary_popover_closes_on_a_click_in_the_text() {
         let mut app = App::new();
         app.zoomed = Some(app.panes[0].id);
         app.bible_mut().show_strongs = true;
         app.bible_mut().in_margin.strongs = false;
         let mut h = Harness::new(app);
         h.click_scan(is_word).unwrap();
-        let (cx, cy) = h.center_of("✕").expect("a close button");
-        h.click(cx, cy);
-        assert!(h.app.bible().note_card.is_none());
+        assert!(h.center_of("✕").is_none(), "no close button");
         h.click_scan(is_word).unwrap();
         h.click(60.0, 1300.0);
         assert!(h.app.bible().note_card.is_none(), "a click elsewhere in the reader");
@@ -6771,9 +6863,9 @@ mod tests {
     fn footnote_and_dictionary_cards_are_only_as_wide_as_their_text_too() {
         let h = Harness::new(App::new());
         let app = App::new();
-        let short = laid_width(&h, app.reference_card("Footnote", text("Hi.").into(), false, false), 380.0);
+        let short = laid_width(&h, app.reference_card("Footnote", text("Hi.").into(), false), 380.0);
         assert!(short < 120.0, "{short}");
-        let filled = laid_width(&h, app.reference_card("Footnote", text("Hi.").into(), false, true), 380.0);
+        let filled = laid_width(&h, app.reference_card("Footnote", text("Hi.").into(), true), 380.0);
         assert_eq!(filled, 380.0);
     }
 
@@ -7322,7 +7414,7 @@ mod tests {
             let _ = app.update(Message::Bible(id, BibleMsg::ToggleMenu));
         }
         if std::env::var("SNAP_TOAST").is_ok() {
-            app.sh.toast("Copied [[John 3:2-5]]");
+            app.sh.toast("Copied [[@John 3:2-5]]");
         }
         if std::env::var("SNAP_PLAIN").is_ok() {
             app.sh.set_mark_look(0, MarkStyle::None, "");
@@ -7333,16 +7425,16 @@ mod tests {
         }
         if std::env::var("SNAP_LOG").is_ok() {
             let log = format!(
-                "{}\n\n## 2026-10-13\n\n- [[Joshua 2]]\n- [[Joshua 3]]\n\n## 2026-10-14\n\n- [[John 3]]\n",
+                "{}\n\n## 2026-10-13\n\n- [[@Joshua 2]]\n- [[@Joshua 3]]\n\n## 2026-10-14\n\n- [[@John 3]]\n",
                 study_core::reading_log::new_log("Reading log", "2026-10-13T18:27:42-05:00").trim_end()
             );
             app.sh.notes.insert(crate::shared::READING_LOG.into(), log);
             app.open_note(crate::shared::READING_LOG.into());
         }
         if std::env::var("SNAP_SECTIONS").is_ok() {
-            app.sh.notes.insert("notes/Plain.md".into(), "Thinking of [[John 3:16]], the heart of it.\n".into());
-            app.sh.notes.insert("notes/Pray.md".into(), "---\ntype: prayer\n---\nLord, [[John 3:16]]\n".into());
-            app.sh.notes.insert("notes/Preach.md".into(), "---\ntype: sermon\n---\n[[John 3:16]] again\n".into());
+            app.sh.notes.insert("notes/Plain.md".into(), "Thinking of [[@John 3:16]], the heart of it.\n".into());
+            app.sh.notes.insert("notes/Pray.md".into(), "---\ntype: prayer\n---\nLord, [[@John 3:16]]\n".into());
+            app.sh.notes.insert("notes/Preach.md".into(), "---\ntype: sermon\n---\n[[@John 3:16]] again\n".into());
             for plan in study_core::starter_plans::starter_plans() {
                 for (path, text) in plan.to_files() {
                     app.sh.notes.insert(path, text);
@@ -8087,7 +8179,7 @@ mod tests {
 
     fn log_text() -> String {
         format!(
-            "{}\n\n## 2026-10-13\n\n- [[Joshua 2]]\n\n## 2026-10-14\n\n- [[John 3]]\n- [[John 4]]\n",
+            "{}\n\n## 2026-10-13\n\n- [[@Joshua 2]]\n\n## 2026-10-14\n\n- [[@John 3]]\n- [[@John 4]]\n",
             study_core::reading_log::new_log("Reading log", "2026-10-13T18:27:42-05:00").trim_end()
         )
     }
@@ -8105,7 +8197,7 @@ mod tests {
         // The text starts under the title and the blank line below it, the earliest day first and the latest last.
         let top = app.log().doc.front_end();
         assert!(app.log().doc.source()[..top].ends_with("# Reading log\n\n"));
-        assert!(app.log().doc.source()[top..].starts_with("## 2026-10-13\n\n- [[Joshua 2]]\n\n## 2026-10-14\n\n- [[John 3]]\n- [[John 4]]\n"));
+        assert!(app.log().doc.source()[top..].starts_with("## 2026-10-13\n\n- [[@Joshua 2]]\n\n## 2026-10-14\n\n- [[@John 3]]\n- [[@John 4]]\n"));
         assert_eq!(app.log().doc.selection().head, log.len(), "the caret is at the end, where the days are added");
         // No properties, no way to choose a note, no header: the words and the bar under them.
         let mut h = Harness::new(app);
@@ -8130,7 +8222,7 @@ mod tests {
         assert!(h.app.log().picker.is_none() && h.app.log().renaming.is_none() && !h.app.log().menu_open && h.app.log().path == READING_LOG);
         // Writing at the end is as in any note; the caret cannot go into the title, and backspace stops at it.
         let _ = h.app.update(Message::Log(id, NoteMsg::Action(EditAction::Insert("A thought.\n".into()))));
-        assert!(h.app.sh.notes[READING_LOG].ends_with("- [[John 4]]\nA thought.\n"), "{}", h.app.sh.notes[READING_LOG]);
+        assert!(h.app.sh.notes[READING_LOG].ends_with("- [[@John 4]]\nA thought.\n"), "{}", h.app.sh.notes[READING_LOG]);
         let _ = h.app.update(Message::Log(id, NoteMsg::Action(EditAction::SetCaret { offset: 3, extend: false })));
         assert_eq!(h.app.log().doc.selection().head, top, "the caret is as near the title as it can be");
         for _ in 0..4 {
@@ -8142,7 +8234,7 @@ mod tests {
         assert!(h.app.sh.log_reading(Book::JOHN, 5, &now));
         h.app.settle();
         let text = h.app.log().doc.source().to_string();
-        assert!(text.ends_with("## 2026-11-01\n\n- [[John 5]]\n"), "{text}");
+        assert!(text.ends_with("## 2026-11-01\n\n- [[@John 5]]\n"), "{text}");
         assert!(h.app.log().doc.selection().head >= h.app.log().doc.front_end());
         let _ = h.app.view();
     }
@@ -8152,7 +8244,7 @@ mod tests {
         use crate::shared::READING_LOG;
         let mut app = App::new();
         app.sh.notes.insert(READING_LOG.into(), log_text());
-        app.sh.notes.insert("notes/Linker.md".into(), "See [[Reading log]] and [[John 3]].\n".into());
+        app.sh.notes.insert("notes/Linker.md".into(), "See [[Reading log]] and [[@John 3]].\n".into());
         // It is not among the notes: not listed, not found by searching, not first, not linked to, not a backlink.
         assert!(!app.sh.note_paths().iter().any(|p| p == READING_LOG));
         let none = std::collections::BTreeSet::new();
@@ -8216,11 +8308,11 @@ mod tests {
     fn a_log_made_newest_first_is_put_right_when_its_tab_opens() {
         use crate::shared::READING_LOG;
         let mut app = App::new();
-        app.sh.notes.insert(READING_LOG.into(), "---\ncreated: x\ntags: [reading-log]\norder: newest-first\n---\n# Reading log\n\n## 2026-10-14\n\n- [[Psalm 23]]\n\n## 2026-10-13\n\n- [[John 4]]\n- [[John 3]]\n".into());
+        app.sh.notes.insert(READING_LOG.into(), "---\ncreated: x\ntags: [reading-log]\norder: newest-first\n---\n# Reading log\n\n## 2026-10-14\n\n- [[@Psalm 23]]\n\n## 2026-10-13\n\n- [[@John 4]]\n- [[@John 3]]\n".into());
         let _ = app.show_log();
         let text = app.log().doc.source();
         assert!(!text.contains("order:"));
-        assert!(text.find("2026-10-13").unwrap() < text.find("2026-10-14").unwrap() && text.find("[[John 3]]").unwrap() < text.find("[[John 4]]").unwrap(), "{text}");
+        assert!(text.find("2026-10-13").unwrap() < text.find("2026-10-14").unwrap() && text.find("[[@John 3]]").unwrap() < text.find("[[@John 4]]").unwrap(), "{text}");
         assert_eq!(app.sh.notes[READING_LOG], text);
     }
 
@@ -8243,10 +8335,10 @@ mod tests {
     fn backlinks_are_in_sections_margin_notes_then_notes_by_type_then_plans_with_each_plans_days_together() {
         use crate::backlinks_tab::{Entry, sections};
         let mut app = App::new();
-        app.sh.notes.insert("notes/Plain.md".into(), "Thinking of [[John 3:16]].\n".into());
-        app.sh.notes.insert("notes/Pray.md".into(), "---\ntype: prayer\ntags: [a, comfort]\n---\nLord, [[John 3:16]]\n".into());
-        app.sh.notes.insert("notes/Preach.md".into(), "---\ntype: sermon\n---\n[[John 3:16]] again\n".into());
-        app.sh.notes.insert("notes/Pray too.md".into(), "---\ntype: prayer\n---\n[[John 3:16]]\n".into());
+        app.sh.notes.insert("notes/Plain.md".into(), "Thinking of [[@John 3:16]].\n".into());
+        app.sh.notes.insert("notes/Pray.md".into(), "---\ntype: prayer\ntags: [a, comfort]\n---\nLord, [[@John 3:16]]\n".into());
+        app.sh.notes.insert("notes/Preach.md".into(), "---\ntype: sermon\n---\n[[@John 3:16]] again\n".into());
+        app.sh.notes.insert("notes/Pray too.md".into(), "---\ntype: prayer\n---\n[[@John 3:16]]\n".into());
         for plan in study_core::starter_plans::starter_plans() {
             for (path, text) in plan.to_files() {
                 app.sh.notes.insert(path, text);
@@ -9051,7 +9143,7 @@ mod tests {
         assert!(found(&app, &john(16, 16)).contains(&"notes/Memory verses.md".to_string()));
         assert!(!found(&app, &john(16, 16)).contains(&"notes/Nicodemus.md".to_string()));
         let lines = &app.sh.backlinks(&john(2, 2)).iter().find(|b| b.path == "notes/Nicodemus.md").unwrap().lines.clone();
-        assert!(lines.iter().any(|l| l.contains("[[John 3:2]]")), "with the line that links");
+        assert!(lines.iter().any(|l| l.contains("[[@John 3:2]]")), "with the line that links");
         assert!(found(&app, &scripture::RefRange { book: Book::JOHN, chapter: 9, verses: Some((1, 1)) }).is_empty());
         assert!(app.sh.backlinks(&john(2, 2)).iter().all(|b| !b.path.starts_with("templates/")));
 
@@ -9387,7 +9479,7 @@ mod tests {
     fn links_to_dictionaries_open_in_a_dictionary_tab_wherever_they_are_followed_from() {
         let mut app = App::new();
         let note = app.nid();
-        // [[sword:StrongsGreek/G25]], a dictionary this machine may not have by that name.
+        // [[%G25]], a dictionary this machine may not have by that name.
         let link = LinkTarget::Sword { module: "StrongsGreek".into(), key: "G25".into() };
         let _ = app.update(Message::Note(note, NoteMsg::OpenLink(link.clone())));
         assert_eq!(dict_tabs(&app).len(), 1);
@@ -9464,6 +9556,23 @@ mod tests {
         let after = tab.piece("definition").unwrap();
         assert!(after.1, "all of it is selected");
         assert_eq!(after.0, before.0, "and nothing typed went in");
+    }
+
+    #[test]
+    fn a_link_in_a_dictionary_entry_opens_that_entry_in_the_tab_and_back_returns() {
+        let mut app = App::new();
+        let module = app.sh.backend.dictionaries()[0].id.clone();
+        let blank = app.new_blank();
+        let id = app.add_tab(1, blank);
+        let _ = app.update(Message::Open(id, Choice::Dict));
+        if let Some(Tab::Dict(t)) = app.tabs.get_mut(&id) {
+            t.open(&app.sh, module, "G2316");
+        }
+        let link = LinkTarget::Sword { module: "Strongs".into(), key: "G25".into() };
+        let _ = app.update(Message::Dict(id, DictMsg::Link(link)));
+        assert_eq!(dict_of(&app, id).key, "G25", "the entry it names, in the same tab");
+        let _ = app.update(Message::Dict(id, DictMsg::Back));
+        assert_eq!(dict_of(&app, id).key, "G2316");
     }
 
     // ---- history ---------------------------------------------------------------------------
@@ -9995,6 +10104,64 @@ mod tests {
         let _ = app.update(Message::Note(id, NoteMsg::StartRename));
         assert!(app.note().renaming.is_none());
         assert!(app.sh.rename_note(&app.note().path.clone(), "x").is_err());
+    }
+
+    #[test]
+    fn a_link_is_completed_from_a_list_of_choices_as_it_is_typed() {
+        use crate::live_editor::CompletionEvent as Ev;
+        let mut app = app_with_writer("");
+        let id = app.nid();
+        let type_text = |app: &mut App, text: &str| {
+            for c in text.chars() {
+                let _ = app.update(Message::Note(id, NoteMsg::Action(md_editor::Action::Insert(c.to_string()))));
+            }
+        };
+        let choose = |app: &mut App, event: Ev| {
+            let _ = app.update(Message::Note(id, NoteMsg::Completion(event)));
+        };
+        // After two brackets, the notes.
+        type_text(&mut app, "see [[");
+        assert!(app.note().completion.as_ref().is_some_and(|c| c.items.iter().any(|i| i.label == "Nicodemus")));
+        type_text(&mut app, "nico");
+        choose(&mut app, Ev::Accept);
+        assert_eq!(app.note().doc.source(), "see [[Nicodemus]]");
+        assert_eq!(app.note().doc.selection().head, app.note().doc.source().len(), "the caret is past the brackets");
+        assert!(app.note().completion.is_none());
+        // A passage, step by step: the book, the chapter, the verse.
+        type_text(&mut app, " and [[@jo");
+        choose(&mut app, Ev::Accept);
+        assert!(app.note().doc.source().ends_with("[[@John ]]"), "{}", app.note().doc.source());
+        assert!(app.note().completion.as_ref().is_some_and(|c| c.items[0].label == "John 3"), "the chapters come next");
+        choose(&mut app, Ev::Accept);
+        assert!(app.note().doc.source().ends_with("[[@John 3:]]"));
+        choose(&mut app, Ev::Move(1));
+        choose(&mut app, Ev::Accept);
+        assert!(app.note().doc.source().ends_with("[[@John 3:1]]"), "{}", app.note().doc.source());
+        assert!(app.note().completion.is_none());
+        // A Strong's number.
+        type_text(&mut app, " [[%G231");
+        choose(&mut app, Ev::Accept);
+        assert!(app.note().doc.source().ends_with("[[%G231]]") || app.note().doc.source().contains("[[%G231"), "{}", app.note().doc.source());
+        // Escape puts the list away until the link is left.
+        type_text(&mut app, " [[");
+        assert!(app.note().completion.is_some());
+        choose(&mut app, Ev::Dismiss);
+        assert!(app.note().completion.is_none());
+        type_text(&mut app, "x");
+        assert!(app.note().completion.is_none(), "still away while it is the same link");
+    }
+
+    #[test]
+    fn a_name_cannot_begin_with_a_marker_of_links_but_can_look_like_a_passage_or_a_number() {
+        let mut app = App::new();
+        app.sh.notes.insert("notes/A.md".into(), "x\n".into());
+        for name in ["%G25", "@John 3:16", "%x"] {
+            assert!(app.sh.rename_note("notes/A.md", name).is_err(), "{name}");
+        }
+        assert_eq!(app.sh.rename_note("notes/A.md", "John 3").unwrap(), "notes/John 3.md");
+        assert_eq!(app.sh.rename_note("notes/John 3.md", "G25").unwrap(), "notes/G25.md");
+        // A new note's title has any such start taken off.
+        assert_eq!(study_core::templates::file_name("%@Odd name"), "Odd name");
     }
 
     #[test]

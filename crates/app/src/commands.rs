@@ -29,12 +29,25 @@ pub enum Command {
 }
 
 /// A key pressed with the command key (and shift, if `shift`, and option, if `alt`). With `alt` the
-/// key is the one on the keyboard (a digit), whatever character option makes of it.
+/// key is the one on the keyboard (a letter), whatever character option makes of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shortcut {
     pub shift: bool,
     pub alt: bool,
     pub key: char,
+}
+
+impl Shortcut {
+    /// The keys as a person reads them: on a Mac the symbols of the menu bar (`⌥⇧⌘S`), elsewhere words
+    /// (`Ctrl+Alt+Shift+S`).
+    pub fn display(self) -> String {
+        let key = self.key.to_ascii_uppercase();
+        if cfg!(target_os = "macos") {
+            format!("{}{}⌘{key}", if self.alt { "⌥" } else { "" }, if self.shift { "⇧" } else { "" })
+        } else {
+            format!("Ctrl+{}{}{key}", if self.alt { "Alt+" } else { "" }, if self.shift { "Shift+" } else { "" })
+        }
+    }
 }
 
 impl Command {
@@ -137,14 +150,14 @@ impl Command {
             Command::PreviousTab => (true, false, '['),
             Command::NextTab => (true, false, ']'),
             Command::Search => (true, false, 'f'),
-            Command::ToggleStrongs => (false, true, '1'),
-            Command::ToggleMarks => (false, true, '2'),
-            Command::ToggleFootnotes => (false, true, '3'),
-            Command::ToggleRefs => (false, true, '4'),
-            Command::StrongsInMargin => (true, true, '1'),
-            Command::MarksInMargin => (true, true, '2'),
-            Command::FootnotesInMargin => (true, true, '3'),
-            Command::RefsInMargin => (true, true, '4'),
+            Command::ToggleStrongs => (false, true, 's'),
+            Command::ToggleMarks => (false, true, 'm'),
+            Command::ToggleFootnotes => (false, true, 'f'),
+            Command::ToggleRefs => (false, true, 'r'),
+            Command::StrongsInMargin => (true, true, 's'),
+            Command::MarksInMargin => (true, true, 'm'),
+            Command::FootnotesInMargin => (true, true, 'f'),
+            Command::RefsInMargin => (true, true, 'r'),
         };
         Some(Shortcut { shift, alt, key })
     }
@@ -236,6 +249,17 @@ mod tests {
         assert!(bible.enabled(Command::MarksInMargin) && bible.checked(Command::MarksInMargin));
         assert!(!bible.enabled(Command::RefsInMargin) && !bible.checked(Command::RefsInMargin), "References are hidden");
         assert!(Command::ALL.iter().filter(|c| c.setting().is_some()).count() == 8);
+    }
+
+    #[test]
+    fn a_shortcut_reads_as_the_keys_pressed() {
+        let strongs = Command::ToggleStrongs.shortcut().unwrap().display();
+        let margin = Command::StrongsInMargin.shortcut().unwrap().display();
+        if cfg!(target_os = "macos") {
+            assert_eq!((strongs.as_str(), margin.as_str()), ("⌥⌘S", "⌥⇧⌘S"));
+        } else {
+            assert_eq!((strongs.as_str(), margin.as_str()), ("Ctrl+Alt+S", "Ctrl+Alt+Shift+S"));
+        }
     }
 
     #[test]

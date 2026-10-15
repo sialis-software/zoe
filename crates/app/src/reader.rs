@@ -92,6 +92,9 @@ pub struct ViewOptions {
     pub module: String,
 }
 
+/// U+2060: no line break either side of it, and no width.
+const WORD_JOINER: char = '\u{2060}';
+
 /// Inherited formatting while walking nested inlines.
 #[derive(Clone, Copy)]
 struct Style {
@@ -104,12 +107,19 @@ struct Builder<'o> {
     spans: Vec<Span<'static, Link>>,
     meta: Vec<SpanMeta>,
     verse: Option<u16>,
+    /// The text so far ends with a space: a marker now comes before a word (as the LSB's footnotes do), not after one.
+    after_space: bool,
+    /// A marker just put in front of a word: the space after it, if there is one, is not to be the end of a line.
+    glue: bool,
 }
 
 impl Builder<'_> {
     fn push(&mut self, span: Span<'static, Link>, copy: bool, verse: Option<u16>) {
         let mut span = span;
         span.font = span.font.or(Some(self.opts.font));
+        if copy && let Some(last) = span.text.chars().last() {
+            self.after_space = last.is_whitespace();
+        }
         self.spans.push(span);
         self.meta.push(SpanMeta { copy, verse, number: false, dotted: false });
     }
@@ -129,10 +139,22 @@ impl Builder<'_> {
         let pal = self.opts.pal;
         let verse = self.verse;
         for item in items {
+            let glue = std::mem::take(&mut self.glue);
             match item {
                 Inline::Text(t) => {
-                    let s = self.base(t.clone(), style);
-                    self.push(s, true, verse);
+                    // After a marker that comes before a word, a space that follows it is held to the word after it: a
+                    // word joiner (which is no text) keeps a line from ending on the marker with that space.
+                    let lead = if glue { t.len() - t.trim_start().len() } else { 0 };
+                    if lead > 0 && lead < t.len() {
+                        let first = self.base(t[..lead].to_string(), style);
+                        self.push(first, true, verse);
+                        self.push(span(WORD_JOINER.to_string()).size(self.opts.body), false, verse);
+                        let rest = self.base(t[lead..].to_string(), style);
+                        self.push(rest, true, verse);
+                    } else {
+                        let s = self.base(t.clone(), style);
+                        self.push(s, true, verse);
+                    }
                 }
                 Inline::RedLetter(inner) => {
                     self.inlines(inner, Style { color: Some(pal.red), ..style });
@@ -172,7 +194,9 @@ impl Builder<'_> {
                         .size(self.opts.body * 0.85)
                         .color(if self.opts.footnotes_in_margin { pal.link } else { pal.muted })
                         .link(Link::Footnote(text.clone()));
+                    let before_word = self.after_space;
                     self.push(s, false, verse);
+                    self.glue = before_word;
                 }
                 Inline::CrossRef { refs } => {
                     // A smaller arrow than the dagger: there can be several to a verse.
@@ -180,7 +204,9 @@ impl Builder<'_> {
                         .size(self.opts.body * 0.85)
                         .color(if self.opts.refs_in_margin { pal.link } else { pal.muted })
                         .link(Link::CrossRefs(refs.clone()));
+                    let before_word = self.after_space;
                     self.push(s, false, verse);
+                    self.glue = before_word;
                 }
                 Inline::Ref { label, target } => {
                     let s = self
@@ -268,7 +294,7 @@ fn build_blocks(chapter: &Chapter, opts: &ViewOptions) -> Vec<Block<Link>> {
                 prev = Some(Kind::Heading);
             }
             ast::Block::Paragraph(p) => {
-                let mut b = Builder { opts, spans: Vec::new(), meta: Vec::new(), verse: None };
+                let mut b = Builder { opts, spans: Vec::new(), meta: Vec::new(), verse: None, after_space: false, glue: false };
                 for (i, run) in p.runs.iter().enumerate() {
                     if i > 0 {
                         b.push(span(" ".to_string()).size(opts.body), true, None);
@@ -396,5 +422,95 @@ mod tests {
         let shown: String = build_blocks(&ps, &opts(false))[1].spans.iter().map(|s| s.text.as_ref()).collect();
         assert!(shown.contains("LORD"));
         assert!(ps.canonical_verses()[&1].starts_with("The Lord is my shepherd;"));
+    }
+
+    /// A marker that comes before a word (the previous text ends with a space) does not end a line with the space that
+    /// follows it; one that follows a word is as it was. What is copied is the same either way.
+    #[test]
+    fn a_marker_before_a_word_is_held_to_it_by_a_word_joiner() {
+        let run = |inlines: Vec<ast::Inline>| ast::Run { verse: 1, show_number: false, inlines };
+        let text = |t: &str| ast::Inline::Text(t.into());
+        let note = ast::Inline::Footnote { id: "a".into(), text: "n".into() };
+        let chapter = |inlines| ast::Chapter {
+            book: scripture::Book::JOHN,
+            chapter: 3,
+            blocks: vec![ast::Block::Paragraph(ast::Paragraph { style: ast::ParagraphStyle::Prose, runs: vec![run(inlines)] })],
+        };
+        let shown = |c: &ast::Chapter| -> Vec<(String, bool)> {
+            let block = &build_blocks(c, &opts(false))[0];
+            block.spans.iter().zip(&block.meta).map(|(s, m)| (s.text.to_string(), m.copy)).collect()
+        };
+        // Before a word, with a space after the marker (as "do these † signs").
+        let before = chapter(vec![text("do these "), note.clone(), text(" signs")]);
+        assert_eq!(
+            shown(&before),
+            [("do these ".to_string(), true), ("†".to_string(), false), (" ".to_string(), true), ("\u{2060}".to_string(), false), ("signs".to_string(), true)]
+        );
+        // After a word: left as it is, for the word and the marker to end a line together.
+        let after = chapter(vec![text("do these"), note.clone(), text(" signs")]);
+        assert_eq!(shown(&after), [("do these".to_string(), true), ("†".to_string(), false), (" signs".to_string(), true)]);
+        // Before a word with no space after the marker: nothing to hold.
+        let flush = chapter(vec![text("do these "), note, text("signs")]);
+        assert_eq!(shown(&flush).len(), 3);
+        // The text that is copied does not change.
+        for c in [&before, &after, &flush] {
+            let core = c.canonical_verses();
+            let canon = canonical_text(&build_blocks(c, &opts(false)));
+            assert_eq!(canon[&1], core[&1]);
+        }
+    }
+
+    /// The line breaker really does keep the marker with the word after it: at every width, the dagger is on the same
+    /// line as the word it comes before, where without the joiner it can end a line.
+    #[test]
+    fn at_no_width_does_a_marker_before_a_word_end_a_line() {
+        use iced::advanced::graphics::text::Paragraph;
+        use iced::advanced::text::{Paragraph as _, Text, Wrapping};
+        use iced::{Pixels, Size};
+        let note = ast::Inline::Footnote { id: "a".into(), text: "n".into() };
+        let c = ast::Chapter {
+            book: scripture::Book::JOHN,
+            chapter: 3,
+            blocks: vec![ast::Block::Paragraph(ast::Paragraph {
+                style: ast::ParagraphStyle::Prose,
+                runs: vec![ast::Run {
+                    verse: 1,
+                    show_number: false,
+                    inlines: vec![ast::Inline::Text("Truly I say to you, no one can do these ".into()), note, ast::Inline::Text(" signs that You do unless God is with him".into())],
+                }],
+            })],
+        };
+        let block = &build_blocks(&c, &opts(false))[0];
+        let mut broke = 0;
+        for width in (60..400).step_by(3) {
+            let text = Text {
+                content: block.spans.as_slice(),
+                bounds: Size::new(width as f32, f32::INFINITY),
+                size: Pixels(19.0),
+                line_height: iced::advanced::text::LineHeight::default(),
+                font: crate::fonts::UI,
+                align_x: iced::advanced::text::Alignment::Default,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: iced::advanced::text::Shaping::Advanced,
+                wrapping: Wrapping::default(),
+            };
+            let p = Paragraph::with_spans(text);
+            let (mut dagger_line, mut word_line) = (None, None);
+            for (i, run) in p.buffer().layout_runs().enumerate() {
+                for glyph in run.glyphs {
+                    let t = &run.text[glyph.start..glyph.end];
+                    if t == "\u{2020}" {
+                        dagger_line = Some(i);
+                    }
+                    if t == "s" && word_line.is_none() && glyph.start > run.text.find('\u{2020}').unwrap_or(usize::MAX) {
+                        word_line = Some(i);
+                    }
+                }
+            }
+            if dagger_line != word_line {
+                broke += 1;
+            }
+        }
+        assert_eq!(broke, 0, "the marker was left at the end of a line at {broke} widths");
     }
 }

@@ -3,6 +3,7 @@
 //! margin cards, footnote and dictionary cards. Self-contained: it keeps its own state, and
 //! reads and changes the shared notes and marks through [`Shared`].
 
+use crate::commands::Command;
 use crate::history::History;
 use crate::live_editor::{live_editor, live_reader, live_view};
 use crate::opening::Spec;
@@ -150,7 +151,6 @@ pub enum BibleMsg {
     AutoScroll(f32),
     /// A press in the text: nothing to do here, but the workspace hears it.
     Pressed,
-    CloseNoteCard,
     /// A link in a card's comment, or in a list of references.
     OpenLink(LinkTarget),
     /// Open a Strong's number's definition in a dictionary tab.
@@ -409,14 +409,28 @@ fn pen_toolbar(sh: &Shared, backlinks: bool) -> Element<'static, BibleMsg> {
         .into()
 }
 
-/// The text "Copy reference" and "Copy quote" put on the clipboard: `[[John 3:3-5]]` links, or
-/// `![[John 3:3-5@LSB]]` embeds pinned to the module they were taken from.
+/// The text "Copy reference" and "Copy quote" put on the clipboard: `[[@John 3:3-5]]` links, or
+/// `![[@John 3:3-5@LSB]]` embeds pinned to the module they were taken from.
 pub fn copy_text(refs: &[RefRange], module: &str, quote: bool) -> String {
     if quote {
-        refs.iter().map(|r| format!("![[{r}@{module}]]")).collect::<Vec<_>>().join("\n\n")
+        refs.iter().map(|r| format!("![[@{r}@{module}]]")).collect::<Vec<_>>().join("\n\n")
     } else {
-        refs.iter().map(|r| format!("[[{r}]]")).collect::<Vec<_>>().join(", ")
+        refs.iter().map(|r| format!("[[@{r}]]")).collect::<Vec<_>>().join(", ")
     }
+}
+
+/// A menu item with its shortcut at the right, quietly.
+fn hinted<'a>(item: Element<'a, BibleMsg>, command: Command) -> Element<'a, BibleMsg> {
+    let Some(shortcut) = command.shortcut() else { return item };
+    row![
+        item,
+        space::horizontal(),
+        text(shortcut.display()).size(12).style(|theme: &Theme| text::Style {
+            color: Some(Color { a: 0.45, ..theme.extended_palette().background.base.text }),
+        }),
+    ]
+    .align_y(iced::Center)
+    .into()
 }
 
 /// `text` as markdown that shows it as it is: the characters markdown would take for something else are
@@ -442,7 +456,7 @@ fn footnote_markdown(note: &str) -> String {
     let mut at = 0;
     for (range, _) in find_refs(note) {
         markdown.push_str(&markdown_text(&note[at..range.start]));
-        markdown.push_str(&format!("[[{}]]", &note[range.clone()]));
+        markdown.push_str(&format!("[[@{}]]", &note[range.clone()]));
         at = range.end;
     }
     markdown.push_str(&markdown_text(&note[at..]));
@@ -1280,10 +1294,6 @@ impl BibleTab {
                 }
                 Task::none()
             }
-            BibleMsg::CloseNoteCard => {
-                self.note_card = None;
-                Task::none()
-            }
             BibleMsg::OpenLink(target) => {
                 request = Some(Request::Open(Spec::from_target(&target)));
                 Task::none()
@@ -1508,15 +1518,15 @@ impl BibleTab {
 
     /// What the reader shows: each kind of thing in the text, on or off.
     fn menu_panel(&self) -> Element<'_, BibleMsg> {
-        let item = |label: &'static str, on: bool, msg: fn(bool) -> BibleMsg| {
-            checkbox(on).label(label).on_toggle(msg).size(16).text_size(14)
+        let item = |label: &'static str, on: bool, msg: fn(bool) -> BibleMsg, command: Command| {
+            hinted(checkbox(on).label(label).on_toggle(msg).size(16).text_size(14).into(), command)
         };
         container(
             column![
-                item("Strong's numbers", self.show_strongs, BibleMsg::ToggleStrongs),
-                item("Marks", self.show_marks, BibleMsg::ToggleMarks),
-                item("Footnotes", self.show_footnotes, BibleMsg::ToggleFootnotes),
-                item("References", self.show_refs, BibleMsg::ToggleRefs),
+                item("Strong's numbers", self.show_strongs, BibleMsg::ToggleStrongs, Command::ToggleStrongs),
+                item("Marks", self.show_marks, BibleMsg::ToggleMarks, Command::ToggleMarks),
+                item("Footnotes", self.show_footnotes, BibleMsg::ToggleFootnotes, Command::ToggleFootnotes),
+                item("References", self.show_refs, BibleMsg::ToggleRefs, Command::ToggleRefs),
                 rule::horizontal(1),
                 self.where_notes_show(),
                 rule::horizontal(1),
@@ -1525,7 +1535,7 @@ impl BibleTab {
             .spacing(10),
         )
         .padding(14)
-        .width(230)
+        .width(290)
         .style(crate::popup_style)
         .into()
     }
@@ -1756,7 +1766,7 @@ impl BibleTab {
                     follows_link: true,
                     element: {
                         let text = note.text.clone();
-                        CardElement::new(move || reference_card(sh, "Footnote", self.footnote_body(sh, format!("footnote:{i}"), &text), false, false, None))
+                        CardElement::new(move || reference_card(sh, "Footnote", self.footnote_body(sh, format!("footnote:{i}"), &text), false, None))
                     },
                 });
             }
@@ -1779,7 +1789,7 @@ impl BibleTab {
                     follows_link: true,
                     element: {
                         let refs = marker.refs.clone();
-                        CardElement::new(move || reference_card(sh, "References", self.reference_list(sh, format!("refs:{i}"), &refs), false, false, None))
+                        CardElement::new(move || reference_card(sh, "References", self.reference_list(sh, format!("refs:{i}"), &refs), false, None))
                     },
                 });
             }
@@ -1800,7 +1810,6 @@ impl BibleTab {
                             sh,
                             &format!("Strong's {}", word.entry.key),
                             self.word_body(sh, format!("word:{i}"), &word.entry),
-                            false,
                             false,
                             Some(("Open in tab", BibleMsg::OpenWord(word.entry.key.clone()))),
                         )
@@ -1859,16 +1868,17 @@ impl BibleTab {
     fn where_notes_show<'a>(&self) -> Element<'a, BibleMsg> {
         // A kind that is not shown has nothing to put in the margin: its box is empty and cannot
         // be changed (what was chosen is kept, for when the kind is shown again).
-        let item = |label: &'static str, shown: bool, in_margin: bool, kind: NoteKind| {
+        let item = |label: &'static str, shown: bool, in_margin: bool, kind: NoteKind, command: Command| {
             let box_ = checkbox(shown && in_margin).label(label).size(16).text_size(14);
-            if shown { box_.on_toggle(move |on| BibleMsg::SetInMargin(kind, on)) } else { box_ }
+            let box_ = if shown { box_.on_toggle(move |on| BibleMsg::SetInMargin(kind, on)) } else { box_ };
+            hinted(box_.into(), command)
         };
         column![
             text("Margin").size(12).style(text::secondary),
-            item("Strong's numbers in the margin", self.show_strongs, self.in_margin.strongs, NoteKind::Strongs),
-            item("Marks in the margin", self.show_marks, self.in_margin.marks, NoteKind::Marks),
-            item("Footnotes in the margin", self.show_footnotes, self.in_margin.footnotes, NoteKind::Footnotes),
-            item("References in the margin", self.show_refs, self.in_margin.refs, NoteKind::Refs),
+            item("Strong's numbers", self.show_strongs, self.in_margin.strongs, NoteKind::Strongs, Command::StrongsInMargin),
+            item("Marks", self.show_marks, self.in_margin.marks, NoteKind::Marks, Command::MarksInMargin),
+            item("Footnotes", self.show_footnotes, self.in_margin.footnotes, NoteKind::Footnotes, Command::FootnotesInMargin),
+            item("References", self.show_refs, self.in_margin.refs, NoteKind::Refs, Command::RefsInMargin),
         ]
         .spacing(10)
         .into()
@@ -1893,7 +1903,7 @@ impl BibleTab {
             NoteContent::Word { key, entry: Some(_) } => Some(("Open in tab", BibleMsg::OpenWord(key.clone()))),
             _ => None,
         };
-        reference_card(sh, &label, body, true, fill, open)
+        reference_card(sh, &label, body, fill, open)
     }
 
     /// The passages a cross reference marker points to, each a link to open it, with the start of
@@ -1911,7 +1921,7 @@ impl BibleTab {
                     if t.chars().count() > 70 { format!("{short}\u{2026}") } else { short }
                 })
                 .filter(|t| !t.is_empty());
-            let mut entry = column![self.card_text(sh, format!("{key}:{i}"), format!("[[{range}]]"))].spacing(1);
+            let mut entry = column![self.card_text(sh, format!("{key}:{i}"), format!("[[@{range}]]"))].spacing(1);
             if let Some(preview) = preview {
                 entry = entry.push(self.card_text_sized(sh, format!("{key}:{i}:text"), markdown_text(&preview), 0.8, true));
             }
@@ -2123,7 +2133,6 @@ pub fn reference_card<'a>(
     sh: &Shared,
     label: &str,
     body: Element<'a, BibleMsg>,
-    closable: bool,
     fill: bool,
     action: Option<(&'static str, BibleMsg)>,
 ) -> Element<'a, BibleMsg> {
@@ -2142,10 +2151,6 @@ pub fn reference_card<'a>(
     }
     if let Some((label, message)) = action {
         header = header.push(button(text(label).size(meta)).padding([0, 6]).style(button::text).on_press(message));
-    }
-    if closable {
-        header = header
-            .push(button(text("✕").size(meta)).padding([0, 4]).style(button::text).on_press(BibleMsg::CloseNoteCard));
     }
     let width = if fill { Length::Fill } else { Length::Shrink };
     let body = scrollable(container(body).padding([0, 8]).width(width)).height(Length::Shrink);

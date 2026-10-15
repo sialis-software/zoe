@@ -218,7 +218,7 @@ impl Shared {
 
     /// Like [`Shared::log_reading`], and says too whether today's note got the chapter: (logged, in the daily note).
     pub fn log_reading_in(&mut self, book: Book, chapter: u16, now: &chrono::DateTime<chrono::Local>) -> (bool, bool) {
-        let link = format!("[[{} {}]]", book.name(), chapter);
+        let link = Self::chapter_link(book, chapter);
         let log = self.notes.get(READING_LOG).cloned().unwrap_or_else(|| study_core::reading_log::new_log("Reading log", &frontmatter::now()));
         let added = study_core::reading_log::add_entry(&log, &link, now);
         let logged = added.is_some();
@@ -277,7 +277,7 @@ impl Shared {
 
     /// The link a chapter has in the reading log and the notes made from it.
     fn chapter_link(book: Book, chapter: u16) -> String {
-        format!("[[{} {}]]", book.name(), chapter)
+        format!("[[@{} {}]]", book.name(), chapter)
     }
 
     /// The days of the plans that have been completed: the path of each day's note, and the latest date.
@@ -514,6 +514,13 @@ impl Shared {
 
     /// The passage an `![[...]]` line shows, when the backend can serve it in `module`.
     pub fn embed_for(&self, module: &ModuleId, target: &LinkTarget) -> Option<EmbedContent> {
+        // An entry of a dictionary: the word, how it is said and what it means.
+        if let LinkTarget::Sword { module: named, key } = target {
+            let (dictionary, entry) = self.dictionary_entry_for(named, key)?;
+            let said = [entry.lemma.as_str(), entry.transliteration.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("  ");
+            let body = if said.is_empty() { entry.definition.clone() } else { format!("{said}\n{}", entry.definition) };
+            return (!body.trim().is_empty()).then(|| EmbedContent { title: format!("{} · {}", entry.key, dictionary), body });
+        }
         let LinkTarget::Verse { range, module: pin } = target else { return None };
         let abbreviation = self.module_abbreviation(module);
         // A pin to some other module than we have means the passage is not available here.
@@ -525,6 +532,21 @@ impl Shared {
         let chapter = self.backend.chapter(module, range.book, range.chapter).ok()?;
         let body = chapter.plain_text(range);
         (!body.is_empty()).then(|| EmbedContent { title: format!("{range} · {abbreviation}"), body })
+    }
+
+    /// The entry a dictionary link names, and the abbreviation of the dictionary that has it: the dictionary called
+    /// `named` (by name or abbreviation) or, failing that, whichever has a Strong's number.
+    pub fn dictionary_entry_for(&self, named: &str, key: &str) -> Option<(String, study_core::LexiconEntry)> {
+        let wanted = named.to_lowercase();
+        let dictionaries = self.backend.dictionaries();
+        let found = dictionaries
+            .iter()
+            .find(|d| d.id.0.to_lowercase() == wanted || d.abbreviation.to_lowercase() == wanted)
+            .map(|d| d.id.clone())
+            .or_else(|| self.backend.strongs_dictionary(key))?;
+        let entry = self.backend.dictionary_entry(&found, key)?;
+        let abbreviation = dictionaries.iter().find(|d| d.id == found).map_or_else(|| found.0.clone(), |d| d.abbreviation.clone());
+        Some((abbreviation, entry))
     }
 
     /// The notes that link to `passage` (a link to any of its verses, or to the whole chapter
@@ -658,6 +680,10 @@ impl Shared {
         }
         if name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) || name.starts_with('.') {
             return Err("A name cannot start with a dot or contain / \\ : * ? \" < > |".into());
+        }
+        // (`%` and `@` begin the links to dictionary entries and to passages, which a note's name must not look like.)
+        if name.starts_with(['%', '@']) {
+            return Err("A name cannot start with % or @: they begin links to dictionary entries and passages".into());
         }
         let dir = old.rsplit_once('/').map_or("", |(d, _)| d);
         let new = if dir.is_empty() { format!("{name}.md") } else { format!("{dir}/{name}.md") };

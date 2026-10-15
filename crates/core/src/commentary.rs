@@ -206,7 +206,7 @@ pub fn markdown(paragraph: &Paragraph) -> String {
         let lead = &span.text[..span.text.len() - span.text.trim_start().len()];
         let tail = &span.text[span.text.trim_end().len()..];
         let body = match span.passage.as_deref().and_then(passage_range) {
-            Some(range) => format!("[[{range}|{}]]", inner.replace(['|', '[', ']'], "")),
+            Some(range) => format!("[[@{range}|{}]]", inner.replace(['|', '[', ']'], "")),
             None => escape(inner),
         };
         let marks = match (span.bold, span.italic) {
@@ -262,7 +262,8 @@ pub fn plain_text(source: &str) -> String {
                     inner.push(c);
                 }
                 chars.next_if_eq(&']');
-                out.push_str(inner.rsplit_once('|').map_or(inner.as_str(), |(_, shown)| shown));
+                // (With no alias, the target as typed, less the marker of a passage or an entry.)
+                out.push_str(inner.rsplit_once('|').map_or_else(|| inner.strip_prefix(['@', '%']).unwrap_or(&inner), |(_, shown)| shown));
             }
             _ => out.push(c),
         }
@@ -347,9 +348,9 @@ mod tests {
             span("Joh 2:23,24", false, false, Some("Joh 2:23,24")),
         ];
         let md = markdown(&paragraph);
-        assert_eq!(md, "1\\. Not a list, a **bold** *and \\*odd\\* \\[text\\]* see [[John 2:23|Joh 2:23,24]]");
+        assert_eq!(md, "1\\. Not a list, a **bold** *and \\*odd\\* \\[text\\]* see [[@John 2:23|Joh 2:23,24]]");
         assert_eq!(plain_text(&md), "1. Not a list, a bold and *odd* [text] see Joh 2:23,24");
-        assert_eq!(plain_text("[[John 3:16]]\n\nText"), "John 3:16\n\nText");
+        assert_eq!(plain_text("[[@John 3:16]]\n\nText"), "John 3:16\n\nText");
     }
 
     #[test]

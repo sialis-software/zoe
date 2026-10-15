@@ -470,8 +470,17 @@ fn emit(out: &mut Out, text: &str, base: usize, at: usize, found: &Found, reveal
         ),
         Delim::Link => {
             // The address is what follows `](`, when it is one an app outside can be asked to open.
-            let address = text[inner_end..at + found.len].strip_prefix("](").and_then(|a| a.strip_suffix(')')).map(str::trim).filter(|a| is_external(a));
-            let link = Style { underline: true, role: Role::LinkWeb, link: address.map(|a| LinkTarget::Web(a.to_string())), raw: revealed, ..style.clone() };
+            // (Or an entry of a dictionary: `sword:Module/key`.)
+            let address = text[inner_end..at + found.len].strip_prefix("](").and_then(|a| a.strip_suffix(')')).map(str::trim);
+            let target = address.and_then(|a| {
+                if is_external(a) {
+                    Some(LinkTarget::Web(a.to_string()))
+                } else {
+                    study_core::markdown::sword_address(a).map(|(module, key)| LinkTarget::Sword { module, key })
+                }
+            });
+            let role = if matches!(target, Some(LinkTarget::Sword { .. })) { Role::LinkModule } else { Role::LinkWeb };
+            let link = Style { underline: true, role, link: target, raw: revealed, ..style.clone() };
             if revealed {
                 out.same(inner, base + inner_start..base + inner_end, &link);
             } else {
@@ -533,12 +542,15 @@ fn emit_link(out: &mut Out, text: &str, base: usize, link: &WikiLink, reveal: &R
         Some((target, alias)) => (target.len() + 1, alias.len()),
         None => (0, inner.len()),
     };
+    // The target as typed, with no alias, shows without its marker (`@` of a passage, `%` of a dictionary entry).
+    let marker = usize::from(shown_from == 0 && !matches!(link.target, LinkTarget::Note(_)) && matches!(inner.as_bytes().first(), Some(b'@' | b'%')));
+    let (shown_from, shown_len) = (shown_from + marker, shown_len - marker);
     let shown_start = span.start + open + shown_from;
     out.hidden(base + span.start..base + shown_start);
     let shown = &text[shown_start..shown_start + shown_len];
     // A verse pinned to a module (`John 3:3@KJV`), with no alias to stand in for it, shows the
     // reference as usual and the module after a thin space, smaller. Still all one link.
-    match shown.rsplit_once('@').filter(|_| shown_from == 0 && matches!(link.target, LinkTarget::Verse { .. })) {
+    match shown.rsplit_once('@').filter(|_| shown_from == marker && matches!(link.target, LinkTarget::Verse { .. })) {
         Some((reference, module)) if !reference.is_empty() && !module.is_empty() => {
             let at = shown_start + reference.len();
             same_unbroken(out, reference, base + shown_start, &ls);
@@ -641,7 +653,7 @@ mod tests {
 
     #[test]
     fn wikilinks_show_their_label_and_carry_their_target() {
-        let r = rendered("see [[John 3:16]] and [[Nicodemus|him]] now", false);
+        let r = rendered("see [[@John 3:16]] and [[Nicodemus|him]] now", false);
         assert_eq!(r.text, "see John\u{a0}3:16 and him now");
         let link = r.runs.iter().find(|x| x.text == "John\u{a0}3:16").unwrap();
         assert_eq!(link.style.role, Role::LinkVerse);
@@ -652,7 +664,7 @@ mod tests {
         // Clicking in "him" lands in the alias part of the source.
         let d = r.text.find("him").unwrap();
         let s = r.display_to_source(d);
-        assert_eq!(&"see [[John 3:16]] and [[Nicodemus|him]] now"[s..s + 3], "him");
+        assert_eq!(&"see [[@John 3:16]] and [[Nicodemus|him]] now"[s..s + 3], "him");
         // Revealed, it is all there.
         assert_eq!(rendered("[[Nicodemus|him]]", true).text, "[[Nicodemus|him]]");
     }
@@ -672,7 +684,7 @@ mod tests {
 
     #[test]
     fn a_pinned_module_is_shown_small_after_a_thin_space_when_rendered() {
-        let line = "see [[John 3:3@KJV]] now";
+        let line = "see [[@John 3:3@KJV]] now";
         let r = rendered(line, false);
         assert_eq!(r.text, "see John\u{a0}3:3\u{a0}KJV now");
         let module = r.runs.iter().find(|x| x.text == "KJV").expect("its own run");
@@ -684,14 +696,14 @@ mod tests {
         // Revealed, it is the raw `@KJV`.
         assert_eq!(rendered(line, true).text, line);
         // With an alias, the alias is all that shows.
-        assert_eq!(rendered("[[John 3:3@KJV|this]]", false).text, "this");
+        assert_eq!(rendered("[[@John 3:3@KJV|this]]", false).text, "this");
         // A note named with an @ is not a module pin.
         assert_eq!(rendered("[[a@b]]", false).text, "a@b");
     }
 
     #[test]
     fn offsets_map_through_the_module_suffix() {
-        let line = "x [[John 3:3@KJV]] y";
+        let line = "x [[@John 3:3@KJV]] y";
         let r = rendered(line, false);
         for d in 0..r.text.len() {
             if !r.text.is_char_boundary(d) {
@@ -710,13 +722,13 @@ mod tests {
     #[test]
     fn a_rendered_link_never_has_a_breakable_space_in_it() {
         for line in [
-            "[[John 3:16]]",
-            "[[Ps 23:1-3@KJV]]",
+            "[[@John 3:16]]",
+            "[[@Ps 23:1-3@KJV]]",
             "[[Notes on Nicodemus]]",
-            "[[sword:StrongsGreek/G5547]]",
+            "[[%G5547]]",
             "[[Some long note name|an alias with spaces]]",
             "[a web link with spaces](https://x.org)",
-            "![[John 3:16-17]] after",
+            "![[@John 3:16-17]] after",
         ] {
             let r = rendered(line, false);
             for run in r.runs.iter().filter(|run| run.style.link.is_some() || run.style.role == Role::LinkWeb) {
@@ -773,10 +785,10 @@ mod tests {
         assert_eq!(render(doc, &blocks[1], &Reveal::none()).deco, Deco::CodeBg);
         assert!(render(doc, &blocks[1], &Reveal::none()).runs[0].style.mono);
 
-        let embed = rendered("![[John 3:16-17]]", false);
+        let embed = rendered("![[@John 3:16-17]]", false);
         assert_eq!(embed.text, "");
         assert!(matches!(embed.deco, Deco::Embed(LinkTarget::Verse { .. })));
-        assert_eq!(rendered("![[John 3:16-17]]", true).text, "![[John 3:16-17]]");
+        assert_eq!(rendered("![[@John 3:16-17]]", true).text, "![[@John 3:16-17]]");
     }
 
     #[test]

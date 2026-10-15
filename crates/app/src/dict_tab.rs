@@ -11,6 +11,37 @@ use md_editor::{Action, Document};
 use std::fmt;
 use study_core::{LexiconEntry, ModuleId};
 
+/// A definition as markdown, with the Strong's numbers in it (`From H215;`) as links to their entries, where
+/// `defined` says there is an entry for the number.
+pub fn linked_definition(text: &str, defined: impl Fn(&str) -> bool) -> String {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut plain_from = 0;
+    let mut i = 0;
+    while i < chars.len() {
+        let (at, c) = chars[i];
+        let starts_word = i == 0 || !chars[i - 1].1.is_alphanumeric();
+        if starts_word && (c == 'G' || c == 'H') {
+            let digits = chars[i + 1..].iter().take_while(|(_, d)| d.is_ascii_digit()).count();
+            let end = i + 1 + digits;
+            let ends_word = chars.get(end).is_none_or(|(_, d)| !d.is_alphanumeric());
+            if (1..=4).contains(&digits) && ends_word {
+                let key = &text[at..chars.get(end).map_or(text.len(), |(e, _)| *e)];
+                if defined(key) {
+                    out.push_str(&crate::bible_tab::markdown_text(&text[plain_from..at]));
+                    out.push_str(&format!("[[%{key}|{key}]]"));
+                    plain_from = at + key.len();
+                }
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&crate::bible_tab::markdown_text(&text[plain_from..]));
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictChoice(pub ModuleId, pub String);
 
@@ -37,6 +68,8 @@ pub enum DictMsg {
     OpenVerse(scripture::RefRange, ModuleId, Vec<(usize, usize)>),
     /// Something done in a piece of the entry's text (by its name): only what selects or moves is taken.
     Text(String, Action),
+    /// A link in the entry's text (to another entry): the app decides where it opens, as for any link.
+    Link(study_core::markdown::LinkTarget),
 }
 
 pub struct DictTab {
@@ -126,6 +159,8 @@ impl DictTab {
             }
             // Opening a verse is for the workspace to do.
             DictMsg::OpenVerse(..) => {}
+            // Following a link is for the workspace to do.
+            DictMsg::Link(_) => {}
             // The text is read, not written: only what selects or moves is taken.
             DictMsg::Text(name, action) => {
                 if matches!(
@@ -208,6 +243,8 @@ impl DictTab {
             .font(fonts::UI)
             .padding([2.0, 0.0])
             .on_action(move |action| DictMsg::Text(name.clone(), action))
+            .follow_links(true)
+            .on_link(DictMsg::Link)
             .into();
         if !quiet {
             return editor;
@@ -240,7 +277,9 @@ impl DictTab {
 
         let body: Element<'_, DictMsg> = match (&self.entry, self.key.is_empty()) {
             (Some(e), _) => {
-                let mut head = row![].spacing(12).align_y(iced::Alignment::End);
+                // Centered, so that a long transliteration wrapping onto two lines sits level with the word and
+                // its speaker button rather than hanging above them.
+                let mut head = row![].spacing(12).align_y(iced::Alignment::Center);
                 if !e.lemma.is_empty() {
                     head = head.push(self.selectable(sh, "lemma", crate::bible_tab::markdown_text(&e.lemma), 34.0, false));
                     if crate::speech::can_say(&e.lemma) {
@@ -255,7 +294,7 @@ impl DictTab {
                 let mut entry = column![
                     self.selectable(sh, "key", crate::bible_tab::markdown_text(&e.key), 12.0, true),
                     head,
-                    self.selectable(sh, "definition", crate::bible_tab::markdown_text(&e.definition), 17.0, false),
+                    self.selectable(sh, "definition", linked_definition(&e.definition, |key| sh.backend.strongs_dictionary(key).is_some()), 17.0, false),
                 ]
                 .spacing(10);
                 if let Some(module) = searched {
@@ -279,5 +318,22 @@ impl DictTab {
             space::vertical().height(0),
         ]
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strongs_numbers_in_a_definition_link_to_their_entries_where_there_are_any() {
+        let defined = |key: &str| key != "H9999";
+        assert_eq!(
+            linked_definition("From H215; a {luminary} (see G25, not H9999 or xH5 or H12345).", defined),
+            "From [[%H215|H215]]; a {luminary} (see [[%G25|G25]], not H9999 or xH5 or H12345)."
+        );
+        assert_eq!(linked_definition("H1", defined), "[[%H1|H1]]");
+        assert_eq!(linked_definition("No numbers *here*.", defined), "No numbers \\*here\\*.");
+        assert_eq!(linked_definition("", defined), "");
     }
 }

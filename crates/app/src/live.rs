@@ -440,12 +440,45 @@ pub fn load_vault(backend: &dyn StudyBackend, dir: &Path, index: &Path, options:
             }
         }
     }
+    if let Some(said) = mark_links_once(&vault, &mut notes, dir, index) {
+        if !status.is_empty() {
+            status.push(' ');
+        }
+        status.push_str(&said);
+    }
     // The index is a cache: if it cannot open, the app works without it.
     let index = vault::Index::open(index).ok().and_then(|mut ix| {
         ix.sync(&notes).ok()?;
         Some(ix)
     });
     Ok(Loaded { notes, persist: Persist::new(vault, index), status })
+}
+
+/// A vault of this app's own that was made before links had their markers (`[[@John 3:16]]`, `[[%G25]]`) has its
+/// links of the old kind written in the new, once: the first time it is opened with this version. What was there is
+/// kept in a folder beside the index, and a file says it is done (so that a note linked to by the name of a passage
+/// later is left as it is). Another program's vault is left alone: its links mean what they mean there. Says what
+/// was done, if anything was.
+fn mark_links_once(vault: &vault::Vault, notes: &mut BTreeMap<String, String>, dir: &Path, index: &Path) -> Option<String> {
+    let done = index.with_extension("links");
+    let ours = dir.join("margins").is_dir() || notes.contains_key("Reading log.md");
+    if done.exists() || !ours {
+        return None;
+    }
+    let backup = index.with_extension("links-before");
+    let mut rewritten = 0;
+    for (path, text) in notes.iter_mut() {
+        let Some(new) = study_core::markdown::migrate_links(text) else { continue };
+        let saved = backup.join(path);
+        let kept = saved.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(&saved, text.as_bytes()).is_ok();
+        // Not rewritten if what was there could not be kept.
+        if kept && vault.write(path, &new).is_ok() {
+            *text = new;
+            rewritten += 1;
+        }
+    }
+    let _ = std::fs::write(&done, "links with markers\n");
+    (rewritten > 0).then(|| format!("The links to passages and dictionary entries in {rewritten} notes were written with their markers (@ and %); the old notes are kept in {}.", backup.display()))
 }
 
 /// What a folder holds, to tell the person before it is made a vault.
@@ -580,7 +613,7 @@ mod tests {
         assert!(first.status.is_empty(), "{}", first.status);
         let marks = first.notes.keys().filter(|p| p.starts_with("margins/")).count();
         assert!(marks >= 7, "{marks} seeded marks");
-        let pin = format!("![[John 3:3-5@{}]]", first_module());
+        let pin = format!("![[@John 3:3-5@{}]]", first_module());
         assert!(first.notes["notes/Nicodemus.md"].contains(&pin), "{pin}");
         // A user's own note and an edit to a sample survive a restart; nothing is re-seeded.
         let v = first.persist.as_ref().unwrap().vault();
@@ -652,5 +685,32 @@ mod tests {
         let second = boot_at(home.path(), &roots(), false);
         assert_eq!(is_template(&second.notes), 3);
         assert!(second.notes["templates/Daily.md"].contains("Mine."));
+    }
+
+    #[test]
+    fn an_old_vault_of_ours_has_its_links_marked_once_with_the_old_notes_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("v");
+        std::fs::create_dir_all(dir.join("margins")).unwrap();
+        std::fs::write(dir.join("A.md"), "See [[John 3:16]] and [[sword:StrongsGreek/G25]] and [[Memory verses]].\n").unwrap();
+        let options = Options { samples: Samples::Never, templates: false, plans: false };
+        let index = home.path().join("index.sqlite");
+        let first = load_vault(&study_core::mock::MockBackend, &dir, &index, options).unwrap();
+        let want = "See [[@John 3:16]] and [[%G25]] and [[Memory verses]].\n";
+        assert_eq!(first.notes["A.md"], want);
+        assert_eq!(std::fs::read_to_string(dir.join("A.md")).unwrap(), want, "on disk too");
+        assert!(first.status.contains("1 notes") || first.status.contains("in 1 "), "{}", first.status);
+        let before = std::fs::read_to_string(home.path().join("index.links-before/A.md")).unwrap();
+        assert!(before.contains("[[John 3:16]]"), "the old note is kept");
+        // Opened again, a link that is a note's name stays a note's name.
+        std::fs::write(dir.join("B.md"), "A note named [[John 3:16]].\n").unwrap();
+        let second = load_vault(&study_core::mock::MockBackend, &dir, &index, options).unwrap();
+        assert_eq!(second.notes["B.md"], "A note named [[John 3:16]].\n");
+        // A vault that is not ours (no margins folder) is left alone.
+        let other = home.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("C.md"), "[[John 3:16]]\n").unwrap();
+        let theirs = load_vault(&study_core::mock::MockBackend, &other, &home.path().join("ix2.sqlite"), options).unwrap();
+        assert_eq!(theirs.notes["C.md"], "[[John 3:16]]\n");
     }
 }
