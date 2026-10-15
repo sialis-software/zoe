@@ -2011,7 +2011,8 @@ where
                 let card_x = bounds.x + laid.rect.x;
                 // Rounded ends: where two segments meet at a right angle their ends overlap, which
                 // rounds the outer corner instead of leaving a stair-stepped square one.
-                let ink = if lit && !hot { faded(laid.color, backdrop) } else { laid.color };
+                // (A card being written in is not dimmed with the rest, when they are all dimmed to begin with.)
+                let ink = if lit && !hot && !(self.dim_cards && spec.pinned) { faded(laid.color, backdrop) } else { laid.color };
                 let mut bar = |x: f32, y: f32, w: f32, h: f32| {
                     renderer.fill_quad(
                         Quad {
@@ -2044,7 +2045,7 @@ where
             }
             let abs = laid.absolute(bounds);
             if let Some(stack) = &laid.stack {
-                let dim = lit && !laid.is_hot(spec.key, &emphasised);
+                let dim = lit && !laid.is_hot(spec.key, &emphasised) && !(self.dim_cards && spec.pinned);
                 self.draw_stack_behind(renderer, theme, viewport, bounds, abs, stack, cursor, dim);
             }
             // Only the part of a card inside what is visible is drawn: the layer's clip is its
@@ -2068,7 +2069,7 @@ where
             let edge = Rectangle::new(Point::new(abs.x - 2.0, abs.y - 2.0), Size::new(abs.width + 4.0, abs.height + 4.0));
             if let Some(clip) = edge.intersection(viewport) {
                 renderer.with_layer(clip, |renderer| {
-                    if lit && !laid.is_hot(spec.key, &emphasised) {
+                    if lit && !laid.is_hot(spec.key, &emphasised) && !(self.dim_cards && spec.pinned) {
                         // Something else is pointed at: this note steps back.
                         renderer.fill_quad(
                             Quad { bounds: abs, border: iced::Border { radius: 6.0.into(), ..iced::Border::default() }, ..Quad::default() },

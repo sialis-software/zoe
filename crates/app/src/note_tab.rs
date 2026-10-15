@@ -779,14 +779,13 @@ impl NoteTab {
         sh.mark_index_of(&self.path)
     }
 
-    /// Work out the choices for the link being written (none in Vim's other modes, in the log, in the library, or with a
-    /// selection).
+    /// Work out the choices for the link being written (none in Vim's other modes, in the library, or with a selection).
     fn refresh_completion(&mut self, sh: &Shared) -> Task<NoteMsg> {
         let before = self.completion.as_ref().map(|c| (c.from, c.items.clone()));
         let head = self.doc.selection().head;
         // (With Vim bindings, while typing: in Insert mode.)
         let typing = !sh.settings.vim_mode || self.vim.mode() == VimMode::Insert;
-        let wanted = typing && !self.is_log() && !self.read_only() && self.doc.selection().is_empty();
+        let wanted = typing && !self.read_only() && self.doc.selection().is_empty();
         let found = if wanted { crate::completion::complete(sh, self.doc.source(), head, None) } else { None };
         self.completion = match found {
             Some(mut found) if self.completion_dismissed != Some(found.from) => {
@@ -858,7 +857,7 @@ impl NoteTab {
 
     /// The link just closed with `]]` put right in its capitals and spacing (see `completion::correct`).
     fn put_link_right(&mut self, sh: &Shared) -> bool {
-        if self.is_log() || self.read_only() {
+        if self.read_only() {
             return false;
         }
         let caret = self.doc.selection().head;
@@ -1287,6 +1286,7 @@ impl NoteTab {
         let mut editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
             .id(self.editor_id())
             .on_action(NoteMsg::Action)
+            .completion(self.choices_card(sh), NoteMsg::Completion)
             .follow_links(true)
             .on_link(NoteMsg::OpenLink)
             .on_link_menu(NoteMsg::LinkMenu)

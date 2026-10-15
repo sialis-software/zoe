@@ -118,15 +118,21 @@ impl PenDef {
 /// The color a pen has when none valid is given: the medium yellow.
 pub const DEFAULT_PEN_COLOR: usize = 10;
 
-/// The colors a pen can be: three rows of eight, light, medium and deep, each in hue order.
-pub const PEN_COLORS: [&str; 24] = [
+/// The colors a pen can be: three rows of eight hues, light, medium and deep, each in hue order, and a ninth column
+/// of three greys (light, medium and deep). The greys come last, so that the places of the others are as they were.
+pub const PEN_COLORS: [&str; 27] = [
     // Light, in hue order: red, orange, yellow, green, teal, blue, purple, pink.
     "#FF9E9E", "#FFC285", "#FFF176", "#A5E6A0", "#8FE6DC", "#9CCBFF", "#D0B8FF", "#FFB3D9",
     // Medium.
     "#FF5252", "#FF9F43", "#F5D90A", "#5FD38D", "#2EC4B6", "#4DA3FF", "#B388FF", "#FF7AB6",
     // Deep.
     "#C62828", "#E65100", "#C9A800", "#2E9E5B", "#00897B", "#1E6FD9", "#7C4DFF", "#D81B7A",
+    // The greys: light, medium, deep.
+    "#D0D0D0", "#8E8E8E", "#4A4A4A",
 ];
+
+/// How many hues are in a row of the colors (the greys are one more at the end of it).
+pub const PEN_HUES: usize = 8;
 
 /// A new vault starts with no pens: they are the person's own.
 pub fn default_pens() -> Vec<PenDef> {
@@ -542,5 +548,22 @@ mod tests {
         assert!(data.join("session.json").is_file());
         assert!(!config.join("session.json").exists() && !data.join("settings.json").exists());
         assert_eq!(Store::split(config, data).session(), Some(sample()));
+    }
+
+    #[test]
+    fn the_colors_are_three_rows_of_hues_and_a_column_of_greys_with_no_two_alike() {
+        assert_eq!(PEN_COLORS.len(), 3 * (PEN_HUES + 1));
+        for (i, color) in PEN_COLORS.iter().enumerate() {
+            assert!(color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit()), "{color}");
+            assert!(!PEN_COLORS[i + 1..].contains(color), "{color} is there twice");
+        }
+        // The greys are grey, and darker down the column; the places of the hues did not move.
+        let grey = |c: &str| {
+            let v: Vec<u8> = (0..3).map(|k| u8::from_str_radix(&c[1 + 2 * k..3 + 2 * k], 16).unwrap()).collect();
+            v[0] == v[1] && v[1] == v[2]
+        };
+        assert!(PEN_COLORS[24..].iter().all(|c| grey(c)) && PEN_COLORS[..24].iter().all(|c| !grey(c)));
+        assert!(PEN_COLORS[24] > PEN_COLORS[25] && PEN_COLORS[25] > PEN_COLORS[26]);
+        assert_eq!(PEN_COLORS[DEFAULT_PEN_COLOR], "#F5D90A");
     }
 }

@@ -177,11 +177,13 @@ fn section<'a>(title: &'static str, content: Element<'a, Message>) -> Element<'a
 /// one pressed (its place in `state::PEN_COLORS`).
 fn color_grid<'a, M: Clone + 'a>(chosen: usize, on: impl Fn(usize) -> M) -> Element<'a, M> {
     let mut grid = column![].spacing(6);
-    for (r, line) in state::PEN_COLORS.chunks(8).enumerate() {
+    let rows = state::PEN_COLORS.len() / (state::PEN_HUES + 1);
+    for r in 0..rows {
         let mut cells = row![].spacing(6);
-        for (c, hex) in line.iter().enumerate() {
-            let i = r * 8 + c;
-            let color = bible_tab::hex_color(hex, 1.0).unwrap_or(iced::Color::WHITE);
+        // The row's hues, then its grey (which come after all the hues in the list).
+        let places = (0..state::PEN_HUES).map(|c| r * state::PEN_HUES + c).chain(std::iter::once(rows * state::PEN_HUES + r));
+        for i in places {
+            let color = bible_tab::hex_color(state::PEN_COLORS[i], 1.0).unwrap_or(iced::Color::WHITE);
             let ringed = i == chosen % state::PEN_COLORS.len().max(1) && chosen != usize::MAX;
             cells = cells.push(
                 button(space::horizontal())
@@ -1276,6 +1278,16 @@ impl App {
         for id in left {
             if let Some(Tab::Bible(tab)) = self.tabs.get_mut(&id) {
                 tab.forget_requests();
+            }
+            // A day written into the log by hand is linked to its daily note, once the log is left (not while it is
+            // being typed in).
+            if matches!(self.tabs.get(&id), Some(Tab::Log(_))) {
+                self.sh.sync_log_days();
+                for tab in self.tabs.values_mut() {
+                    if let Tab::Log(t) = tab {
+                        t.note.reload(&self.sh);
+                    }
+                }
             }
         }
         // The person's own commentary may have been written in since it was last in view.
@@ -6102,6 +6114,58 @@ mod tests {
         let (x, y) = h.center_of("Topic 12").expect("the chosen row shows");
         h.click(x, y);
         assert_eq!(h.app.note().doc.source(), "see [[Topic 12]]");
+    }
+
+    #[test]
+    fn a_day_typed_into_the_log_by_hand_is_linked_to_its_daily_note_once_the_log_is_left() {
+        let mut app = App::new();
+        let now = chrono::Local::now();
+        let day = now.format("%Y-%m-%d").to_string();
+        let daily = app.sh.templates().into_iter().find(|t| t.name == "Daily").unwrap();
+        let made = study_core::templates::plan(&daily, &now, None, |_| false);
+        let path = made.path.clone();
+        app.sh.notes.insert(made.path, made.text.unwrap());
+        let id = app.show_log();
+        let end = app.log().doc.source().len();
+        let _ = app.update(Message::Log(id, NoteMsg::Action(md_editor::Action::SetCaret { offset: end, extend: false })));
+        let _ = app.update(Message::Log(id, NoteMsg::Action(md_editor::Action::Insert(format!("\n## {day}\n\n- one\n")))));
+        let plain = format!("## {day}\n");
+        assert!(app.sh.notes[crate::shared::READING_LOG].contains(&plain), "not while it is typed in");
+        // Another tab comes forward in the log's pane: the log was left.
+        let other = app.panes.iter().flat_map(|p| p.tabs.iter().copied()).find(|t| *t != id && app.pane_of(*t) == app.pane_of(id)).unwrap_or_else(|| {
+            let blank = app.new_blank();
+            let pane = app.pane_of(id).unwrap();
+            app.add_tab(pane, blank)
+        });
+        let _ = app.update(Message::TabPressed(other));
+        let linked = format!("## [[{}|{day}]]", path.trim_end_matches(".md"));
+        assert!(app.sh.notes[crate::shared::READING_LOG].contains(&linked), "{}", app.sh.notes[crate::shared::READING_LOG]);
+        assert!(app.log().doc.source().contains(&linked), "and what the tab shows is the same");
+    }
+
+    #[test]
+    fn the_reading_log_offers_choices_and_puts_links_right_as_a_note_does() {
+        let mut app = App::new();
+        let id = app.show_log();
+        let mut h = Harness::new(app);
+        // The caret goes to the end of the log, where the days are added.
+        let editor = { let Some(Tab::Log(t)) = h.app.tabs.get(&id) else { unreachable!() }; t.note.editor_id() };
+        let b = h.bounds_of(editor);
+        h.click(b.x + 40.0, b.y + 40.0);
+        let end = h.app.log().doc.source().len();
+        let _ = h.app.update(Message::Log(id, NoteMsg::Action(md_editor::Action::SetCaret { offset: end, extend: false })));
+        h.type_text("\n\nSee [[@jo");
+        assert!(h.app.log().doc.source().ends_with("See [[@jo]]"), "{}", h.app.log().doc.source());
+        let Some(Tab::Log(t)) = h.app.tabs.get(&id) else { unreachable!() };
+        assert!(t.note.completion.as_ref().is_some_and(|c| c.items[0].label == "John"), "the log offers the choices too");
+        h.named(Named::Enter);
+        assert!(h.app.log().doc.source().ends_with("See [[@John ]]"), "{}", h.app.log().doc.source());
+        // A link typed out in full is put right.
+        h.named(Named::Escape);
+        let end = h.app.log().doc.source().len();
+        let _ = h.app.update(Message::Log(id, NoteMsg::Action(md_editor::Action::SetCaret { offset: end, extend: false })));
+        h.type_text(" and [[%g25]]");
+        assert!(h.app.log().doc.source().ends_with("See [[@John ]] and [[%G25]]"), "{}", h.app.log().doc.source());
     }
 
     #[test]

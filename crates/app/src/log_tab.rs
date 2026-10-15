@@ -43,7 +43,14 @@ impl LogTab {
     pub fn update(&mut self, sh: &mut Shared, message: NoteMsg) -> (Task<NoteMsg>, Option<Request>) {
         if !matches!(
             message,
-            NoteMsg::Action(_) | NoteMsg::Vim(_) | NoteMsg::OpenLink(_) | NoteMsg::LinkMenu(..) | NoteMsg::LinkDrag(..) | NoteMsg::Scrolled(_)
+            NoteMsg::Action(_)
+                | NoteMsg::Vim(_)
+                | NoteMsg::OpenLink(_)
+                | NoteMsg::LinkMenu(..)
+                | NoteMsg::LinkDrag(..)
+                | NoteMsg::Scrolled(_)
+                | NoteMsg::Completion(_)
+                | NoteMsg::ChoicesScrolled(_)
         ) {
             return (Task::none(), None);
         }
