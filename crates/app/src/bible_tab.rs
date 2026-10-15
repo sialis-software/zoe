@@ -1938,26 +1938,22 @@ impl BibleTab {
         let writing = self.editing == Some(index);
 
         let meta = card_size(sh) * 0.7;
-        let about = if mark.is_verse_level() {
-            mark.anchor.to_string()
-        } else {
-            let quote: String = mark.quote.chars().take(30).collect();
-            let more = if mark.quote.chars().count() > 30 { "…" } else { "" };
-            format!("“{quote}{more}”")
-        };
+        // The marked words are lit in the text, and the card is joined to them: their quote on the card would say it
+        // twice. What it says first is its tags (and, for a mark on a whole verse, which verse, as nothing is lit).
+        // A card with neither has no line at the top.
         // A card being written, or floating in a popup, takes the width it is given; one resting
         // in the margin is only as wide as its text needs.
         let fill = writing || popup;
-        let header = if fill {
-            row![
-                text(about).size(meta).style(text::secondary),
-                space::horizontal(),
-                text(mark.tags.join(", ")).size(meta).style(text::secondary),
-            ]
-        } else {
-            row![text(about).size(meta).style(text::secondary), text(mark.tags.join(", ")).size(meta).style(text::secondary)]
+        let mut header = row![].spacing(12);
+        let mut has_header = false;
+        if mark.is_verse_level() {
+            header = header.push(text(mark.anchor.to_string()).size(meta).style(text::secondary));
+            has_header = true;
         }
-        .spacing(12);
+        if !mark.tags.is_empty() {
+            header = header.push(text(mark.tags.join(", ")).size(meta).style(text::secondary));
+            has_header = true;
+        }
 
         let pal = Palette::for_theme(&sh.theme());
         let module = self.module.clone();
@@ -2017,7 +2013,10 @@ impl BibleTab {
         }
 
         let width = if fill { Length::Fill } else { Length::Shrink };
-        let mut content = column![header].spacing(6).width(width);
+        let mut content = column![].spacing(6).width(width);
+        if has_header {
+            content = content.push(header);
+        }
         if writing {
             content = content.push(self.card_tags(sh, index));
         }

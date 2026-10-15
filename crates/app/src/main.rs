@@ -1329,6 +1329,23 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        // Opening something from a card while the reader is alone in the window (a dictionary entry in a tab, a note in the
+        // writer, the reading log, the notes that link here, a commentary, a search for the words) leaves that mode
+        // first, and then goes as it would anywhere else.
+        if self.reader_mode.is_some()
+            && let Message::Bible(_, m) = &message
+            && (matches!(
+                m,
+                BibleMsg::OpenWord(_)
+                    | BibleMsg::OpenMarkInWriter(_)
+                    | BibleMsg::OpenReadingLog
+                    | BibleMsg::OpenBacklinks
+                    | BibleMsg::OpenCommentary
+                    | BibleMsg::SearchSelection
+            ) || (self.modifiers.command() && matches!(m, BibleMsg::StartEdit(_) | BibleMsg::CardPressed(_))))
+        {
+            self.reader_mode = None;
+        }
         // A note selector is a pop-up: whatever is done outside it puts it away.
         // (The reader's reports of its own layout are not something done.)
         let ambient = matches!(
@@ -4877,7 +4894,9 @@ mod tests {
         let mut h = Harness::new(App::new());
         let (x, y) = h.click_scan(|app| app.bible().note_card.is_some()).expect("a footnote marker opens a card");
         assert!(h.app.bible().note_card.is_some());
-        // The same marker again: neither the press nor the release closes it to open it afresh.
+        // The same marker again, after a pause (not a double click): neither the press nor the release closes it to open it
+        // afresh.
+        std::thread::sleep(std::time::Duration::from_millis(450));
         h.move_to(x, y);
         h.press();
         assert!(h.app.bible().note_card.is_some(), "the press does not close it");
@@ -5724,10 +5743,10 @@ mod tests {
         app.sh.marks[0].body = "line of text\n".repeat(60);
         let _ = app.update(app.b(BibleMsg::StartEdit(0)));
         let mut h = Harness::new(app);
-        let (_, header) = h.center_of("“so loved the world”").unwrap();
+        let editor = { let id = h.app.bible().card_editor_id(); h.bounds_of(id) };
         let (_, actions) = h.center_of("Delete").expect("the action row is still reachable");
-        // header + editor (capped) + action row + padding: nowhere near sixty lines.
-        assert!(actions - header < CARD_BODY_MAX + 140.0, "the actions are {}px below the header", actions - header);
+        // tags + editor (capped) + action row + padding: nowhere near sixty lines.
+        assert!(actions - editor.y < CARD_BODY_MAX + 140.0, "the actions are {}px below the editor's top", actions - editor.y);
     }
 
     #[test]
@@ -9451,6 +9470,33 @@ mod tests {
     }
 
     #[test]
+    fn opening_from_a_card_leaves_the_readers_own_window_first_and_then_goes_as_usual() {
+        let mut app = App::new();
+        app.bible_mut().show_strongs = true;
+        let bible = app.bid();
+        // A dictionary tab already open: opening an entry brings it forward without adding a tab, which on its own does
+        // not end reading mode.
+        let _ = app.update(Message::Bible(bible, BibleMsg::OpenWord("G2316".into())));
+        let _ = app.update(Message::Bible(bible, BibleMsg::ReadingMode));
+        assert!(app.reader_mode.is_some());
+        let tabs = app.tabs.len();
+        let _ = app.update(Message::Bible(bible, BibleMsg::OpenWord("G25".into())));
+        assert!(app.reader_mode.is_none(), "reading mode is left");
+        assert_eq!(app.tabs.len(), tabs, "the entry went to the dictionary tab there was");
+        assert!(dict_tabs(&app).iter().any(|id| dict_of(&app, *id).key == "G25"));
+        // The reading log, from the read card.
+        let _ = app.update(Message::Bible(bible, BibleMsg::ReadingMode));
+        assert!(app.reader_mode.is_some());
+        let _ = app.update(Message::Bible(bible, BibleMsg::OpenReadingLog));
+        assert!(app.reader_mode.is_none() && app.tabs.values().any(|t| matches!(t, Tab::Log(_))));
+        // A link in the text is not a card: it is followed in the reader, which stays alone.
+        let _ = app.update(Message::Bible(bible, BibleMsg::ReadingMode));
+        let psalm = LinkTarget::Verse { range: RefRange::parse("Ps 23:1").unwrap(), module: None };
+        let _ = app.update(Message::Bible(bible, BibleMsg::OpenLink(psalm)));
+        assert!(app.reader_mode.is_some(), "reading goes on");
+    }
+
+    #[test]
     fn a_strongs_card_has_a_button_that_opens_the_definition_in_a_tab_beside_the_reader() {
         let mut app = App::new();
         app.bible_mut().show_strongs = true;
@@ -9980,6 +10026,47 @@ mod tests {
     }
 
     #[test]
+    fn a_double_click_on_a_footnote_marker_does_not_leave_its_card_open() {
+        let mut h = narrow_reader();
+        let (x, y) = h.click_scan(opened).expect("a footnote marker in John 3");
+        assert!(h.app.bible().note_card.is_some(), "the first click opened its card");
+        // The second press of a double click is a selection: the card goes.
+        h.press();
+        assert!(h.app.bible().note_card.is_none(), "no card for a double click");
+        h.release();
+        let _ = (x, y);
+    }
+
+    #[test]
+    fn dragging_after_a_double_click_on_a_link_selects_text_and_does_not_carry_the_link() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        let mut h = Harness::new(app);
+        let mut found = None;
+        'scan: for y in (140..1400).step_by(10) {
+            for x in (50..560).step_by(8) {
+                right_click(&mut h, x as f32, y as f32);
+                if h.app.link_menu.is_some() {
+                    found = Some((x as f32, y as f32));
+                    break 'scan;
+                }
+            }
+        }
+        let (x, y) = found.expect("a link");
+        h.app.link_menu = None;
+        // Pressed twice in a row (a double click, without the first release that would follow the link) and pulled:
+        // the text is selected.
+        h.move_to(x, y);
+        h.press();
+        h.press();
+        h.move_to(x + 30.0, y + 2.0);
+        h.move_to(x + 60.0, y + 2.0);
+        assert!(h.app.drag.is_none(), "the link was not picked up");
+        h.release();
+        assert!(h.app.bible().text_selection.is_some(), "the text was selected");
+    }
+
+    #[test]
     fn pulling_a_link_in_the_reader_picks_it_up_and_a_click_on_it_still_follows_it() {
         let mut app = App::new();
         app.zoomed = Some(app.panes[0].id);
@@ -10002,7 +10089,8 @@ mod tests {
         assert_eq!(h.app.bible().book, Book::NUMBERS, "clicking still follows");
         h.app.load(Book::JOHN, 3);
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
-        // Pulled away from it, it is carried.
+        // Pulled away from it, it is carried (after a pause: a press soon after a click is a double click, which selects).
+        std::thread::sleep(std::time::Duration::from_millis(450));
         h.move_to(x, y);
         h.press();
         h.move_to(x + 30.0, y + 30.0);

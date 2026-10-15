@@ -2326,6 +2326,16 @@ where
                 };
                 state.last_click = Some(Click { at: Instant::now(), point: p, count });
 
+                // The second press of a double click (or the third of a triple) is selecting text: the card the first one
+                // opened, under the line, goes.
+                if count >= 2 && self.toolbar_kind == FloatKind::UnderClick && self.toolbar.is_some() {
+                    state.click_anchor = None;
+                    state.click_link = None;
+                    if let Some(f) = &self.on_marks {
+                        shell.publish(f(Vec::new()));
+                    }
+                }
+
                 let pressed_link = state.link_at(self, p);
                 let previous = state.selection;
                 let extend = state.modifiers.shift()
@@ -2372,9 +2382,11 @@ where
                     let Some(p) = local else { return };
                     if !drag.moved && distance(drag.origin, p) > DRAG_THRESHOLD {
                         drag.moved = true;
-                        // Pulled away from a link (not a verse number): the link is being carried.
+                        // Pulled away from a link (not a verse number) after one press: the link is being carried. After a
+                        // double or triple click it is the text that is being selected, link or no.
                         let carried = drag
                             .pressed_link
+                            .filter(|_| drag.count == 1)
                             .filter(|&(b, j)| !self.blocks[b].meta[j].number)
                             .and_then(|(b, j)| self.blocks[b].spans[j].link.clone());
                         if let (Some(link), Some(f), Some(at)) = (carried, &self.on_link_drag, cursor.position()) {

@@ -598,6 +598,11 @@ fn caret_in(para: &Para, display: usize, fallback_height: f32) -> (f32, f32, f32
             continue;
         };
         let (start_idx, end_idx) = (first.start.min(end.start), first.end.max(end.end));
+        // In the gap between two lines (the space a line wrapped at belongs to neither): the end of the line before,
+        // not of the last line there is.
+        if display < start_idx && last.is_some() {
+            break;
+        }
         if display >= start_idx && display < end_idx {
             let glyph = run.glyphs.iter().find(|g| display >= g.start && display < g.end).unwrap_or(first);
             let span = (glyph.end - glyph.start).max(1) as f32;
@@ -1743,5 +1748,39 @@ mod tests {
         state.focused = false;
         assert!(!state.caret_visible(), "and an unfocused editor has no caret");
     }
-}
 
+    /// The caret at the end of a line that wrapped is on that line (or at the start of the next), whatever the offset:
+    /// never on the last line of the paragraph just because the offset fell in the gap the wrap left.
+    #[test]
+    fn the_caret_stays_on_its_own_line_in_a_wrapped_paragraph() {
+        use iced::advanced::graphics::text::Paragraph;
+        use iced::advanced::text::{Paragraph as _, Text, Wrapping};
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+        for width in [60.0_f32, 90.0, 120.0, 160.0, 220.0] {
+            let spans: Vec<iced::widget::text::Span<'static, ()>> = vec![iced::widget::span(text.to_string()).size(17.0)];
+            let p = Paragraph::with_spans(Text {
+                content: spans.as_slice(),
+                bounds: Size::new(width, f32::INFINITY),
+                size: Pixels(17.0),
+                line_height: LineHeight::Relative(LINE),
+                font: fonts::UI,
+                align_x: Alignment::Default,
+                align_y: alignment::Vertical::Top,
+                shaping: Shaping::Advanced,
+                wrapping: Wrapping::default(),
+            });
+            let runs: Vec<_> = p.buffer().layout_runs().collect();
+            let last_top = runs.last().map_or(0.0, |r| r.line_top);
+            let last_start = runs.last().and_then(|r| r.glyphs.first()).map_or(0, |g| g.start);
+            let mut previous = -1.0_f32;
+            for display in 0..=text.len() {
+                let (_, top, _) = caret_in(&p, display, 20.0);
+                assert!(top >= previous, "width {width}: the caret went back up at {display}");
+                previous = top;
+                if display < last_start {
+                    assert!(top < last_top, "width {width}: offset {display} (before the last line starts at {last_start}) has its caret on the last line");
+                }
+            }
+        }
+    }
+}
