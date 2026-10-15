@@ -2,10 +2,10 @@
 # Formats are picked per platform; the packages land in target/dist. Nothing is signed.
 name = "zoe"
 product-name = "Zoe"
-identifier = "app.zoe.Zoe"
-version = "0.1.0"
-description = "Bible study with SWORD modules and Markdown notes"
-authors = ["Zoe"]
+identifier = "cc.sialis.Zoe"
+version = "0.2.0"
+description = "Bible study that let's you focus on God's word without distractions"
+authors = ["Sialis"]
 category = "Education"
 out-dir = "target/dist"
 # The program is built first (scripts/package.sh does both): the target decides where it is.

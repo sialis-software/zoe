@@ -1,9 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/scripture", "crates/core", "crates/md-editor", "crates/sword", "crates/vault", "crates/app"]
+members = [
+  "crates/scripture",
+  "crates/core",
+  "crates/md-editor",
+  "crates/sword",
+  "crates/vault",
+  "crates/app",
+]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 publish = false
 
