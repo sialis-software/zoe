@@ -5,6 +5,8 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-16
+
 - A build for developing (`cargo run`, `dev.sh`, the tests) keeps its settings, session, vault and modules in `zoe-dev`
   folders of its own, so it can no longer touch the installed app's. `scripts/dev-sandbox.sh` looks at them, clears
   them, or fills them with a copy of the installed app's. `--reseed` works only there.

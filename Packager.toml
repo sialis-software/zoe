@@ -3,7 +3,7 @@
 name = "zoe"
 product-name = "Zoe"
 identifier = "cc.sialis.Zoe"
-version = "0.2.0"
+version = "0.3.0"
 description = "Bible study that let's you focus on God's word without distractions"
 authors = ["Sialis"]
 category = "Education"
