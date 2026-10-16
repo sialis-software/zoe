@@ -5,6 +5,9 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+- Tests run on GitHub for every push, and pushing a version tag builds the macOS, Windows and Linux bundles onto a
+  draft release (`.github/workflows`).
+
 ## [0.3.0] - 2026-10-16
 
 - A build for developing (`cargo run`, `dev.sh`, the tests) keeps its settings, session, vault and modules in `zoe-dev`

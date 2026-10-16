@@ -58,6 +58,25 @@ Other platforms: `scripts/package.sh [macos|windows|linux|all]` (cargo-packager;
 Nothing is signed or notarized yet: the first time on another Mac, open the app with right-click > Open. (Signing and
 notarizing, and a check for new versions, are not done.)
 
+### Release bundles in CI
+
+`.github/workflows/release.yml` makes the bundles for every platform when a version tag is pushed:
+
+```
+scripts/release.sh minor        # as above: tests, versions, changelog, commit, tag
+git push && git push origin v0.4.0
+```
+
+The tag must equal the version in `Cargo.toml`, and `Cargo.toml` and `Packager.toml` must agree, or the run stops at
+once. Then three builds run side by side (the tests are not repeated: `scripts/release.sh` ran them, and `ci.yml` runs them on every push): a macOS disk image for Apple silicon and Intel in one
+(`UNIVERSAL=1 scripts/bundle-macos.sh`), a Windows installer and a Linux `.deb` and AppImage (both `cargo packager`).
+The last job puts them on a **draft** GitHub release, titled "Zoe X.Y.Z", with that version's section of `CHANGELOG.md`
+as the notes. Read it, then publish it from the Releases page. Nothing is signed.
+
+To try the builds without a tag: Actions, Release, Run workflow. The bundles are kept as artifacts of the run and no
+release is made. `.github/workflows/ci.yml` runs the tests on Linux, macOS and Windows for every push to `main` and every
+pull request.
+
 ## 4. Installing
 
 ```
