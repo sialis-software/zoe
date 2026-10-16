@@ -15,10 +15,9 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 - Releases are made by `scripts/release.sh`, and put on a Mac by `scripts/install-macos.sh`.
 - The card of the days a chapter was read is an overlay card like the reader's others (over the text, closed by a click
   elsewhere or Escape) and no longer pushes the text down.
-- A button at the foot of the chapter opens the notes that link to it, in a tab.
+- A small grey button beside a chapter's title opens the notes that link to the chapter, in a tab.
 - Reader mode keeps the reader's place: it is put back at the same share of the way down when it begins and when it ends.
 - Reader mode has small back and forward buttons at its top left, and no chapter button beside the title.
-- The button beside a chapter's title (not in reader mode) is small and grey.
 - Only one selection at a time in a dictionary entry, and between the reader's text and its cards.
 
 ## [0.2.0] - 2026-10-15
