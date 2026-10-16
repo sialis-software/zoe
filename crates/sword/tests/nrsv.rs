@@ -9,7 +9,7 @@ fn book(osis: &str) -> Book {
 
 #[test]
 fn an_nrsv_module_is_read_with_its_two_extra_verses() {
-    let lib = sword::Library::discover();
+    let lib = sword::Library::open(&sword::test_roots());
     let mut seen = 0;
     for name in ["NHEB", "NHEBJE", "NHEBME", "Geneva1599", "EMTV"] {
         let Some(module) = lib.get(name) else { continue };
@@ -40,7 +40,7 @@ fn an_nrsv_module_is_read_with_its_two_extra_verses() {
 
 #[test]
 fn modules_in_versifications_that_are_not_read_say_so() {
-    let lib = sword::Library::discover();
+    let lib = sword::Library::open(&sword::test_roots());
     for module in lib.modules() {
         let name = module.conf.get("Versification").unwrap_or("KJV").to_string();
         match module.versification() {

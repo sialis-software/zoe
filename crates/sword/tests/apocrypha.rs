@@ -9,7 +9,7 @@ fn book(osis: &str) -> Book {
 
 #[test]
 fn the_kjva_apocrypha_are_read_and_the_canon_beside_them_is_not_moved() {
-    let lib = sword::Library::discover();
+    let lib = sword::Library::open(&sword::test_roots());
     let Some(kjva) = lib.get("KJVA") else { return };
     let bible = kjva.bible().expect("KJVA is readable");
     let text = |osis: &str, chapter: u16| -> String {
@@ -36,7 +36,7 @@ fn the_kjva_apocrypha_are_read_and_the_canon_beside_them_is_not_moved() {
 
 #[test]
 fn a_module_without_the_apocrypha_says_it_has_none() {
-    let lib = sword::Library::discover();
+    let lib = sword::Library::open(&sword::test_roots());
     for name in ["ASV", "BSB", "KJV"] {
         let Some(module) = lib.get(name) else { continue };
         let Ok(bible) = module.bible() else { continue };

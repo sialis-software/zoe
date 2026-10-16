@@ -106,12 +106,13 @@ pub fn shared_folder() -> Option<PathBuf> {
 }
 
 /// Where the tests look for real modules (which some of them need, and skip without): `ZOE_TEST_SWORD_PATH` (colon
-/// separated) if it is set, else the usual places and the shared folder. Only ever read from.
+/// separated) if it is set, else `SWORD_PATH` and the shared folder. Not the app's own folder (a build for developing keeps
+/// the module that comes with the app there, which is not the person's). Only ever read from.
 pub fn test_roots() -> Vec<PathBuf> {
     if let Some(v) = std::env::var_os("ZOE_TEST_SWORD_PATH").filter(|v| !v.is_empty()) {
         return std::env::split_paths(&v).collect();
     }
-    let mut roots = default_roots();
+    let mut roots: Vec<PathBuf> = std::env::var_os("SWORD_PATH").map(|v| std::env::split_paths(&v).collect()).unwrap_or_default();
     if let Some(root) = shared_folder()
         && !roots.contains(&root)
     {

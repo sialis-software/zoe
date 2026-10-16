@@ -49,7 +49,7 @@ fn dump(name: &str, root: &std::path::Path) -> Option<HashMap<String, String>> {
 }
 
 fn check(name: &str) {
-    let lib = Library::discover();
+    let lib = Library::open(&sword::test_roots());
     let Some(module) = lib.get(name) else {
         eprintln!("skipped: {name} is not installed");
         return;
@@ -86,7 +86,7 @@ fn lsb_matches_mod2imp() {
 
 #[test]
 fn every_installed_bible_converts_every_chapter_without_losing_verses() {
-    let lib = Library::discover();
+    let lib = Library::open(&sword::test_roots());
     for module in lib.modules().filter(|m| m.kind() == sword::Kind::Bible) {
         let Ok(bible) = module.bible() else { continue };
         for (book, chapter) in bible.chapters() {
@@ -127,7 +127,7 @@ fn has_text(raw: &str) -> bool {
 
 /// Every key of a dictionary, with its body, compared with `mod2imp`.
 fn check_lexicon(name: &str) {
-    let lib = Library::discover();
+    let lib = Library::open(&sword::test_roots());
     let Some(module) = lib.get(name) else { return eprintln!("skipped: {name} is not installed") };
     let Some(text) = Command::new("mod2imp").arg(name).env("SWORD_PATH", &module.root).output().ok().filter(|o| o.status.success())
     else {
