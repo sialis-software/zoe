@@ -8,11 +8,12 @@
 
 use iced::Font;
 
-#[cfg(target_os = "macos")]
+// (The tests use the Noto Sans kept with them, loaded by `Harness::new`, so that every system lays text out alike.)
+#[cfg(all(target_os = "macos", not(test)))]
 const FAMILY: &str = "SF Pro Text";
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", not(test)))]
 const FAMILY: &str = "Segoe UI";
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
 const FAMILY: &str = "Noto Sans";
 
 pub const UI: Font = Font::with_name(FAMILY);

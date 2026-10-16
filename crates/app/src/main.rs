@@ -4248,8 +4248,29 @@ mod tests {
         clipboard: TestClipboard,
     }
 
+    /// Lay text out with the same font on every system (Noto Sans, kept with the tests), not with whichever fonts the
+    /// machine has: where a click lands in the reader, and how tall a card is, depend on it.
+    fn use_test_fonts() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let mut system = iced::advanced::graphics::text::font_system().write().unwrap_or_else(|e| e.into_inner());
+            for bytes in [
+                include_bytes!("../tests-assets/fonts/NotoSans-Regular.ttf").as_slice(),
+                include_bytes!("../tests-assets/fonts/NotoSans-Bold.ttf").as_slice(),
+                include_bytes!("../tests-assets/fonts/NotoSans-Italic.ttf").as_slice(),
+                include_bytes!("../tests-assets/fonts/NotoSans-BoldItalic.ttf").as_slice(),
+            ] {
+                system.load_font(std::borrow::Cow::Borrowed(bytes));
+            }
+            let db = system.raw().db_mut();
+            db.set_sans_serif_family("Noto Sans");
+            db.set_serif_family("Noto Sans");
+        });
+    }
+
     impl Harness {
         fn new(app: App) -> Self {
+            use_test_fonts();
             let renderer = iced_test::futures::futures::executor::block_on(
                 <iced::Renderer as Headless>::new(Font::DEFAULT, Pixels(16.0), Some("tiny-skia")),
             )
