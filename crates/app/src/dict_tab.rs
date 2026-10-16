@@ -166,9 +166,19 @@ impl DictTab {
                 if matches!(
                     action,
                     Action::Move { .. } | Action::SetCaret { .. } | Action::Select(_) | Action::SelectBetween { .. } | Action::SelectAll | Action::SelectWord(_) | Action::SelectLine(_)
-                ) && let Some((_, doc)) = self.texts.borrow_mut().get_mut(&name)
-                {
-                    doc.perform(action);
+                ) {
+                    let mut texts = self.texts.borrow_mut();
+                    if let Some((_, doc)) = texts.get_mut(&name) {
+                        doc.perform(action);
+                    }
+                    // One selection at a time: what was selected in another piece is let go of.
+                    for (other, (_, doc)) in texts.iter_mut().filter(|(other, _)| **other != name) {
+                        let _ = other;
+                        let sel = doc.selection();
+                        if sel.anchor != sel.head {
+                            doc.perform(Action::SetCaret { offset: sel.head, extend: false });
+                        }
+                    }
                 }
             }
             DictMsg::Go => {

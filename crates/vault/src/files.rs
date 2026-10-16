@@ -18,9 +18,16 @@ fn user_home() -> PathBuf {
     env_dir("HOME").or_else(|| env_dir("USERPROFILE")).unwrap_or_default()
 }
 
+/// The name of the app's own folder in the usual places. A build for developing (a debug build) has a folder of its
+/// own, `zoe-dev`, so that running it can never touch the vault, the settings or the session of the installed app
+/// (`zoe`); `ZOE_HOME` and the other variables below still decide where when they are set.
+pub fn folder_name() -> &'static str {
+    if cfg!(debug_assertions) { "zoe-dev" } else { "zoe" }
+}
+
 /// Where the app keeps what the person chose (`config.json`, `settings.json`, `layouts.json`):
 /// `ZOE_CONFIG_HOME`, else `ZOE_HOME/config`, else `$XDG_CONFIG_HOME/zoe` (`~/.config/zoe`;
-/// `%APPDATA%\zoe` on Windows).
+/// `%APPDATA%\zoe` on Windows). (`zoe-dev` in a debug build: see [`folder_name`].)
 pub fn config_home() -> PathBuf {
     if let Some(p) = env_dir("ZOE_CONFIG_HOME") {
         return p;
@@ -31,9 +38,9 @@ pub fn config_home() -> PathBuf {
     if cfg!(windows)
         && let Some(p) = env_dir("APPDATA")
     {
-        return p.join("zoe");
+        return p.join(folder_name());
     }
-    env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| user_home().join(".config")).join("zoe")
+    env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| user_home().join(".config")).join(folder_name())
 }
 
 /// Where the app keeps what it makes (the session, the search indexes, the vault it makes when none
@@ -49,9 +56,9 @@ pub fn data_home() -> PathBuf {
     if cfg!(windows)
         && let Some(p) = env_dir("LOCALAPPDATA")
     {
-        return p.join("zoe");
+        return p.join(folder_name());
     }
-    env_dir("XDG_DATA_HOME").unwrap_or_else(|| user_home().join(".local/share")).join("zoe")
+    env_dir("XDG_DATA_HOME").unwrap_or_else(|| user_home().join(".local/share")).join(folder_name())
 }
 
 /// Where the app's files were before config and data were kept apart, and before the app was

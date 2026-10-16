@@ -8,8 +8,24 @@ use iced::{Element, Length};
 /// The libraries the program is built from, with their licences (`scripts/third-party.sh`).
 const LIBRARIES: &str = include_str!("../assets/third-party.txt");
 
+/// The version, as the people who make and use it number it (`Cargo.toml`'s; a release is tagged with it).
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// The commit the program was built from (`+` after it if the tree had changes the commit does not).
+pub fn build() -> &'static str {
+    env!("ZOE_BUILD")
+}
+
+/// What kind of program this is: a build for developing keeps its own folders (see `vault::folder_name`) and says so.
+pub fn is_dev_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+/// The version as the About page says it: `0.1.0 (394fd7c)`, and for a build for developing `0.1.0 · dev build (394fd7c)`.
+pub fn version_line() -> String {
+    if is_dev_build() { format!("{} \u{b7} dev build ({})", version(), build()) } else { format!("{} ({})", version(), build()) }
 }
 
 /// Whose work comes with the app, as (what, who and on what terms).
@@ -44,7 +60,7 @@ impl App {
         let mark = svg(svg::Handle::from_memory(include_bytes!("../assets/app/zoe.svg").as_slice())).width(48).height(48);
         let head = row![
             mark,
-            column![text("Zoe").size(24), faint(format!("Version {}", version())), faint("Bible study with SWORD modules and Markdown notes".into())].spacing(2),
+            column![text("Zoe").size(24), faint(format!("Version {}", version_line())), faint("Bible study with SWORD modules and Markdown notes".into())].spacing(2),
         ]
         .spacing(14)
         .align_y(iced::Center);
@@ -75,5 +91,27 @@ mod tests {
         }
         assert!(LIBRARIES.lines().any(|l| l.starts_with("iced ")) && LIBRARIES.lines().any(|l| l.starts_with("cosmic-text ")));
         assert!(LIBRARIES.lines().all(|l| l.split("  ").count() == 2), "each line is a name and version, then a licence");
+    }
+
+    /// The version in the packager's file is the program's (a release sets both: `scripts/release.sh`).
+    #[test]
+    fn the_packagers_version_and_identifier_are_the_programs() {
+        let packager = include_str!("../../../Packager.toml");
+        let value = |key: &str| {
+            packager
+                .lines()
+                .find_map(|l| l.strip_prefix(key).and_then(|r| r.trim_start().strip_prefix('=')))
+                .map(|v| v.trim().trim_matches('"').to_string())
+        };
+        assert_eq!(value("version").as_deref(), Some(version()), "Packager.toml and Cargo.toml disagree on the version");
+        assert!(value("identifier").is_some_and(|id| id.contains('.')));
+    }
+
+    #[test]
+    fn the_build_is_a_commit_and_a_build_for_developing_says_so() {
+        assert!(!build().is_empty());
+        let line = version_line();
+        assert!(line.starts_with(version()) && line.contains(build()));
+        assert_eq!(line.contains("dev build"), is_dev_build());
     }
 }

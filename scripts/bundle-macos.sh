@@ -29,6 +29,10 @@ swift scripts/make-icon.swift crates/app/assets/app/zoe.png target/Zoe.iconset
 iconutil -c icns target/Zoe.iconset -o "$app/Contents/Resources/Zoe.icns"
 rm -rf target/Zoe.iconset
 version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+# The bundle's identifier is the packager's (Packager.toml), so that the app made here and the one cargo-packager makes are one app.
+identifier=$(grep -m1 '^identifier' Packager.toml | sed 's/.*"\(.*\)".*/\1/')
+# What kind of build this is, for scripts/install-macos.sh (a build for developing is not to be installed over the real thing).
+if [ "$profile" = release ]; then channel=release; else channel=dev; fi
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,7 +42,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>Zoe</string>
     <key>CFBundleExecutable</key><string>Zoe</string>
     <key>CFBundleIconFile</key><string>Zoe</string>
-    <key>CFBundleIdentifier</key><string>app.zoe.Zoe</string>
+    <key>CFBundleIdentifier</key><string>$identifier</string>
+    <key>ZoeChannel</key><string>$channel</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$version</string>

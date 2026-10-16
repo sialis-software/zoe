@@ -71,16 +71,53 @@ pub fn default_roots() -> Vec<PathBuf> {
 }
 
 /// The folder of modules that is the app's own: `sword` in the user's config folder
-/// (`$XDG_CONFIG_HOME/sword`, which is `~/.config/sword`; `%APPDATA%\sword` on Windows).
+/// (`$XDG_CONFIG_HOME/sword`, which is `~/.config/sword`; `%APPDATA%\sword` on Windows), where other SWORD programs look
+/// too. Where the app has been given a home of its own (`ZOE_CONFIG_HOME`, or `ZOE_HOME`: a sandbox) it is `sword` in
+/// that, and a build for developing (a debug build) keeps its modules apart in `zoe-dev/sword`: neither adds to
+/// or reads from the modules the person uses.
 pub fn own_folder() -> Option<PathBuf> {
+    let set = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(config) = set("ZOE_CONFIG_HOME") {
+        return Some(config.join("sword"));
+    }
+    if let Some(home) = set("ZOE_HOME").or_else(|| set("BIBLE_STUDY_HOME")) {
+        return Some(home.join("config").join("sword"));
+    }
+    let apart = cfg!(debug_assertions);
+    if cfg!(windows)
+        && let Some(appdata) = set("APPDATA")
+    {
+        return Some(if apart { appdata.join("zoe-dev").join("sword") } else { appdata.join("sword") });
+    }
+    let config = set("XDG_CONFIG_HOME").or_else(|| set("HOME").or_else(|| set("USERPROFILE")).map(|h| h.join(".config")))?;
+    Some(if apart { config.join("zoe-dev").join("sword") } else { config.join("sword") })
+}
+
+/// The folder of modules that SWORD programs share (`~/.config/sword`), whatever kind of build this is: what a build for
+/// developing leaves alone, but can be read.
+pub fn shared_folder() -> Option<PathBuf> {
     let set = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
     if cfg!(windows)
         && let Some(appdata) = set("APPDATA")
     {
         return Some(appdata.join("sword"));
     }
-    let config = set("XDG_CONFIG_HOME").or_else(|| set("HOME").or_else(|| set("USERPROFILE")).map(|h| h.join(".config")))?;
-    Some(config.join("sword"))
+    Some(set("XDG_CONFIG_HOME").or_else(|| set("HOME").or_else(|| set("USERPROFILE")).map(|h| h.join(".config")))?.join("sword"))
+}
+
+/// Where the tests look for real modules (which some of them need, and skip without): `ZOE_TEST_SWORD_PATH` (colon
+/// separated) if it is set, else the usual places and the shared folder. Only ever read from.
+pub fn test_roots() -> Vec<PathBuf> {
+    if let Some(v) = std::env::var_os("ZOE_TEST_SWORD_PATH").filter(|v| !v.is_empty()) {
+        return std::env::split_paths(&v).collect();
+    }
+    let mut roots = default_roots();
+    if let Some(root) = shared_folder()
+        && !roots.contains(&root)
+    {
+        roots.push(root);
+    }
+    roots
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

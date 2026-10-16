@@ -8,6 +8,7 @@ use crate::history::History;
 use crate::live_editor::{live_editor, live_reader, live_view};
 use crate::opening::Spec;
 use crate::palette::Palette;
+use crate::popover::popover;
 use crate::reader::{self, Link};
 use crate::reader_text::{CanonSlice, CardElement, CardSpec, FloatKind, MarkDraw, MarkKind};
 use crate::shared::{Shared, TabId};
@@ -144,6 +145,10 @@ pub enum BibleMsg {
     LogChapter,
     /// Show or put away the card with the days the chapter was read.
     ToggleReadCard,
+    /// Put the card of the days the chapter was read away.
+    CloseReadCard,
+    /// The notes that link to this chapter, in a tab.
+    OpenChapterBacklinks,
     /// Show the reading log note.
     OpenReadingLog,
     /// Marks under a click in the reader (several when they overlap); empty = dismissed.
@@ -181,8 +186,8 @@ pub enum BibleMsg {
     /// The list of places this tab has been.
     ToggleHistory,
     CloseHistory,
-    /// The reader was scrolled to this far down.
-    Scrolled(f32),
+    /// The reader was scrolled to this far down, in pixels and as a share of what there is to scroll.
+    Scrolled(f32, f32),
     ToggleStrongs(bool),
     ToggleMarks(bool),
     ToggleFootnotes(bool),
@@ -285,6 +290,9 @@ pub struct BibleTab {
     /// Where this tab has been, and how far down the chapter it is now (kept as it is scrolled).
     pub history: History<Place>,
     pub scroll_y: f32,
+    /// The same as a share of what there is to scroll (0 at the top, 1 at the bottom): it means the same place when the
+    /// text is wider or narrower, as in reader mode, where the pixels do not.
+    pub scroll_rel: f32,
     /// The list of places this tab has been is open.
     pub history_open: bool,
     pub show_strongs: bool,
@@ -616,6 +624,7 @@ impl BibleTab {
             reveal_token: 0,
             history: History::new(first),
             scroll_y: 0.0,
+            scroll_rel: 0.0,
             history_open: false,
             show_strongs: false,
             show_marks: true,
@@ -645,6 +654,16 @@ impl BibleTab {
     }
 
     // ---- state changes -------------------------------------------------------------
+
+    /// Collapse the selection of every card's text but `except`'s.
+    fn let_go_of_card_selections(&self, except: Option<&str>) {
+        for (key, (_, doc)) in self.card_texts.borrow_mut().iter_mut() {
+            let sel = doc.selection();
+            if Some(key.as_str()) != except && sel.anchor != sel.head {
+                doc.perform(EditAction::SetCaret { offset: sel.head, extend: false });
+            }
+        }
+    }
 
     /// Start the tab's own history over at where it is (a tab made to show a link is not a tab that went there).
     pub fn forget_history(&mut self) {
@@ -1101,7 +1120,7 @@ impl BibleTab {
                 | BibleMsg::SetInMargin(..)
                 | BibleMsg::MarginChanged(_)
                 | BibleMsg::AutoScroll(_)
-                | BibleMsg::Scrolled(_)
+                | BibleMsg::Scrolled(..)
                 | BibleMsg::ToggleHistory
                 | BibleMsg::SelectionChanged(None)
         ) {
@@ -1202,6 +1221,14 @@ impl BibleTab {
                 self.read_card = !self.read_card;
                 Task::none()
             }
+            BibleMsg::CloseReadCard => {
+                self.read_card = false;
+                Task::none()
+            }
+            BibleMsg::OpenChapterBacklinks => {
+                request = Some(Request::OpenBacklinks(RefRange::chapter(self.book, self.chapter_no)));
+                Task::none()
+            }
             BibleMsg::OpenSearch => {
                 request = Some(Request::OpenSearch);
                 Task::none()
@@ -1246,6 +1273,10 @@ impl BibleTab {
                 if sel.is_some() || (self.editing.is_some() && !self.marks_in_margin()) {
                     self.stop_edit(sh);
                 }
+                // One selection at a time: the words selected in a card are let go of when the text is selected.
+                if sel.is_some() {
+                    self.let_go_of_card_selections(None);
+                }
                 self.text_selection = sel;
                 Task::none()
             }
@@ -1288,9 +1319,16 @@ impl BibleTab {
                         | EditAction::SelectAll
                         | EditAction::SelectWord(_)
                         | EditAction::SelectLine(_)
-                ) && let Some((_, doc)) = self.card_texts.borrow_mut().get_mut(&key)
-                {
-                    doc.perform(action);
+                ) {
+                    if let Some((_, doc)) = self.card_texts.borrow_mut().get_mut(&key) {
+                        doc.perform(action);
+                    }
+                    // One selection at a time: what was selected in another card, or in the text, is let go of.
+                    self.let_go_of_card_selections(Some(&key));
+                    if self.text_selection.is_some() {
+                        self.text_selection = None;
+                        self.clear_token += 1;
+                    }
                 }
                 Task::none()
             }
@@ -1426,8 +1464,9 @@ impl BibleTab {
                 self.history_open = false;
                 Task::none()
             }
-            BibleMsg::Scrolled(y) => {
+            BibleMsg::Scrolled(y, share) => {
                 self.scroll_y = y;
+                self.scroll_rel = share;
                 Task::none()
             }
             BibleMsg::CardTagDraft(draft) => {
@@ -1566,11 +1605,11 @@ impl BibleTab {
             .padding([4, 6])
             .style(move |theme, status| quiet(theme, status, false))
             .on_press(BibleMsg::ToggleReadCard);
-        let mut out = column![container(row![history, mark].spacing(2).align_y(iced::Center)).width(Length::Fill).center_x(Length::Fill)].spacing(8);
-        if self.read_card {
-            out = out.push(container(self.read_card_view(sh, size)).width(Length::Fill).center_x(Length::Fill));
-        }
-        out.into()
+        // The card is an overlay, as the reader's other cards are: over the text under its button, let go of by a click
+        // elsewhere or Escape, not making room.
+        let card = self.read_card.then(|| self.read_card_view(sh, size));
+        let history = popover(history, card, BibleMsg::CloseReadCard);
+        container(row![history, mark].spacing(2).align_y(iced::Center)).width(Length::Fill).center_x(Length::Fill).into()
     }
 
     /// The days the chapter was read, and a way to the log itself.
@@ -2110,6 +2149,26 @@ impl BibleTab {
         };
         let bold = Font { weight: font::Weight::Bold, ..sh.settings.text_font() };
         let title = text(format!("{} {}", self.book, self.chapter_no)).size(sh.settings.bible_size * 1.6).font(bold);
+        // Small, just to the right of the title: the notes that link to the chapter.
+        // (The icon takes its own color, in the text's, faint: a button's text color does not reach a picture.)
+        let links = button(crate::icons::Icon::Backlinks.view_text(sh.settings.bible_size * 0.7, 0.4))
+            .padding([2, 4])
+            .style(|theme: &Theme, status| {
+                let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: lit.then(|| Color { a: 0.12, ..theme.extended_palette().background.base.text }.into()),
+                    border: iced::Border { radius: 6.0.into(), ..iced::Border::default() },
+                    ..button::Style::default()
+                }
+            })
+            .on_press(BibleMsg::OpenChapterBacklinks);
+        let links = iced::widget::tooltip(
+            links,
+            container(text("Notes that link to this chapter").size(12)).padding(4).style(container::rounded_box),
+            iced::widget::tooltip::Position::Bottom,
+        );
+        // (Not in reader mode, which is the text and nothing else.)
+        let title: Element<'_, BibleMsg> = if reading.is_some() { title.into() } else { row![title, links].spacing(8).align_y(iced::Center).into() };
 
         let inside = |e: Element<'a, BibleMsg>| -> Element<'a, BibleMsg> { container(e).padding(inset).width(Length::Fill).into() };
         let page = container(column![inside(self.chapter_links(sh, reading.is_some())), inside(title.into()), body, inside(self.chapter_links(sh, reading.is_some())), inside(self.log_button(sh)), space::vertical().height(20)].spacing(16))
@@ -2119,7 +2178,7 @@ impl BibleTab {
         let page = if reading == Some(false) { container(page.max_width(READING_WIDTH)).center_x(Length::Fill) } else { page };
         let scroller = scrollable(page)
             .id(self.reader_id())
-            .on_scroll(|v| BibleMsg::Scrolled(v.absolute_offset().y))
+            .on_scroll(|v| BibleMsg::Scrolled(v.absolute_offset().y, v.relative_offset().y))
             .height(Length::Fill);
 
         column![scroller].into()

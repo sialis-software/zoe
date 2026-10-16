@@ -81,14 +81,18 @@ impl Icon {
         if open { Icon::ChevronUp } else { Icon::ChevronDown }
     }
 
-    /// The icon `size` pixels square, in the dropdowns' text color, `alpha` as opaque.
-    fn view_text<'a, M: 'a>(self, size: f32, alpha: f32) -> Element<'a, M> {
+    /// The icon `size` pixels square, in the dropdowns' text color toward the page's color: all of the way at `alpha` 1, none at 0.
+    /// (Mixed to a solid grey, not made see-through: a picture's color takes no part of its opacity, so a faint white
+    /// would be plain white.)
+    pub fn view_text<'a, M: 'a>(self, size: f32, alpha: f32) -> Element<'a, M> {
         svg(svg::Handle::from_memory(self.source()))
             .width(Length::Fixed(size))
             .height(Length::Fixed(size))
             .style(move |theme: &Theme, _status| {
-                let color = theme.extended_palette().background.weak.text;
-                svg::Style { color: Some(Color { a: color.a * alpha, ..color }) }
+                let p = theme.extended_palette();
+                let (text, page) = (p.background.weak.text, p.background.base.color);
+                let mix = |t: f32, b: f32| b + (t - b) * alpha;
+                svg::Style { color: Some(Color { r: mix(text.r, page.r), g: mix(text.g, page.g), b: mix(text.b, page.b), a: 1.0 }) }
             })
             .into()
     }

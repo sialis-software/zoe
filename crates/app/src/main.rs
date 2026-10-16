@@ -44,6 +44,7 @@ mod search_tab;
 mod speech;
 mod shared;
 mod split;
+mod upgrade;
 mod state;
 mod vault_setup;
 mod workspace;
@@ -261,6 +262,9 @@ struct App {
     zoomed: Option<PaneId>,
     /// The main window's size, as last reported.
     window_size: iced::Size,
+    /// A reader put back at a share of the way down after it changed width (reader mode begun or ended): which, how far, and
+    /// how many times that has been asked for (a new scrollable may start from the top once more before it obeys).
+    pending_scroll: Option<(TabId, f32, u8)>,
     /// What the menu bar was last told (None: nothing yet).
     menu_synced: Option<commands::MenuState>,
     /// The Bible tab read alone, filling the window with nothing else around it, if any.
@@ -509,6 +513,14 @@ impl App {
         let boot = live::boot();
         let mut app = App::build(boot.backend, boot.notes, boot.persist);
         app.sh.status = boot.status;
+        // Just upgraded: say so (a downgrade, or a change that could not be carried over, is a problem and stays in the bar).
+        if let Some((words, problem)) = boot.upgrade.as_ref().and_then(|u| u.said()) {
+            if problem {
+                app.sh.status = if app.sh.status.is_empty() { words } else { format!("{} {words}", app.sh.status) };
+            } else {
+                app.sh.toast(words);
+            }
+        }
         app.sh.vault = boot.vault;
         app.onboarding = boot.onboarding;
         app.no_modules = boot.no_modules;
@@ -554,6 +566,7 @@ impl App {
             focus: 0,
             zoomed: None,
             window_size: iced::Size::new(1280.0, 800.0),
+            pending_scroll: None,
             menu_synced: None,
             reader_mode: None,
             last_bible: None,
@@ -1208,10 +1221,26 @@ impl App {
     // ---- update --------------------------------------------------------------------
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let reading_before = self.reader_mode.map(|r| r.tab);
         let task = self.handle(message);
         self.refresh_plans();
         self.settle();
         self.settle_reading();
+        // Reader mode begun or ended: the text is laid out again, wider or narrower, and the reader is put back at the same
+        // share of the way down, so that it is where it was.
+        let reading_after = self.reader_mode.map(|r| r.tab);
+        let carried = if reading_before != reading_after {
+            reading_before.or(reading_after).and_then(|id| match self.tabs.get(&id) {
+                Some(Tab::Bible(t)) if t.scroll_rel > 0.0 => {
+                    self.pending_scroll = Some((id, t.scroll_rel, 0));
+                    Some(snap_to(t.reader_id(), RelativeOffset { x: 0.0, y: t.scroll_rel }))
+                }
+                _ => None,
+            })
+        } else {
+            None
+        }
+        .unwrap_or_else(Task::none);
         self.sh.save();
         self.note_session();
         let menu = self.menu_state();
@@ -1221,7 +1250,7 @@ impl App {
             self.menu_synced = Some(menu);
             native::sync_menu(self.main, menu).discard()
         };
-        Task::batch([task, self.shown_changed(), told])
+        Task::batch([task, carried, self.shown_changed(), told])
     }
 
     /// What the menu bar shows of the app: what has somewhere to go, and what is on.
@@ -1474,11 +1503,32 @@ impl App {
                 }
                 Task::none()
             }
+            // A reader just put back at a share of the way down reports where it is: if that is not there yet (the scrollable
+            // began again at the top), it is asked again, a few times.
+            Message::Bible(id, BibleMsg::Scrolled(_, share))
+                if self.pending_scroll.is_some_and(|(p, target, _)| p == id && (share - target).abs() > 0.02) =>
+            {
+                let Some((_, target, tries)) = self.pending_scroll else { return Task::none() };
+                let reader = self.bible_tab(id).map(|t| t.reader_id());
+                match reader {
+                    Some(reader) if tries < 3 => {
+                        self.pending_scroll = Some((id, target, tries + 1));
+                        snap_to(reader, RelativeOffset { x: 0.0, y: target })
+                    }
+                    _ => {
+                        self.pending_scroll = None;
+                        Task::none()
+                    }
+                }
+            }
             Message::Bible(id, msg) => {
+                if matches!(msg, BibleMsg::Scrolled(..)) && self.pending_scroll.is_some_and(|(p, ..)| p == id) {
+                    self.pending_scroll = None;
+                }
                 // What a reader reports of itself (its layout, losing its selection when something
                 // else is pressed, scrolling) is not something done in it: it does not take the focus
                 // from where the press was.
-                if !matches!(msg, BibleMsg::MarginChanged(_) | BibleMsg::AutoScroll(_) | BibleMsg::SelectionChanged(None) | BibleMsg::Scrolled(_)) {
+                if !matches!(msg, BibleMsg::MarginChanged(_) | BibleMsg::AutoScroll(_) | BibleMsg::SelectionChanged(None) | BibleMsg::Scrolled(..)) {
                     self.touch(id);
                 }
                 let Some(Tab::Bible(tab)) = self.tabs.get_mut(&id) else { return Task::none() };
@@ -3359,6 +3409,31 @@ impl App {
                 tooltip::Position::Bottom,
             )
         };
+        // Back and forward, quieter than the rest: the tab's own history, then the tab it was before (as anywhere).
+        let tab = self.reader_mode.map(|r| r.tab);
+        let can = |back: bool| tab.is_some_and(|id| self.inner_can(id, back) || if back { self.outer(id).back } else { self.outer(id).forward });
+        let step = |icon: icons::Icon, tip: &'static str, back: bool| {
+            let on = can(back);
+            let mut b = button(container(icon.view_text(18.0, if on { 0.7 } else { 0.3 })).center(Length::Fill))
+                .width(28)
+                .height(28)
+                .padding(0)
+                .style(move |theme: &Theme, status| {
+                    let lit = on && matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    let base = theme.extended_palette().secondary.base.color;
+                    button::Style {
+                        background: lit.then(|| iced::Color { a: 0.5, ..base }.into()),
+                        border: iced::Border { radius: 4.0.into(), ..iced::Border::default() },
+                        ..button::Style::default()
+                    }
+                });
+            if let (true, Some(id)) = (on, tab) {
+                b = b.on_press(Message::NavTab(id, back));
+            }
+            tooltip(b, container(text(tip).size(12)).padding(4).style(container::rounded_box), tooltip::Position::Bottom)
+        };
+        // Back and forward at the top left, the rest at the top right.
+        let history = row![step(icons::Icon::Back, "Back", true), step(icons::Icon::Forward, "Forward", false)].spacing(2);
         let controls = row![
             small(
                 if margins { icons::Icon::MarginsOn } else { icons::Icon::MarginsOff },
@@ -3368,14 +3443,22 @@ impl App {
             small(icons::Icon::Collapse, "Leave reading mode (Esc)", Message::EndReading),
         ]
         .spacing(6);
-        container(controls)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .align_y(iced::alignment::Vertical::Top)
-            // (Clear of the scrollbar down the right edge.)
-            .padding(iced::Padding { top: 10.0, right: 24.0, bottom: 0.0, left: 0.0 })
-            .into()
+        stack![
+            container(history)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(iced::Padding { top: 10.0, right: 0.0, bottom: 0.0, left: 14.0 }),
+            container(controls)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .align_y(iced::alignment::Vertical::Top)
+                // (Clear of the scrollbar down the right edge.)
+                .padding(iced::Padding { top: 10.0, right: 24.0, bottom: 0.0, left: 0.0 }),
+        ]
+        .into()
     }
 
     fn pane_controls(&self, pane: PaneId) -> Element<'_, Message> {
@@ -4020,8 +4103,12 @@ mod tests {
 
     /// A live app (real modules, a vault in `home`), or `None` where ASV is not installed.
     fn live_app(home: &std::path::Path) -> Option<App> {
-        let boot = live::boot_at(home, &sword::default_roots(), false);
+        let boot = live::boot_at(home, &sword::test_roots(), false);
         boot.persist.as_ref()?;
+        // (The sample text stands in where there are no modules: not what these tests are about.)
+        if boot.no_modules {
+            return None;
+        }
         let mut app = App::build(boot.backend, boot.notes, boot.persist);
         app.sh.settings.pens = test_pens();
         Some(app)
@@ -4350,7 +4437,8 @@ mod tests {
 
         /// Like `click_scan`, down to `bottom` only.
         fn click_scan_to(&mut self, bottom: usize, done: impl Fn(&App) -> bool) -> Option<(f32, f32)> {
-            for y in (140..bottom).step_by(14) {
+            // (From below the chapter's title, which has a small button beside it.)
+            for y in (250..bottom).step_by(14) {
                 for x in (50..560).step_by(10) {
                     let (x, y) = (x as f32, y as f32);
                     self.cursor = mouse::Cursor::Available(Point::new(x, y));
@@ -4951,6 +5039,70 @@ mod tests {
         let _ = app.update(Message::TabPressed(reader));
         assert!(app.bible_tab(reader).unwrap().select_request.is_none(), "shown again: nothing to do again");
         let _ = other;
+    }
+
+    #[test]
+    fn reader_modes_back_and_forward_go_through_the_readers_own_history_and_stay_in_reader_mode() {
+        let mut app = App::new();
+        let id = app.bid();
+        let _ = app.update(Message::Bible(id, BibleMsg::PickChapter(ChapterChoice(Book::PSALMS, 23))));
+        let _ = app.update(Message::Bible(id, BibleMsg::ReadingMode));
+        assert!(app.reader_mode.is_some() && app.inner_can(id, true));
+        let _ = app.update(Message::NavTab(id, true));
+        assert_eq!((app.bible().book, app.bible().chapter_no), (Book::JOHN, 3), "back to where it was");
+        assert!(app.reader_mode.is_some(), "still reading");
+        assert!(app.inner_can(id, false));
+        let _ = app.update(Message::NavTab(id, false));
+        assert_eq!(app.bible().book, Book::PSALMS);
+    }
+
+    #[test]
+    fn reader_mode_puts_the_reader_back_at_the_same_share_of_the_way_down_and_asks_again_if_it_starts_at_the_top() {
+        let mut app = App::new();
+        let id = app.bid();
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(300.0, 0.4)));
+        assert_eq!(app.bible().scroll_rel, 0.4);
+        // Begun: the share is to be put back.
+        let _ = app.update(Message::Bible(id, BibleMsg::ReadingMode));
+        assert_eq!(app.pending_scroll, Some((id, 0.4, 0)));
+        // The new scrollable says it is at the top: it is asked again (and the tab keeps what it had).
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(0.0, 0.0)));
+        assert_eq!(app.pending_scroll, Some((id, 0.4, 1)));
+        assert_eq!(app.bible().scroll_rel, 0.4);
+        // Where it should be: done, and the tab follows it from then on.
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(500.0, 0.41)));
+        assert_eq!(app.pending_scroll, None);
+        assert_eq!(app.bible().scroll_rel, 0.41);
+        // And ended: the same again, for the share it was left at.
+        let _ = app.update(Message::EndReading);
+        assert_eq!(app.pending_scroll, Some((id, 0.41, 0)));
+        // At the top, there is nothing to put back.
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(0.0, 0.0)));
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(0.0, 0.0)));
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(0.0, 0.0)));
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(0.0, 0.0)));
+        assert_eq!(app.pending_scroll, None, "asked three times, and then let be");
+    }
+
+    #[test]
+    fn the_chapter_has_a_button_to_the_notes_that_link_to_it_and_a_card_of_the_days_it_was_read_that_closes() {
+        let mut app = App::new();
+        let id = app.bid();
+        let _ = app.update(Message::Bible(id, BibleMsg::OpenChapterBacklinks));
+        let tab = app.tabs.values().find_map(|t| match t {
+            Tab::Backlinks(b) => Some(b),
+            _ => None,
+        });
+        let tab = tab.expect("a tab of the notes that link here");
+        let chapter = RefRange::chapter(Book::JOHN, 3);
+        assert_eq!(tab.target, crate::backlinks_tab::Target::Passage(chapter), "the whole chapter, not a verse of it");
+        // Nicodemus links John 3:2, and the notes that link to any verse of the chapter are all there.
+        assert!(app.sh.backlinks(&chapter).iter().any(|b| b.path.contains("Nicodemus")));
+        // The card of the days read opens, and is let go of by its own message (a click elsewhere or Escape sends it).
+        let _ = app.update(Message::Bible(id, BibleMsg::ToggleReadCard));
+        assert!(app.bible().read_card);
+        let _ = app.update(Message::Bible(id, BibleMsg::CloseReadCard));
+        assert!(!app.bible().read_card);
     }
 
     #[test]
@@ -6722,6 +6874,23 @@ mod tests {
         let card = h.bounds_of_text("Footnote").expect("floating under the click");
         assert!(card.y > y - 4.0, "under the line it came from: {} vs {y}", card.y);
         assert!(h.center_of("✕").is_none(), "no close button: it goes with Escape or a click elsewhere");
+    }
+
+    #[test]
+    fn the_reader_and_its_cards_have_one_selection_between_them() {
+        let mut h = narrow_reader();
+        h.click_scan(opened).expect("a footnote marker in John 3");
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let id = h.app.bid();
+        // Words selected in the text, then in the card: the text's are let go of.
+        select_verses(&mut h.app, &[2]);
+        assert!(h.app.bible().text_selection.is_some());
+        let _ = h.app.update(Message::Bible(id, BibleMsg::CardText("popup".into(), md_editor::Action::SelectAll)));
+        assert!(h.app.bible().card_selected("popup") && h.app.bible().text_selection.is_none(), "the card's words only");
+        // And selected in the text again: the card's are let go of.
+        let slice = CanonSlice { verse: 3, start: 0, end: 4 };
+        let _ = h.app.update(Message::Bible(id, BibleMsg::SelectionChanged(Some(vec![slice]))));
+        assert!(!h.app.bible().card_selected("popup") && h.app.bible().text_selection.is_some(), "the text's words only");
     }
 
     #[test]
@@ -8728,7 +8897,8 @@ mod tests {
         let _ = app.update(Message::Bible(id, BibleMsg::SetInMargin(NoteKind::Strongs, true)));
         assert!(words(&app) > 0, "an entry for each word with a number");
         let mut h = Harness::new(app);
-        assert!(h.click_scan(is_word).is_none() || h.app.bible().note_card.is_none(), "a click opens no pop-over");
+        // (Over the text only: below it are buttons that do other things, such as the one to the notes that link to the chapter.)
+        assert!(h.click_scan_to(1000, is_word).is_none() || h.app.bible().note_card.is_none(), "a click opens no pop-over");
         assert!(h.app.bible().note_card.is_none());
         // Not shown at all, no cards.
         let _ = h.app.update(Message::Bible(id, BibleMsg::ToggleStrongs(false)));
@@ -8856,7 +9026,7 @@ mod tests {
         let id = h.app.bid();
         let start = std::time::Instant::now();
         for i in 0..10 {
-            let _ = h.app.update(Message::Bible(id, BibleMsg::Scrolled(10.0 * i as f32)));
+            let _ = h.app.update(Message::Bible(id, BibleMsg::Scrolled(10.0 * i as f32, 0.0)));
         }
         println!("10 scrolled updates: {:?}", start.elapsed());
         let start = std::time::Instant::now();
@@ -9640,6 +9810,31 @@ mod tests {
     }
 
     #[test]
+    fn selecting_in_one_piece_of_a_dictionary_entry_lets_go_of_the_selection_in_another() {
+        let mut app = App::new();
+        let module = app.sh.backend.dictionaries()[0].id.clone();
+        let blank = app.new_blank();
+        let id = app.add_tab(1, blank);
+        let _ = app.update(Message::Open(id, Choice::Dict));
+        if let Some(Tab::Dict(t)) = app.tabs.get_mut(&id) {
+            t.open(&app.sh, module, "G2316");
+        }
+        let mut h = Harness::new(app);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let select = |h: &mut Harness, piece: &str| {
+            let _ = h.app.update(Message::Dict(id, DictMsg::Text(piece.into(), md_editor::Action::SelectAll)));
+        };
+        let selected = |h: &Harness, piece: &str| match h.app.tabs.get(&id) {
+            Some(Tab::Dict(t)) => t.piece(piece).is_some_and(|p| p.1),
+            _ => false,
+        };
+        select(&mut h, "definition");
+        assert!(selected(&h, "definition"));
+        select(&mut h, "lemma");
+        assert!(selected(&h, "lemma") && !selected(&h, "definition"), "only the last is selected");
+    }
+
+    #[test]
     fn a_dictionary_entry_is_laid_out_in_the_tab() {
         let mut app = App::new();
         let module = app.sh.backend.dictionaries()[0].id.clone();
@@ -9715,10 +9910,10 @@ mod tests {
     fn going_back_returns_to_how_far_down_the_chapter_was_read() {
         let mut app = App::new();
         let id = app.panes[0].tabs[0];
-        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(420.0)));
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(420.0, 0.5)));
         let _ = app.open_spec(app.panes[0].tabs[0], Spec::Verse { range: ps23(), module: None }, Dest::Here);
         assert_eq!(app.bible().scroll_y, 0.0, "a new chapter starts at the top");
-        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(90.0)));
+        let _ = app.update(Message::Bible(id, BibleMsg::Scrolled(90.0, 0.1)));
         let _ = app.update(Message::Navigate { back: true });
         assert_eq!(app.bible().scroll_y, 420.0);
         let _ = app.update(Message::Navigate { back: false });

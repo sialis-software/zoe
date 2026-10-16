@@ -237,6 +237,8 @@ pub struct Boot {
     pub onboarding: Option<Onboarding>,
     /// Shown in the toolbar until something else replaces it.
     pub status: String,
+    /// What opening the folders of another version came to (see `upgrade`).
+    pub upgrade: Option<crate::upgrade::Upgrade>,
 }
 
 /// Why the app starts without a vault.
@@ -278,15 +280,20 @@ pub fn index_path(home: &Path, dir: &Path) -> PathBuf {
 
 /// Start with the user's modules and vault. `--reseed` restores the sample notes and marks.
 pub fn boot() -> Boot {
-    let reseed = std::env::args().any(|a| a == "--reseed");
+    // `--reseed` replaces the vault's notes with the samples: for the folder a build for developing keeps its own, not for the
+    // installed app's (where it would be a way to lose what was written).
+    let reseed = std::env::args().any(|a| a == "--reseed") && cfg!(debug_assertions);
     let (config_dir, home) = (vault::config_home(), vault::data_home());
-    // Files kept in one folder, as before config and data were apart, are put where they belong.
-    for old in vault::old_homes() {
+    // Files kept in one folder, as before config and data were apart, are put where they belong (the installed app's:
+    // a build for developing has no past to move).
+    for old in if cfg!(debug_assertions) { Vec::new() } else { vault::old_homes() } {
         if vault::migrate_home(&old, &config_dir, &home) {
             crate::state::Config::moved(&config_dir, &old, &home);
             break;
         }
     }
+    // What the last version left is looked at before anything of this one's is written (and backed up, if this is an upgrade).
+    let upgrade = crate::upgrade::check(&config_dir, &home, crate::about::version(), crate::about::build());
     let config = crate::state::Config::load(&config_dir);
     // Before anything else is done: with the mode on, nothing may use the network.
     crate::network::set_blocked(config.persecution || crate::network::forced_by_environment());
@@ -300,6 +307,7 @@ pub fn boot() -> Boot {
     }
     let mut boot = boot_from(&home, start_vault(&home, config.vault), &module_roots(&config.module_folders), reseed);
     boot.config = Some(config_dir);
+    boot.upgrade = Some(upgrade);
     boot
 }
 
@@ -348,6 +356,7 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
                 no_modules,
                 onboarding: Some(why),
                 status: String::new(),
+                upgrade: None,
             };
         }
     };
@@ -363,6 +372,7 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
             no_modules,
             onboarding: None,
             status: if no_modules && loaded.status.is_empty() { NO_MODULES.into() } else { loaded.status },
+            upgrade: None,
         },
         Err(e) => Boot {
             backend: Box::new(backend),
@@ -374,6 +384,7 @@ fn boot_from(home: &Path, start: Start, roots: &[PathBuf], reseed: bool) -> Boot
             no_modules,
             onboarding: None,
             status: format!("Could not open the vault at {}: {e}; nothing is saved", dir.display()),
+            upgrade: None,
         },
     }
 }
@@ -531,7 +542,7 @@ mod tests {
 
     #[test]
     fn serves_chapters_from_an_installed_module() {
-        let live = LiveBackend::open(&sword::default_roots());
+        let live = LiveBackend::open(&sword::test_roots());
         let Some(info) = live.modules().into_iter().find(|m| m.abbreviation == "ASV") else {
             return eprintln!("skipped: ASV is not installed");
         };
@@ -545,7 +556,7 @@ mod tests {
 
     #[test]
     fn looks_up_strongs_numbers_in_either_testament() {
-        let live = LiveBackend::open(&sword::default_roots());
+        let live = LiveBackend::open(&sword::test_roots());
         if live.dictionaries.is_empty() {
             return eprintln!("skipped: no Strong's dictionaries");
         }
@@ -563,7 +574,7 @@ mod tests {
 
     #[test]
     fn dictionaries_are_listed_and_looked_up_by_name() {
-        let live = LiveBackend::open(&sword::default_roots());
+        let live = LiveBackend::open(&sword::test_roots());
         let Some(greek) = live.dictionaries().into_iter().find(|d| d.id.0 == "StrongsGreek") else {
             return eprintln!("skipped: StrongsGreek is not installed");
         };
@@ -582,7 +593,7 @@ mod tests {
     }
 
     fn roots() -> Vec<PathBuf> {
-        sword::default_roots()
+        sword::test_roots()
     }
 
     fn has_modules() -> bool {
