@@ -15,8 +15,7 @@ This document is the entry point; see the others for detail:
 
 ## Vision
 
-A friendly, offline desktop Bible study app for ordinary Christians to
-read Scripture and write down what God is speaking, *at the speed of thought*.
+A friendly, offline desktop Bible study app for ordinary Christians to read Scripture and write down what God is speaking, *at the speed of thought*.
 
 ## Principles
 
@@ -39,7 +38,6 @@ read Scripture and write down what God is speaking, *at the speed of thought*.
 
 ## Core idea: a markdown layer over SWORD
 
-SWORD modules are a **read-only, binary, verse-keyed** library. The user vault is a **read-write, textual, free-form** library. The app joins them through one shared
-vocabulary: **canonical scripture references** (OSIS-style IDs like `John.3.16`).
+SWORD modules are a **read-only, binary, verse-keyed** library. The user vault is a **read-write, textual, free-form** library. The app joins them through one shared vocabulary: **canonical scripture references** (OSIS-style IDs like `John.3.16`).
 
 User-authored "commentaries" and "books" are ordinary markdown that the app can *present* as if they were modules — a soft replacement for CrossWire's non-Bible document types without needing the SWORD binary toolchain.

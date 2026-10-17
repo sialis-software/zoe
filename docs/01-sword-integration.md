@@ -1,16 +1,8 @@
 # SWORD / CrossWire Integration
 
-Sources: CrossWire wiki (DevTools:Modules, DevTools:conf_Files, OSIS Bibles), the
-rsword_chirho crate docs, and the module library already on this machine at `~/.sword`.
+Sources: CrossWire wiki (DevTools:Modules, DevTools:conf_Files, OSIS Bibles), the rsword_chirho crate docs, and the module library already on this machine at `~/.sword`.
 
-> **The biggest gap in Zoe is reading the markup in SWORD modules.** The modules do not share one standard: each
-> publisher and converter marks up footnotes, headings, poetry, red letters, Strong's numbers, cross references, and
-> special words in its own way, and the same idea can look different from one module to the next. Zoe reads the common
-> OSIS forms and has been tested thoroughly on only a few Bibles, so some modules will show stray symbols, missing
-> pieces, wrong spacing, or text that should be a heading, note, or link. **Bug reports about how a Bible version
-> renders are very welcome.** Please say which module (its name and version from the module manager), which passage,
-> and what looks wrong. A screenshot of the passage helps, and so does the same passage in another program such as
-> Xiphos. A written report from a person is expected (see the README).
+> **The biggest gap in Zoe is reading the markup in SWORD modules.** The modules do not share one standard: each publisher and converter marks up footnotes, headings, poetry, red letters, Strong's numbers, cross references, and special words in its own way, and the same idea can look different from one module to the next. Zoe reads the common OSIS forms and has been tested thoroughly on only a few Bibles, so some modules will show stray symbols, missing pieces, wrong spacing, or text that should be a heading, note, or link. **Bug reports about how a Bible version renders are very welcome.** Please say which module (its name and version from the module manager), which passage, and what looks wrong. A screenshot of the passage helps, and so does the same passage in another program such as Xiphos. A written report from a person is expected (see the README).
 
 ## 1. Module library layout
 
@@ -21,16 +13,11 @@ rsword_chirho crate docs, and the module library already on this machine at `~/.
   InstallMgr/               repo lists / install state (CrossWire installer)
 ```
 
-Frontends also search `$SWORD_PATH`, `/usr/share/sword`, and `~/.sword`, and honor
-`DataPath=` lines in a `sword.conf` (SWORD convention, not a formal spec; Windows and
-macOS defaults vary by frontend **[verify]**). Our app should read the same locations and
-let the user add more, so modules installed by Xiphos or `installmgr` "just appear".
+Frontends also search `$SWORD_PATH`, `/usr/share/sword`, and `~/.sword`, and honor `DataPath=` lines in a `sword.conf` (SWORD convention, not a formal spec; Windows and macOS defaults vary by frontend **[verify]**). Our app should read the same locations and let the user add more, so modules installed by Xiphos or `installmgr` "just appear".
 
 ## 2. The `.conf` file
 
-INI-like: first line `[ModName]`, then `Key=Value`, repeated keys allowed, a trailing
-`\` joins continuation lines, locale-suffixed keys (`Description_fr`). Keys that drive
-decoding:
+INI-like: first line `[ModName]`, then `Key=Value`, repeated keys allowed, a trailing `\` joins continuation lines, locale-suffixed keys (`Description_fr`). Keys that drive decoding:
 
 | Key | Meaning |
 |---|---|
@@ -60,66 +47,31 @@ decoding:
 
 Per testament, three files: `ot.bzs ot.bzv ot.bzz` (and `nt.*`).
 - `.bzz` — concatenated compressed blocks (the text).
-- `.bzs` — block table: per block, `offset`, `compressed size`, `uncompressed size`
-  (u32 little-endian each).
-- `.bzv` — verse index: per verse, `block number` (u32), `offset in uncompressed block`
-  (u32 for zText4 / see below), `length` (u16 for zText, u32 for zText4).
-- Verse record N is located by its ordinal in the module's **versification**
-  (hence versification tables are mandatory, not optional).
-- RawText family: `.vss` per testament + `ot/nt` data and an index of (offset,size)
-  pairs, no compression.
+- `.bzs` — block table: per block, `offset`, `compressed size`, `uncompressed size` (u32 little-endian each).
+- `.bzv` — verse index: per verse, `block number` (u32), `offset in uncompressed block` (u32 for zText4 / see below), `length` (u16 for zText, u32 for zText4).
+- Verse record N is located by its ordinal in the module's **versification** (hence versification tables are mandatory, not optional).
+- RawText family: `.vss` per testament + `ot/nt` data and an index of (offset,size) pairs, no compression.
 
-Plan: write a tiny `zText` parser, run it on the local `asv`, and diff against output
-from the real `diatheke`/`mod2imp` to validate. This is the single most valuable
-first spike.
+Plan: write a tiny `zText` parser, run it on the local `asv`, and diff against output from the real `diatheke`/`mod2imp` to validate. This is the single most valuable first spike.
 
 ### Lexicon (zLD / RawLD)
-`.idx` (offsets into `.dat`), `.dat` (entries; key line + body), plus `.zdx/.zdt` for
-compressed. Strong's keys are zero-padded (see `StrongsPadding`); Greek `G0001`-style
-vs Hebrew `H0001`. Entries are in ThML/OSIS/plain per `SourceType`.
+`.idx` (offsets into `.dat`), `.dat` (entries; key line + body), plus `.zdx/.zdt` for compressed. Strong's keys are zero-padded (see `StrongsPadding`); Greek `G0001`-style vs Hebrew `H0001`. Entries are in ThML/OSIS/plain per `SourceType`.
 
 ### GenBook (RawGenBook)
-Tree stored as nodes with parent/first-child/next-sibling offsets in `.bdt/.idx`.
-Needed for most non-Bible "documents" users will want (CCEL-style books, creeds, etc.).
+Tree stored as nodes with parent/first-child/next-sibling offsets in `.bdt/.idx`. Needed for most non-Bible "documents" users will want (CCEL-style books, creeds, etc.).
 
 ## 4. Versification
 
-A SWORD module is indexed by *ordinal verse position in its canon*. KJV, NRSV,
-Catholic, LXX, Synodal, Vulgate, Luther, MT… differ in book order, extra books, and
-chapter/verse boundaries (Psalms numbering, Malachi 3/4, 3 John, Joel, etc.).
+A SWORD module is indexed by *ordinal verse position in its canon*. KJV, NRSV, Catholic, LXX, Synodal, Vulgate, Luther, MT… differ in book order, extra books, and chapter/verse boundaries (Psalms numbering, Malachi 3/4, 3 John, Joel, etc.).
 
 Requirements:
-- Embed canon tables for every versification in the conf list (book list, chapter
-  verse-counts). SWORD ships these in `canon*.h` / versification files; these are the
-  *data* we need, not code we need to copy.
-- A **mapping** between versifications (SWORD's "verse mappings") so a note linking
-  `Ps.51.1` shows the right text in a Bible with different numbering.
-- Rule: **notes store references in one reference versification (KJV)** and map at
-  display time. See 02.
+- Embed canon tables for every versification in the conf list (book list, chapter verse-counts). SWORD ships these in `canon*.h` / versification files; these are the *data* we need, not code we need to copy.
+- A **mapping** between versifications (SWORD's "verse mappings") so a note linking `Ps.51.1` shows the right text in a Bible with different numbering.
+- Rule: **notes store references in one reference versification (KJV)** and map at display time. See 02.
 
-**What is supported now:** `KJV`, `KJVA`, and `NRSV` (`scripture::Versification`, `sword::Module::versification()`). KJVA is the KJV with the Apocrypha: 14 more books (1 and 2 Esdras, Tobit,
-Judith, Additions to Esther, Wisdom, Sirach, Baruch, Prayer of Azariah, Susanna, Bel and the Dragon, Prayer of Manasseh,
-1 and 2 Maccabees) stored in the Old Testament's file *after Malachi*, in that order, so the 66 canonical books are where
-they always were. `scripture::Book` has all 80 (the canon first: `Book::canon()`, then `Book::apocrypha()`), so a book's
-position, and with it an index ordinal, does not change; `sword::canon_data::VERSES` has the verse counts of all 80,
-derived from the KJVA module's own index (its 30,028 slots are accounted for exactly). A module may have only some of the
-14 (the headings and the books it lacks are empty entries): `ZText::has_book` is true for an Apocrypha book when any of its
-slots has text, and every list of chapters (the book picker, next and previous, search) comes from what the module has. Search
-has `in:AP`. Every other versification (NRSVA, Catholic, Vulgate, LXX, Synodal, Luther, and so on) is still unsupported and the
-module is listed as unreadable, with the reason.
+**What is supported now:** `KJV`, `KJVA`, and `NRSV` (`scripture::Versification`, `sword::Module::versification()`). KJVA is the KJV with the Apocrypha: 14 more books (1 and 2 Esdras, Tobit, Judith, Additions to Esther, Wisdom, Sirach, Baruch, Prayer of Azariah, Susanna, Bel and the Dragon, Prayer of Manasseh, 1 and 2 Maccabees) stored in the Old Testament's file *after Malachi*, in that order, so the 66 canonical books are where they always were. `scripture::Book` has all 80 (the canon first: `Book::canon()`, then `Book::apocrypha()`), so a book's position, and with it an index ordinal, does not change; `sword::canon_data::VERSES` has the verse counts of all 80, derived from the KJVA module's own index (its 30,028 slots are accounted for exactly). A module may have only some of the 14 (the headings and the books it lacks are empty entries): `ZText::has_book` is true for an Apocrypha book when any of its slots has text, and every list of chapters (the book picker, next and previous, search) comes from what the module has. Search has `in:AP`. Every other versification (NRSVA, Catholic, Vulgate, LXX, Synodal, Luther, and so on) is still unsupported and the module is listed as unreadable, with the reason.
 
-**NRSV** (in SWORD's sense) is the KJV's numbering but for two places, found by reading the chapter and verse structure out of three
-NRSV modules (NHEB, Geneva 1599, EMTV: all agree, and their indexes are 2 slots longer in the New Testament): 3 John 1 has 15 verses
-(the KJV's 14) and Revelation 12 has 18 (17). The reader's slot arithmetic takes the versification of the module
-(`ztext::counts`), so what follows those verses is not shifted. A translation may leave the extra verses empty (NHEB and EMTV number
-their text as the KJV does). Passages in notes are named in the KJV's numbering (docs/02) and are mapped into the module's to be shown
-(`Versification::map_from_kjv`, used when a link opens in a Bible tab and when a passage is embedded): only 3 John 1:14, which is
-14-15 in the NRSV, is mapped. Not mapped: the other way round (an NRSV reference named in a note), and KJV Revelation 13:1, whose first
-clause is the NRSV's 12:18; marks made in a KJV-numbered module are anchored by verse and word, and stay in the module they were made in.
-A module with only part of the Bible (a New Testament with empty Old Testament files) is read as having only that part
-(`ZText::has_book` asks whether a book has any text).
-The Additions to Esther are stored with chapters 1-9 as one-verse placeholders (the module's own layout), so its chapters
-1-9 read as "…".
+**NRSV** (in SWORD's sense) is the KJV's numbering but for two places, found by reading the chapter and verse structure out of three NRSV modules (NHEB, Geneva 1599, EMTV: all agree, and their indexes are 2 slots longer in the New Testament): 3 John 1 has 15 verses (the KJV's 14) and Revelation 12 has 18 (17). The reader's slot arithmetic takes the versification of the module (`ztext::counts`), so what follows those verses is not shifted. A translation may leave the extra verses empty (NHEB and EMTV number their text as the KJV does). Passages in notes are named in the KJV's numbering (docs/02) and are mapped into the module's to be shown (`Versification::map_from_kjv`, used when a link opens in a Bible tab and when a passage is embedded): only 3 John 1:14, which is 14-15 in the NRSV, is mapped. Not mapped: the other way round (an NRSV reference named in a note), and KJV Revelation 13:1, whose first clause is the NRSV's 12:18; marks made in a KJV-numbered module are anchored by verse and word, and stay in the module they were made in. A module with only part of the Bible (a New Testament with empty Old Testament files) is read as having only that part (`ZText::has_book` asks whether a book has any text). The Additions to Esther are stored with chapters 1-9 as one-verse placeholders (the module's own layout), so its chapters 1-9 read as "…".
 
 ## 5. Text markup → rendering
 
@@ -130,77 +82,41 @@ raw entry -> parse by SourceType -> internal inline AST -> render (UI)
                                    ^ GlobalOptionFilter toggles applied here
 ```
 
-- **OSIS** (modern modules): `<w lemma="strong:H07225" morph="...">`, `<note>`,
-  `<q who="Jesus">` (red letter), `<divineName>`, `<l>`/`<lg>` poetry, `<reference osisRef>`,
-  `<transChange>`, `<title>`. Sub-verse structure uses milestones (`sID`/`eID`).
+- **OSIS** (modern modules): `<w lemma="strong:H07225" morph="...">`, `<note>`, `<q who="Jesus">` (red letter), `<divineName>`, `<l>`/`<lg>` poetry, `<reference osisRef>`, `<transChange>`, `<title>`. Sub-verse structure uses milestones (`sID`/`eID`).
 - **ThML** (older commentaries/books, CCEL): HTML-like, `<scripRef passage="">`, `<sync type="Strongs">`.
 - **GBF** (legacy): `<FI>`, `<WG123>`, `<RF>…<Rf>`.
 - **TEI** (dictionaries), **plain**.
 
-Output AST nodes should include: text, paragraph/line break, heading, emphasis,
-red-letter, divine name, footnote, **scripture reference (parsed)**, **Strong's/morph
-word span**, image, link to other module key. Scripture references in module text
-(`osisRef`/`scripRef passage`) feed the same link index as user notes.
+Output AST nodes should include: text, paragraph/line break, heading, emphasis, red-letter, divine name, footnote, **scripture reference (parsed)**, **Strong's/morph word span**, image, link to other module key. Scripture references in module text (`osisRef`/`scripRef passage`) feed the same link index as user notes.
 
-Estimated as the largest single chunk of "SWORD work" — OSIS+ThML+plain covers the
-vast majority of useful modules; GBF/TEI can come later.
+Estimated as the largest single chunk of "SWORD work" — OSIS+ThML+plain covers the vast majority of useful modules; GBF/TEI can come later.
 
-OSIS is the only Bible module type that has been thoroughly tested. This is where the work is: every new module
-brings markup that the parser has not met, so expect to keep adding cases as reports come in.
+OSIS is the only Bible module type that has been thoroughly tested. This is where the work is: every new module brings markup that the parser has not met, so expect to keep adding cases as reports come in.
 
 ## 6. Locked modules
-`CipherKey` modules use a stream cipher (Sapphire II **[verify]**). Supporting
-user-supplied unlock keys is small once reading works. Store keys outside the vault.
+`CipherKey` modules use a stream cipher (Sapphire II **[verify]**). Supporting user-supplied unlock keys is small once reading works. Store keys outside the vault.
 
 ## 7. Distribution / install
 
-- CrossWire hosts module repositories (FTP/HTTP, index of `mods.d` confs + zip
-  archives, "Zipped modules" format). Offline principle: downloading is an explicit
-  user action; also support **sideloading** a `.zip` or a folder.
+- CrossWire hosts module repositories (FTP/HTTP, index of `mods.d` confs + zip archives, "Zipped modules" format). Offline principle: downloading is an explicit user action; also support **sideloading** a `.zip` or a folder.
 - Respect `DistributionLicense` when listing; surface "Copyrighted" modules' terms.
 - Compatibility rule: **never mutate an installed module**. We only read.
 
 ### Module manager (the Modules button in the top bar)
 
-A window of its own, opened like the settings window, for the modules in every folder searched.
-The archive and conf logic is `crates/sword/src/package.rs` (no UI, no network); the window is
-`crates/app/src/module_manager.rs`; the one place that touches the network is
-`crates/app/src/module_repo.rs` (the `Fetcher` trait, with `ureq` behind it; tests use a fake).
+A window of its own, opened like the settings window, for the modules in every folder searched. The archive and conf logic is `crates/sword/src/package.rs` (no UI, no network); the window is `crates/app/src/module_manager.rs`; the one place that touches the network is `crates/app/src/module_repo.rs` (the `Fetcher` trait, with `ureq` behind it; tests use a fake).
 
-- **List**: name, description, language, version, license, size on disk, folder, and whether the app
-  can read it. "Readable" is exactly `Module::bible/commentary/lexicon` succeeding (locked, other
-  drivers, compression, versification, or markup are shown as unreadable with that reason), and
-  that the data files exist.
-- **Remove**: deletes `mods.d/<name>.conf` and the module's data (a `DataPath` folder, or the files
-  of a dictionary's stem), and folders left empty. Data another conf shares is kept. A module in
-  a folder other than `sword::own_folder()` needs a second, explicit confirmation.
-- **Import / export**: a `.zip` or a folder laid out like a library (`mods.d/*.conf` and
-  `modules/...`; CrossWire's `rawzip` packages are this) is copied into the app's own folder; an
-  export writes one module the same way. Any entry that is absolute or climbs out with `..`
-  refuses the whole package (zip-slip); a `.conf` whose data is not in the package is refused;
-  nothing is overwritten unless the person confirms replacing, and a partly written install is
-  taken back.
-- **Download** (only on a button press): the list is `raw/mods.d.tar.gz` (every `.conf`; name,
-  description, `Lang`, `Version`, `InstallSize`, `DistributionLicense`, `Category`, locked or
-  not), filterable by text, language, kind, and "free to download" (public domain, GPL, Creative
-  Commons, and similar licenses; it is a marker, the license text is shown too). A module comes
-  from `packages/rawzip/<Name>.zip`. Both run on a thread with progress and a Cancel button.
-- After any install or remove, `App::reload_modules()` (shared with adding a folder) loads the
-  backend again in place; `apply_workspace` drops tabs whose module is gone.
+- **List**: name, description, language, version, license, size on disk, folder, and whether the app can read it. "Readable" is exactly `Module::bible/commentary/lexicon` succeeding (locked, other drivers, compression, versification, or markup are shown as unreadable with that reason), and that the data files exist.
+- **Remove**: deletes `mods.d/<name>.conf` and the module's data (a `DataPath` folder, or the files of a dictionary's stem), and folders left empty. Data another conf shares is kept. A module in a folder other than `sword::own_folder()` needs a second, explicit confirmation.
+- **Import / export**: a `.zip` or a folder laid out like a library (`mods.d/*.conf` and `modules/...`; CrossWire's `rawzip` packages are this) is copied into the app's own folder; an export writes one module the same way. Any entry that is absolute or climbs out with `..` refuses the whole package (zip-slip); a `.conf` whose data is not in the package is refused; nothing is overwritten unless the person confirms replacing, and a partly written install is taken back.
+- **Download** (only on a button press): the list is `raw/mods.d.tar.gz` (every `.conf`; name, description, `Lang`, `Version`, `InstallSize`, `DistributionLicense`, `Category`, locked or not), filterable by text, language, kind, and "free to download" (public domain, GPL, Creative Commons, and similar licenses; it is a marker, the license text is shown too). A module comes from `packages/rawzip/<Name>.zip`. Both run on a thread with progress and a Cancel button.
+- After any install or remove, `App::reload_modules()` (shared with adding a folder) loads the backend again in place; `apply_workspace` drops tabs whose module is gone.
 
 ## 8. Rust landscape and licensing
 
-- **rsword_chirho** (docs.rs, v0.3.0, GPL-2.0-or-later): pure-Rust port claiming
-  zText/zCom/zLD/RawGenBook and multiple versifications. Young and apparently
-  single-author; evaluate quality before depending on it. Pre-1.0, naming suggests
-  an unusual provenance — read the code before trusting it.
-- The reference **libsword is GPL-2**. Independent reimplementation from the
-  *format* is legally cleaner than translating C++; but if we copy/translate source or
-  depend on a GPL crate, our application must be GPL-compatible.
-  **Decision needed (see 04):** GPL application (simplest, fits ecosystem — Xiphos and
-  BibleTime are GPL) vs. clean-room format reader under a permissive license.
-- Other readers exist as format references: **pysword** (Python, ztext/ztext4/rawtext/rawtext4),
-  **swordjs** (zText only). Both are useful as a second implementation to cross-check.
+- **rsword_chirho** (docs.rs, v0.3.0, GPL-2.0-or-later): pure-Rust port claiming zText/zCom/zLD/RawGenBook and multiple versifications. Young and apparently single-author; evaluate quality before depending on it. Pre-1.0, naming suggests an unusual provenance — read the code before trusting it.
+- The reference **libsword is GPL-2**. Independent reimplementation from the *format* is legally cleaner than translating C++; but if we copy/translate source or depend on a GPL crate, our application must be GPL-compatible. **Decision needed (see 04):** GPL application (simplest, fits ecosystem — Xiphos and BibleTime are GPL) vs. clean-room format reader under a permissive license.
+- Other readers exist as format references: **pysword** (Python, ztext/ztext4/rawtext/rawtext4), **swordjs** (zText only). Both are useful as a second implementation to cross-check.
 - Existing C++ tools (`mod2imp`, `diatheke`, `osis2mod`) make an ideal **oracle** for tests.
 
 ## 9. Integration options
@@ -211,23 +127,14 @@ The archive and conf logic is `crates/sword/src/package.rs` (no UI, no network);
 | B. Adopt/fork rsword_chirho | head start | quality/maintenance unknown; GPL |
 | C. FFI to libsword (C++) | proven, complete | build/packaging pain, not "pure Rust", GPL |
 
-**Recommendation:** A, using B and pysword as references and the C++ tools as test
-oracles. Start read-only; no module writing in v1.
+**Recommendation:** A, using B and pysword as references and the C++ tools as test oracles. Start read-only; no module writing in v1.
 
 ## 10. Status
 
-Implemented in `crates/sword`, all read-only and checked against `mod2imp` on every verse
-or entry of the installed modules (ASV, LSB, StrongsGreek, StrongsHebrew, LSBG, LSBH):
+Implemented in `crates/sword`, all read-only and checked against `mod2imp` on every verse or entry of the installed modules (ASV, LSB, StrongsGreek, StrongsHebrew, LSBG, LSBH):
 
-- `.conf` parsing; library search over `ZOE_SWORD_PATH` (replaces the rest), folders
-  added in Settings → Bible modules (kept in `config.json`), `SWORD_PATH`, and the app's own
-  `~/.config/sword` (made on start if missing). Other frontends' folders are not searched; add
-  one in Settings if wanted.
-- zText Bibles (ZIP-compressed, KJV versification, OSIS markup) into the shared AST:
-  paragraphs, poetry, headings, footnotes, Strong's words, words of Jesus.
-- RawLD and zLD dictionaries, with TEI, ThML, and plain entries parsed to lemma,
-  transliteration, and definition.
+- `.conf` parsing; library search over `ZOE_SWORD_PATH` (replaces the rest), folders added in Settings → Bible modules (kept in `config.json`), `SWORD_PATH`, and the app's own `~/.config/sword` (made on start if missing). Other frontends' folders are not searched; add one in Settings if wanted.
+- zText Bibles (ZIP-compressed, KJV versification, OSIS markup) into the shared AST: paragraphs, poetry, headings, footnotes, Strong's words, words of Jesus.
+- RawLD and zLD dictionaries, with TEI, ThML, and plain entries parsed to lemma, transliteration, and definition.
 
-Not yet: other versifications and the mapping between them, LZSS/XZ/BZIP2 compression,
-RawText, commentaries, GenBooks, ThML/GBF Bibles, cipher keys, cross-chapter `osisRef`s.
-Modules we cannot read are left out of the module list rather than erroring.
+Not yet: other versifications and the mapping between them, LZSS/XZ/BZIP2 compression, RawText, commentaries, GenBooks, ThML/GBF Bibles, cipher keys, cross-chapter `osisRef`s. Modules we cannot read are left out of the module list rather than erroring.

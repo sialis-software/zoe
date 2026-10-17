@@ -1,8 +1,6 @@
 # Modules that come with the app
 
-CrossWire SWORD packages (`packages/rawzip` at https://www.crosswire.org/ftpmirror/pub/sword/), compiled into the
-program by `src/bundled.rs` and installed into the app's own module folder on the first run, when no Bible is found.
-Licences are the `DistributionLicense` of each module's `.conf`, as of 2026-10-14.
+CrossWire SWORD packages (`packages/rawzip` at https://www.crosswire.org/ftpmirror/pub/sword/), compiled into the program by `src/bundled.rs` and installed into the app's own module folder on the first run, when no Bible is found. Licences are the `DistributionLicense` of each module's `.conf`, as of 2026-10-14.
 
 | File | Module | Licence |
 | --- | --- | --- |

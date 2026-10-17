@@ -17,9 +17,7 @@ Bible study that let's you focus on God's word without distractions, while still
 
 ## Your notes are yours
 
-Everything you write is saved as plain Markdown files in a folder on your computer (you choose where in Settings). There
-is no account and nothing is uploaded. You can open the notes in any editor, back them up with any tool, or copy the
-folder to a new computer. If you stop using Zoe, your notes still make sense.
+Everything you write is saved as plain Markdown files in a folder on your computer (you choose where in Settings). There is no account and nothing is uploaded. You can open the notes in any editor, back them up with any tool, or copy the folder to a new computer. If you stop using Zoe, your notes still make sense.
 
 ## Getting Zoe
 
@@ -35,25 +33,15 @@ Download the installer for your computer from the [Releases](https://github.com/
 
 ### If your computer warns about Zoe
 
-The installers are not code-signed yet. Signing is how Apple and Microsoft recognize who made an app, and it needs paid
-developer accounts that Zoe does not have yet. Until then, your computer may warn you the first time you open Zoe. The
-warning is about the missing signature, not about anything it found in the app. Here is how to continue:
+The installers are not code-signed yet. Signing is how Apple and Microsoft recognize who made an app, and it needs paid developer accounts that Zoe does not have yet. Until then, your computer may warn you the first time you open Zoe. The warning is about the missing signature, not about anything it found in the app. Here is how to continue:
 
-- **Mac:** if Zoe "can't be opened" or "is damaged", open **System Settings**, then **Privacy & Security**, scroll down
-  to **Security**, and choose **Open Anyway** next to the message about Zoe. (Try opening Zoe first, so the message
-  appears.) If that does not work, run `xattr -dr com.apple.quarantine /Applications/Zoe.app` in Terminal.
+- **Mac:** if Zoe "can't be opened" or "is damaged", open **System Settings**, then **Privacy & Security**, scroll down to **Security**, and choose **Open Anyway** next to the message about Zoe. (Try opening Zoe first, so the message appears.) If that does not work, run `xattr -dr com.apple.quarantine /Applications/Zoe.app` in Terminal.
 - **Windows:** when "Windows protected your PC" appears, choose **More info**, then **Run anyway**.
 
 
-Zoe comes with the Berean Standard Bible and Strong's dictionaries, so you can start reading straight away. More Bibles,
-commentaries, and dictionaries can be downloaded from within Zoe (they come from the
-[CrossWire](https://crosswire.org) library; check each one's license).
-**Modern copyrighted translations that need a purchased unlock key (such as the NASB or NIV) are not supported yet.**
+Zoe comes with the Berean Standard Bible and Strong's dictionaries, so you can start reading straight away. More Bibles, commentaries, and dictionaries can be downloaded from within Zoe (they come from the [CrossWire](https://crosswire.org) library; check each one's license). **Modern copyrighted translations that need a purchased unlock key (such as the NASB or NIV) are not supported yet.**
 
-Not every Bible shows perfectly yet. Modules mark up their text in many different ways, and reading all of them
-correctly is the biggest gap in Zoe. If a translation looks wrong, please
-[report it](https://github.com/sialis-software/zoe/issues) with the module name and the passage (see
-[the SWORD notes](docs/01-sword-integration.md) for what helps).
+Not every Bible shows perfectly yet. Modules mark up their text in many different ways, and reading all of them correctly is the biggest gap in Zoe. If a translation looks wrong, please [report it](https://github.com/sialis-software/zoe/issues) with the module name and the passage (see [the SWORD notes](docs/01-sword-integration.md) for what helps).
 
 ## How Zoe is made
 
@@ -61,8 +49,6 @@ Much of Zoe's code, tests, documentation, sample content, and interface icons wa
 
 ## License
 
-Zoe is free software. You may use it under either the [MIT license](LICENSE-MIT) or the
-[Apache License 2.0](LICENSE-APACHE), as you choose. Copyright (c) 2026 Sialis LLC.
+Zoe is free software. You may use it under either the [MIT license](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE), as you choose. Copyright (c) 2026 Sialis LLC.
 
-The Bible text and dictionaries that come with the app, and the libraries it is built from, have their own licenses:
-see [NOTICES.md](NOTICES.md) and [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).
+The Bible text and dictionaries that come with the app, and the libraries it is built from, have their own licenses: see [NOTICES.md](NOTICES.md) and [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt).
