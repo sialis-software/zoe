@@ -1,35 +1,26 @@
 # Changelog
 
 What changed in each version of Zoe, newest first. The part under **Unreleased** is written as changes are made;
-`scripts/release.sh` dates it and numbers it when a release is made (see `docs/11-releasing.md`).
+`scripts/release.sh` dates it and numbers it when a release is made (see `docs/11-releasing.md`). Only what a person using
+Zoe would notice is listed; the rest is in the git log.
 
 ## [Unreleased]
 
-- Zoe is licensed under MIT or Apache-2.0 (Sialis LLC). The licences, the notices for what comes with the app and the
-  texts of the libraries' licences are at the top of the repository and go with the program; the About page says so.
-- The sample notes made in a new vault no longer mention people.
 - The passages a Bible prints under a section's heading, `(Colossians 1:1-2; Philemon 1:1-3)`, are a small quiet line
-  under the heading, not a second bold heading; each passage in it is a link.
+  under the heading, not a second bold heading, and each passage in it is a link.
 - A font setting of "System Font" (macOS's name for its interface font, which has no bold face of its own) now means the
   default font, so bold headings stay in the same face as the text.
 
 ## [0.4.0] - 2026-10-17
 
-- Tests run on GitHub for every push, and pushing a version tag builds the macOS, Windows, and Linux bundles onto a
-  draft release (`.github/workflows`).
-- The macOS disk image can be signed and notarized (`scripts/sign-macos.sh`), so that it opens on other Macs without a
-  warning. It is when the Apple secrets are set in GitHub.
+- Nothing a person using Zoe would notice: tests and the release builds now run on GitHub.
 
 ## [0.3.0] - 2026-10-16
 
-- A build for developing (`cargo run`, `dev.sh`, the tests) keeps its settings, session, vault, and modules in `zoe-dev`
-  folders of its own, so it can no longer touch the installed app's. `scripts/dev-sandbox.sh` looks at them, clears
-  them, or fills them with a copy of the installed app's. `--reseed` works only there.
 - The app notes the version that last opened its folders. On an upgrade it copies the settings and session to
   `backups/` first, runs the migrations for the versions crossed, and says "Updated to X from Y". A newer version's
   folders opened by an older one are left alone, and the person is told.
-- The About page shows the commit the program was built from, and says so for a build for developing.
-- Releases are made by `scripts/release.sh`, and put on a Mac by `scripts/install-macos.sh`.
+- The About page shows the commit the program was built from.
 - The card of the days a chapter was read is an overlay card like the reader's others (over the text, closed by a click
   elsewhere or Escape) and no longer pushes the text down.
 - A small grey button beside a chapter's title opens the notes that link to the chapter, in a tab.

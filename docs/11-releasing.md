@@ -42,6 +42,11 @@ original, so that nothing the sandbox does can reach it.
   is on the About page.
 - `CHANGELOG.md` says what changed. Changes are written under `## [Unreleased]` as they are made; a release dates them
   and numbers them.
+- **What goes in the changelog:** what a person using Zoe would notice, such as new things, changed behavior, and fixes. Docs,
+  licenses, tests, scripts, CI, and other internal work stay in the git log. It also becomes the notes of the GitHub release.
+- **Which number to raise** (before 1.0): `minor` for a release with something new or visibly changed, `patch` for one of
+  small fixes only, `major` is kept for 1.0. Fixes that change what a person can do (a line that becomes a link, a
+  setting that now works) count as something new.
 
 ## 3. Making a release
 
