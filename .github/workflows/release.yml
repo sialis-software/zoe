@@ -104,7 +104,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --locked
       - run: cargo build --release -p zoe
-      - run: cargo packager --release --formats nsis -c Packager.toml
+      - name: Package
+        shell: bash
+        run: |
+          # The packager looks for the program in the folder of the packages unless told where it is.
+          (echo 'binaries-dir = "target/release"'; cat Packager.toml) > .packager-ci.toml
+          cargo packager --release --formats nsis -c .packager-ci.toml
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -131,7 +136,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --locked
       - run: cargo build --release -p zoe
-      - run: cargo packager --release --formats deb,appimage -c Packager.toml
+      - name: Package
+        run: |
+          # The packager looks for the program in the folder of the packages unless told where it is.
+          (echo 'binaries-dir = "target/release"'; cat Packager.toml) > .packager-ci.toml
+          cargo packager --release --formats deb,appimage -c .packager-ci.toml
       - uses: actions/upload-artifact@v4
         with:
           name: linux
