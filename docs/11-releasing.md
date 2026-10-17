@@ -55,8 +55,9 @@ under Unreleased. Then it runs the tests, sets the version, dates the changelog,
 `git push && git push origin vX.Y.Z`. A release that is not pushed is undone with `git tag -d vX.Y.Z && git reset --hard HEAD~1`.
 
 Other platforms: `scripts/package.sh [macos|windows|linux|all]` (cargo-packager; see the script for what each needs).
-Nothing is signed or notarized yet: the first time on another Mac, open the app with right-click > Open. (Signing and
-notarizing, and a check for new versions, are not done.)
+The macOS image is signed and notarized when the Apple secrets are set (below); an unsigned one is opened on another Mac
+with right-click > Open the first time. The Windows and Linux packages are not signed, and there is no check for new
+versions yet.
 
 ### Release bundles in CI
 
@@ -71,11 +72,58 @@ The tag must equal the version in `Cargo.toml`, and `Cargo.toml` and `Packager.t
 once. Then three builds run side by side (the tests are not repeated: `scripts/release.sh` ran them, and `ci.yml` runs them on every push): a macOS disk image for Apple silicon and Intel in one
 (`UNIVERSAL=1 scripts/bundle-macos.sh`), a Windows installer and a Linux `.deb` and AppImage (both `cargo packager`).
 The last job puts them on a **draft** GitHub release, titled "Zoe X.Y.Z", with that version's section of `CHANGELOG.md`
-as the notes. Read it, then publish it from the Releases page. Nothing is signed.
+as the notes. Read it, then publish it from the Releases page. Mark it a pre-release when publishing an alpha
+(`13-alpha-testing.md`).
 
 To try the builds without a tag: Actions, Release, Run workflow. The bundles are kept as artifacts of the run and no
 release is made. `.github/workflows/ci.yml` runs the tests on Linux, macOS and Windows for every push to `main` and every
 pull request.
+
+### Signing and notarizing the macOS image
+
+Without it, every other Mac refuses the app until the person right-clicks, or clears the quarantine mark by hand.
+`scripts/sign-macos.sh` signs the app and the disk image with a Developer ID certificate and has Apple notarize them
+(the app first, then the image, each stapled, so that they open offline too). `scripts/bundle-macos.sh release` calls it,
+so a release that finds the settings below is signed, and one that does not is made unsigned.
+
+What it needs, once (an Apple Developer Program membership, US$99 a year):
+
+1. **A Developer ID Application certificate.** developer.apple.com, Certificates, add one of the type "Developer ID
+   Application" (or in Xcode: Settings, Accounts, Manage Certificates). Find it in Keychain Access, export it with its
+   private key as `zoe-signing.p12`, with a password of your own.
+2. **An App Store Connect API key.** appstoreconnect.apple.com, Users and Access, Integrations, Team Keys: make one with
+   the Developer role. Download `AuthKey_XXXXXXXXXX.p8` (it can be downloaded once). Note the Key ID and the Issuer ID
+   at the top of that page.
+3. **Put them in GitHub as secrets** (Settings, Secrets and variables, Actions, or `gh secret set` from the repository).
+   Feeding each from a file keeps it out of your shell history and out of any conversation:
+
+   ```
+   base64 -i zoe-signing.p12 | gh secret set MACOS_CERTIFICATE
+   gh secret set MACOS_CERTIFICATE_PASSWORD          # asks for it
+   base64 -i AuthKey_XXXXXXXXXX.p8 | gh secret set APPLE_API_KEY
+   gh secret set APPLE_API_KEY_ID                    # asks for it
+   gh secret set APPLE_API_ISSUER                    # asks for it
+   ```
+
+   Then delete the `.p12` and `.p8` from the Downloads folder (keep them in a password manager).
+
+Without the secrets the image is made unsigned and the run shows a warning (so that releases can go out before the Apple
+account is ready).
+
+To sign by hand on this Mac (for a build to give someone directly):
+
+```
+xcrun notarytool store-credentials zoe-notary --key AuthKey_XXXXXXXXXX.p8 --key-id <KEY ID> --issuer <ISSUER ID>
+ZOE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ZOE_NOTARY_PROFILE=zoe-notary scripts/bundle-macos.sh release
+```
+
+`ZOE_SIGN_IDENTITY=-` signs ad hoc (no certificate, no notarizing), which is enough to see that the script and the
+hardened runtime work. To check a result: `codesign --verify --strict -vv target/Zoe.app`,
+`spctl --assess --type execute -vv target/Zoe.app` ("accepted, source=Notarized Developer ID") and
+`xcrun stapler validate target/Zoe.app`.
+
+Windows and Linux packages are not signed. (Windows shows a SmartScreen warning for an unsigned installer; signing it
+needs a code-signing certificate, which is a separate purchase.)
 
 ## 4. Installing
 

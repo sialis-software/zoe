@@ -1,5 +1,6 @@
 # Release bundles. Pushing a tag `vX.Y.Z` (made by scripts/release.sh) builds the macOS disk image, the Windows
-# installer and the Linux packages, and puts them on a draft GitHub release for review. Nothing is signed.
+# installer and the Linux packages, and puts them on a draft GitHub release for review. The macOS image is signed and
+# notarized (secrets: docs/11-releasing.md); the Windows and Linux packages are not signed.
 # The tests are not run again here: scripts/release.sh runs them before it tags, and ci.yml runs them on every push.
 name: Release
 
@@ -44,8 +45,47 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - name: Build the app and the disk image
+      - name: Signing certificate and notarization key
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE" ] || [ -z "$APPLE_API_KEY" ] || [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_ISSUER" ]; then
+            # Without the secrets (a trial run, or before the Apple account is set up) the disk image is made unsigned.
+            echo "::warning::No macOS signing secrets are set: the disk image is not signed (docs/11-releasing.md)"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/zoe-signing.keychain-db"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [ -z "$identity" ]; then echo "No Developer ID Application certificate in the one given"; exit 1; fi
+          echo "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+          {
+            echo "ZOE_SIGN_IDENTITY=$identity"
+            echo "ZOE_NOTARY_KEY=$RUNNER_TEMP/AuthKey.p8"
+            echo "ZOE_NOTARY_KEY_ID=$APPLE_API_KEY_ID"
+            echo "ZOE_NOTARY_ISSUER=$APPLE_API_ISSUER"
+            echo "ZOE_KEYCHAIN=$keychain"
+          } >> "$GITHUB_ENV"
+          echo "Signing as: $identity"
+      - name: Build, sign and notarize the app and the disk image
         run: UNIVERSAL=1 scripts/bundle-macos.sh release
+      - name: Remove the keys
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+          if [ -n "$ZOE_KEYCHAIN" ]; then security delete-keychain "$ZOE_KEYCHAIN" || true; fi
       - uses: actions/upload-artifact@v4
         with:
           name: macos

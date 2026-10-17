@@ -3,7 +3,8 @@
 # Usage: scripts/bundle-macos.sh [release|debug]   (default release)
 #   UNIVERSAL=1 scripts/bundle-macos.sh   a release for Apple silicon and Intel in one
 #   (needs both targets: rustup target add aarch64-apple-darwin x86_64-apple-darwin)
-# The bundle is not signed: on another Mac, open it with right-click > Open the first time.
+# The bundle is signed only if ZOE_SIGN_IDENTITY is set (scripts/sign-macos.sh; docs/11-releasing.md). Unsigned, on another
+# Mac, open it with right-click > Open the first time.
 set -e
 cd "$(dirname "$0")/.."
 profile="${1:-release}"
@@ -54,6 +55,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 echo "Made $app"
+# Signed (and notarized) when ZOE_SIGN_IDENTITY is set: see scripts/sign-macos.sh. Not a build for developing.
+if [ "$profile" = release ]; then scripts/sign-macos.sh "$app"; fi
 # A release is also made into a disk image to hand out: the app and a link to Applications.
 if [ "$profile" = release ]; then
     dist=target/dist
@@ -65,6 +68,7 @@ if [ "$profile" = release ]; then
     cp -R "$app" "$stage/Zoe.app"
     ln -s /Applications "$stage/Applications"
     hdiutil create -quiet -volname "Zoe" -srcfolder "$stage" -ov -format UDZO "$dmg"
+    scripts/sign-macos.sh "$dmg"
     rm -rf "$stage"
     echo "Made $dmg"
 fi
