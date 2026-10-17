@@ -6,6 +6,8 @@ Zoe would notice is listed; the rest is in the git log.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-17
+
 - The passages a Bible prints under a section's heading, `(Colossians 1:1-2; Philemon 1:1-3)`, are a small quiet line
   under the heading, not a second bold heading, and each passage in it is a link.
 - A font setting of "System Font" (macOS's name for its interface font, which has no bold face of its own) now means the
