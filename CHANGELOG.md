@@ -5,6 +5,8 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-17
+
 - Tests run on GitHub for every push, and pushing a version tag builds the macOS, Windows and Linux bundles onto a
   draft release (`.github/workflows`).
 - The macOS disk image can be signed and notarized (`scripts/sign-macos.sh`), so that it opens on other Macs without a
