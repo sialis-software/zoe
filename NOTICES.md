@@ -12,7 +12,7 @@ following works of others.
 | Strong's Hebrew Bible Dictionary | CrossWire SWORD package, from James Strong's work (1890) | Public domain |
 | M'Cheyne reading plan | Robert Murray M'Cheyne's calendar of 1842 | Public domain |
 | The app icon | The Greek letter zeta, from [Wikimedia Commons](https://en.wikipedia.org/wiki/Zeta#/media/File:Zeta_uc_lc.svg) (`Zeta_uc_lc.svg`) | Public domain |
-| The interface icons (`crates/app/assets/icons`) | Generated for this project | Part of Zoe (MIT or Apache-2.0) |
+| The interface icons (`crates/app/assets/icons`) | Generated for this project with an AI assistant | Part of Zoe (MIT or Apache-2.0) |
 
 The modules are in `crates/app/assets/modules`, with their sources listed in the `README.md` there.
 

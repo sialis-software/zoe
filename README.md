@@ -50,6 +50,15 @@ commentaries, and dictionaries can be downloaded from within Zoe (they come from
 [CrossWire](https://crosswire.org) library; check each one's license).
 **Modern copyrighted translations that need a purchased unlock key (such as the NASB or NIV) are not supported yet.**
 
+Not every Bible shows perfectly yet. Modules mark up their text in many different ways, and reading all of them
+correctly is the biggest gap in Zoe. If a translation looks wrong, please
+[report it](https://github.com/sialis-software/zoe/issues) with the module name and the passage (see
+[the SWORD notes](docs/01-sword-integration.md) for what helps).
+
+## How Zoe is made
+
+Much of Zoe's code, tests, documentation, sample content, and interface icons was written with AI assistants, working under the direction of the maintainer. Bug reports are welcome, but they are expected to be reviewed and written by a person: please do not file unreviewed reports from an AI tool.
+
 ## License
 
 Zoe is free software. You may use it under either the [MIT license](LICENSE-MIT) or the

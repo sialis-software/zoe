@@ -1,5 +1,6 @@
 //! In-memory backend with a handful of hand-entered public-domain (KJV) passages.
-//! Excerpts only: John 3 omits verses, and notes/lexicon data are invented.
+//! Excerpts only: John 3 omits verses, and notes/lexicon data are invented. The verse text is checked against the KJV
+//! module (every verse kept is word for word the KJV's), except the "(Num 21:9)" link label that follows John 3:14.
 
 use crate::ast::*;
 use crate::margin::{self, Mark, MarkStyle, Slice};
@@ -56,10 +57,12 @@ fn john_3() -> Chapter {
                 },
             ]),
             run(3, vec![
+                t("Jesus answered and said unto him, "),
                 red(vec![t("Verily, verily, I say unto thee, Except a man be born again, he cannot see the kingdom of God.")]),
             ]),
             run(4, vec![t("Nicodemus saith unto him, How can a man be born when he is old? can he enter the second time into his mother's womb, and be born?")]),
             run(5, vec![
+                t("Jesus answered, "),
                 red(vec![t("Verily, verily, I say unto thee, Except a man be born of water and of the Spirit, he cannot enter into the kingdom of God.")]),
                 Inline::CrossRef { refs: vec![RefRange::parse("Num 21:9").unwrap(), RefRange::parse("Ps 23:1").unwrap()] },
             ]),

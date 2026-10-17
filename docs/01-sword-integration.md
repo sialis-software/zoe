@@ -3,6 +3,15 @@
 Sources: CrossWire wiki (DevTools:Modules, DevTools:conf_Files, OSIS Bibles), the
 rsword_chirho crate docs, and the module library already on this machine at `~/.sword`.
 
+> **The biggest gap in Zoe is reading the markup in SWORD modules.** The modules do not share one standard: each
+> publisher and converter marks up footnotes, headings, poetry, red letters, Strong's numbers, cross references, and
+> special words in its own way, and the same idea can look different from one module to the next. Zoe reads the common
+> OSIS forms and has been tested thoroughly on only a few Bibles, so some modules will show stray symbols, missing
+> pieces, wrong spacing, or text that should be a heading, note, or link. **Bug reports about how a Bible version
+> renders are very welcome.** Please say which module (its name and version from the module manager), which passage,
+> and what looks wrong. A screenshot of the passage helps, and so does the same passage in another program such as
+> Xiphos. A written report from a person is expected (see the README).
+
 ## 1. Module library layout
 
 ```
@@ -136,7 +145,8 @@ word span**, image, link to other module key. Scripture references in module tex
 Estimated as the largest single chunk of "SWORD work" — OSIS+ThML+plain covers the
 vast majority of useful modules; GBF/TEI can come later.
 
-OSIS is the only Bible module type that has been thoroughly tested.
+OSIS is the only Bible module type that has been thoroughly tested. This is where the work is: every new module
+brings markup that the parser has not met, so expect to keep adding cases as reports come in.
 
 ## 6. Locked modules
 `CipherKey` modules use a stream cipher (Sapphire II **[verify]**). Supporting

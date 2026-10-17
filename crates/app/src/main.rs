@@ -8897,13 +8897,13 @@ mod tests {
         // The pointer on the footnote's marker, then on "born again" a few words on.
         h.move_to(399.0, 351.0);
         let footnote = card(&mut h);
-        h.move_to(880.0, 351.0);
+        h.move_to(240.0, 390.0);
         let mark = card(&mut h);
         assert_ne!(footnote, mark, "each comes to the top as it is pointed at");
         h.move_to(399.0, 351.0);
         assert_eq!(card(&mut h), footnote);
         // With its note on top, a click on the mark edits it.
-        h.click(880.0, 351.0);
+        h.click(240.0, 390.0);
         assert!(h.app.bible().editing.is_some());
     }
 
@@ -8964,7 +8964,7 @@ mod tests {
         // Clicking a mark floats its card under the click, as in a reader with no margin.
         h.size = Size::new(1500.0, 800.0);
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
-        h.click(880.0, 351.0);
+        h.click(240.0, 390.0);
         assert!(h.app.bible().popup.is_some(), "the click on \"born again\" floated its card");
         assert!(h.app.bible().editing.is_none(), "and did not start writing in the margin");
         assert!(h.app.bible().floating(&h.app.sh).is_some());

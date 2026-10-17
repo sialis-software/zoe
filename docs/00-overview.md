@@ -11,6 +11,8 @@ This document is the entry point; see the others for detail:
 | [05-margins-and-index.md](05-margins-and-index.md) | Margin notes vs documents, anchoring, and the derived SQLite index |
 | [07-panes-and-tabs.md](07-panes-and-tabs.md) | The workspace: panes holding tabs, and the Bible and note tab types |
 
+*Much of Zoe's code, tests, documentation, sample content, and interface icons was written with AI assistants, working under the direction of the maintainer.*
+
 ## Vision
 
 A friendly, offline desktop Bible study app for ordinary Christians to
