@@ -1,7 +1,7 @@
 # Obsidian-style live preview editor (research spike)
 
 Status: the research below was done first (nothing built); §0 says what has since been built.
-Read with 03 §4 (UI technology), 04 §4 ("Editor" decision) and 02 (vault and markdown).
+Read with 03 §4 (UI technology), 04 §4 ("Editor" decision), and 02 (vault and markdown).
 Dates and versions below are as of 2026-10-12.
 
 ## 0. Status: built as a prototype
@@ -14,8 +14,8 @@ writer pane and in the margin cards (so one editor serves both).
 `render.rs` turns a block into styled display runs plus a display/source offset map, either
 *revealed* (raw, syntax dimmed) or *rendered* (markers hidden, bullets/checkboxes as
 decorations, wikilinks as their label with a payload); `document.rs` is the source string, the
-selection and an undo log (typing grouped by word, backspace runs grouped, structural commands
-one step each), with grapheme-aware motion, smart Enter (continues lists, numbers and tasks,
+selection, and an undo log (typing grouped by word, backspace runs grouped, structural commands
+one step each), with grapheme-aware motion, smart Enter (continues lists, numbers, and tasks,
 ends them on an empty item, continues quotes), Backspace removing line syntax first, toggles
 for bold/italic/code, task toggling, indent/outdent.
 
@@ -28,12 +28,12 @@ link, clicking a rendered checkbox), the clipboard, input-method commits, focus 
 caret-follow plus wheel scrolling inside itself (so it works with a height cap, as in cards).
 
 **Decisions taken while building**
-- Reveal depends on the kind of line. **Headings, rules, embeds and code** reveal the whole
-  line when the caret is on it. **Paragraphs, list items and quotes** reveal only the inline
+- Reveal depends on the kind of line. **Headings, rules, embeds, and code** reveal the whole
+  line when the caret is on it. **Paragraphs, list items, and quotes** reveal only the inline
   element the caret is in or touching (a bold span, an italic, a code span, a link), so the rest
   of the line stays rendered and does not move. A selection spanning several lines keeps
   everything rendered, so the view holds still (§8.3, first option).
-- List bullets, numbers, task boxes and quote bars stay rendered while their line is edited. The
+- List bullets, numbers, task boxes, and quote bars stay rendered while their line is edited. The
   caret cannot rest inside the hidden marker: Left from the start of the text goes to the line
   above, Right from there lands at the text, Home goes to the text, and Backspace at the start of
   the text removes the marker.
@@ -70,11 +70,11 @@ Settings, Appearance, "Vim key bindings in the writer" (off by default) turns on
 in the writer. The logic is `crates/md-editor/src/vim.rs`: pure, fed `Key`s, editing the
 `Document` through `perform`, so each command is one undo step. The widget routes keys to it
 (`LiveEditor::vim`) and draws a block cursor in Normal and Visual mode; the note tab keeps the
-state and shows `-- NORMAL --`, `-- INSERT --` or `-- VISUAL --` under the text. In Insert mode
-only Esc and Ctrl-[ are Vim's, so typing, auto-pairing and input methods work as usual. In
+state and shows `-- NORMAL --`, `-- INSERT --`, or `-- VISUAL --` under the text. In Insert mode
+only Esc and Ctrl-[ are Vim's, so typing, auto-pairing, and input methods work as usual. In
 Normal mode Esc with nothing pending lets go of the keyboard, as it does with Vim off. A mouse
 selection puts Vim in Visual mode; a click leaves it in Normal mode. Cmd (and on other systems
-Ctrl) shortcuts keep working, apart from Ctrl-r, Ctrl-d and Ctrl-u.
+Ctrl) shortcuts keep working, apart from Ctrl-r, Ctrl-d, and Ctrl-u.
 
 Supported, all with counts:
 
@@ -115,7 +115,7 @@ hidden text or inline widgets, and its `Editor` has no concept of a "display tex
 differs from the source (§4).
 
 **Finding 3: no existing Rust crate gives us this for iced.** Nothing found is a reusable
-live-preview editor. The nearest are design references (Zed's display-map layering, Obsidian
+live-preview editor. The nearest are design references (Zed's display-map layering, Obsidian,
 and CodeMirror 6 decorations) and one egui app (Ferrite) with a rendered editing mode (§5).
 
 **Recommendation.** Do it natively, in stages, and keep the model separate from the widget:
@@ -129,17 +129,17 @@ and CodeMirror 6 decorations) and one egui app (Ferrite) with a rendered editing
    architecture.
 3. **Stage 2 (spike, M):** a throwaway custom widget for one paragraph block plus one
    heading, built from `Paragraph::with_spans` as in `reader_text.rs`, proving caret, IME,
-   hit-testing and reveal-on-cursor. Go/no-go checkpoint (§9).
+   hit-testing, and reveal-on-cursor. Go/no-go checkpoint (§9).
 4. **Stage 3 (XL):** the real widget: **a block-segmented custom editor widget** (a hybrid of
    architectures B and C): the raw markdown string is the single source of truth, the
    document is split into blocks, each block is shaped as its own display paragraph, and the
    cursor and selection live in one document-wide model (the same `Pos { block, offset }`
-   idea as `reader_text.rs`). Undo, IME and clipboard are ours.
+   idea as `reader_text.rs`). Undo, IME, and clipboard are ours.
 
 Fallback if the Stage 2 checkpoint fails: ship Stage 0 as the v1 editor and revisit a
 webview (architecture E), accepting that it is not "native" and has platform caveats (§6).
 
-**Three biggest risks:** (1) owning IME, caret, undo and keyboard navigation ourselves
+**Three biggest risks:** (1) owning IME, caret, undo, and keyboard navigation ourselves
 (everything `text_editor` gives for free is gone); (2) layout jumps and cursor mapping
 when raw syntax appears and disappears as the cursor moves; (3) the iced fork/versions
 treadmill: iced 0.14 pins cosmic-text 0.15 while cosmic-text is already at 0.19, and the
@@ -157,7 +157,7 @@ widget will depend on iced internals (`Paragraph` details, renderer behaviour).
   `Paragraph::hit_test`, finds spans with `hit_span`, gets per-line geometry from
   `para.buffer().layout_runs()` (`LayoutRun::highlight` for selection rectangles, glyph
   `metadata` to recover the span), and draws with `renderer.fill_paragraph` plus `fill_quad`
-  for backgrounds, selection and underlines. It already has a document-wide
+  for backgrounds, selection, and underlines. It already has a document-wide
   `Pos { block, offset }` selection model, drag/word selection, multi-block copy, link
   hover/click, and edge auto-scroll. All of this is reusable as the read side of an editor.
   What it lacks: a caret, text input, IME, undo, key navigation, editing at all.
@@ -182,7 +182,7 @@ All verified in source (iced_widget 0.14.2, iced_core 0.14.0, iced_graphics 0.14
   near the cursor", but still not hide or resize.
 
 **What it cannot do.**
-- Font size, line height, hidden text, inline widgets, block decorations, backgrounds or
+- Font size, line height, hidden text, inline widgets, block decorations, backgrounds, or
   borders per range, underline, letter spacing.
 - Hidden text specifically: the buffer text is the displayed text. There is no display/
   source split anywhere in `Editor`.
@@ -237,7 +237,7 @@ Verified in `cosmic-text-0.15.0/src`.
   find the span of a glyph via `glyph.metadata`.
 - **`Attrs` fields** (`attrs.rs`): `color_opt`, `family`, `stretch`, `style`, `weight`,
   `metadata: usize`, `cache_key_flags`, `metrics_opt: Option<CacheMetrics>`,
-  `letter_spacing_opt`, `font_features`. No underline, strikethrough or background; we draw
+  `letter_spacing_opt`, `font_features`. No underline, strikethrough, or background; we draw
   those ourselves from glyph geometry, as `reader_text.rs` already does.
 - **Per-span font size and line height.** `Attrs::metrics(Metrics)` sets `metrics_opt`.
   In `shape.rs` layout, a glyph's size is `glyph.metrics_opt.map_or(font_size, ...)`, and
@@ -323,7 +323,7 @@ Add styled and hidden ranges, driven by a markdown parser that reveals syntax ne
 - Cons: uniform line height assumed in at least five places (§3); no hiding without a
   display/source map (which then breaks `Editor` cursor, selection, `copy`, edit actions,
   because they all work on buffer text); no block widgets (embeds); fork spans
-  `iced_widget`, `iced_graphics`, `iced_core` and must be rebased on every iced release;
+  `iced_widget`, `iced_graphics`, `iced_core`, and must be rebased on every iced release;
   `Arc::try_unwrap` internals.
 - Effort: L to get headings and bold working; **XL and fragile** to get hiding and embeds.
 - Key risk: we end up rewriting the editor inside someone else's structure.
@@ -331,7 +331,7 @@ Add styled and hidden ranges, driven by a markdown parser that reveals syntax ne
 
 ### B. Custom widget on cosmic-text `Editor`/`Buffer` directly, reusing `reader_text.rs`
 
-- Pros: full control; reuses drawing, hit testing, selection geometry, link handling and
+- Pros: full control; reuses drawing, hit testing, selection geometry, link handling, and
   the `Pos{block,offset}` selection model.
 - Cons: must implement caret, key map, IME, clipboard, undo, scroll, accessibility.
   If a single `Buffer` is the whole document, hiding still needs the display/source map,
@@ -347,7 +347,7 @@ Add styled and hidden ranges, driven by a markdown parser that reveals syntax ne
 Each block is its own text editor; the focused block shows raw markdown.
 
 - Pros: simple mental model; matches Obsidian's per-line reveal for most content; embeds,
-  tables, code blocks and callouts are just block types; reveal is block-granular so
+  tables, code blocks, and callouts are just block types; reveal is block-granular so
   layout jumps are contained to one block.
 - Cons: cross-block selection, navigation (up/down arrows keep an x position across blocks),
   copy and undo across blocks are the hard parts; separate editor widgets per block make
@@ -366,7 +366,7 @@ Each block is its own text editor; the focused block shows raw markdown.
   (text, style, role, source range, hidden/reveal), plus offset maps source <-> display.
   The cursor decides which blocks/inlines are "revealed".
 - Widget: for each block, shape a `Para` from display runs; `reader_text.rs` already does
-  per-block layout, selection, hit-test and draw. Add caret (`grapheme_position`), key
+  per-block layout, selection, hit-test, and draw. Add caret (`grapheme_position`), key
   handling, IME, clipboard, undo (operation log over source edits).
 - Effort: XL (6 to 10 weeks for one experienced developer is my order-of-magnitude
   guess, not a measurement).
@@ -380,7 +380,7 @@ Model is a rich tree; markdown only for save and load.
   commands are clean.
 - Cons: round-trip fidelity. Vault files are plain markdown the user also edits in other
   tools and sync (see 02); normalising whitespace, list markers, escapes, unknown syntax,
-  frontmatter ordering and link spelling changes files the user did not mean to change.
+  frontmatter ordering, and link spelling changes files the user did not mean to change.
   Obsidian itself avoids this by keeping source as truth. Also still needs all the widget
   work of B.
 - Effort: XL+.
@@ -388,7 +388,7 @@ Model is a rich tree; markdown only for save and load.
 
 ### E. Webview fallback (CodeMirror 6 live preview or similar)
 
-- Pros: CodeMirror 6 has decorations, atomic ranges, IME, a11y, undo history and RTL handled
+- Pros: CodeMirror 6 has decorations, atomic ranges, IME, a11y, undo history, and RTL handled
   by the browser engine; there are existing live-preview implementations as references
   (Atomic Editor was named in a search result, not inspected). Lowest editing risk.
 - Cons: contradicts the "native Rust" preference; second language and build chain (JS
@@ -544,7 +544,7 @@ Keep to the boundary in 04 §4: markdown logic is separate from the widget.
   with embeds rendered and checkboxes shown. Cmd-click to follow links from the editor.
 - Exit: users can write and see a rendered version. Decide whether this is "enough for v1".
 
-**Stage 1 (M): `editor-model` crate (GUI-agnostic, in `vault` or a new crate beside it).**
+**Stage 1 (M): `editor-model` crate (GUI-agnostic, in `vault`, or a new crate beside it).**
 - Input: source string, cursor/selection (source offsets), an `EmbedResolver` trait.
 - Output: `Vec<Block>` where each block has kind, source range, display runs with style,
   link payload and source range, hidden/revealed flags, offset maps both ways, and

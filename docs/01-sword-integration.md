@@ -2,8 +2,6 @@
 
 Sources: CrossWire wiki (DevTools:Modules, DevTools:conf_Files, OSIS Bibles), the
 rsword_chirho crate docs, and the module library already on this machine at `~/.sword`.
-Items marked **[verify]** are from memory of the SWORD source and must be confirmed
-against real module bytes before relying on them.
 
 ## 1. Module library layout
 
@@ -18,9 +16,6 @@ Frontends also search `$SWORD_PATH`, `/usr/share/sword`, and `~/.sword`, and hon
 `DataPath=` lines in a `sword.conf` (SWORD convention, not a formal spec; Windows and
 macOS defaults vary by frontend **[verify]**). Our app should read the same locations and
 let the user add more, so modules installed by Xiphos or `installmgr` "just appear".
-
-Present locally (good test fixtures): `asv` (zText Bible), `strongsgreek` (zLD),
-`strongshebrew` (RawLD).
 
 ## 2. The `.conf` file
 
@@ -78,7 +73,7 @@ vs Hebrew `H0001`. Entries are in ThML/OSIS/plain per `SourceType`.
 Tree stored as nodes with parent/first-child/next-sibling offsets in `.bdt/.idx`.
 Needed for most non-Bible "documents" users will want (CCEL-style books, creeds, etc.).
 
-## 4. Versification — the hidden hard part
+## 4. Versification
 
 A SWORD module is indexed by *ordinal verse position in its canon*. KJV, NRSV,
 Catholic, LXX, Synodal, Vulgate, Luther, MT… differ in book order, extra books, and
@@ -93,7 +88,7 @@ Requirements:
 - Rule: **notes store references in one reference versification (KJV)** and map at
   display time. See 02.
 
-**What is supported now:** `KJV`, `KJVA` and `NRSV` (`scripture::Versification`, `sword::Module::versification()`). KJVA is the KJV with the Apocrypha: 14 more books (1 and 2 Esdras, Tobit,
+**What is supported now:** `KJV`, `KJVA`, and `NRSV` (`scripture::Versification`, `sword::Module::versification()`). KJVA is the KJV with the Apocrypha: 14 more books (1 and 2 Esdras, Tobit,
 Judith, Additions to Esther, Wisdom, Sirach, Baruch, Prayer of Azariah, Susanna, Bel and the Dragon, Prayer of Manasseh,
 1 and 2 Maccabees) stored in the Old Testament's file *after Malachi*, in that order, so the 66 canonical books are where
 they always were. `scripture::Book` has all 80 (the canon first: `Book::canon()`, then `Book::apocrypha()`), so a book's
@@ -101,7 +96,7 @@ position, and with it an index ordinal, does not change; `sword::canon_data::VER
 derived from the KJVA module's own index (its 30,028 slots are accounted for exactly). A module may have only some of the
 14 (the headings and the books it lacks are empty entries): `ZText::has_book` is true for an Apocrypha book when any of its
 slots has text, and every list of chapters (the book picker, next and previous, search) comes from what the module has. Search
-has `in:AP`. Every other versification (NRSVA, Catholic, Vulgate, LXX, Synodal, Luther and so on) is still unsupported and the
+has `in:AP`. Every other versification (NRSVA, Catholic, Vulgate, LXX, Synodal, Luther, and so on) is still unsupported and the
 module is listed as unreadable, with the reason.
 
 **NRSV** (in SWORD's sense) is the KJV's numbering but for two places, found by reading the chapter and verse structure out of three
@@ -141,6 +136,8 @@ word span**, image, link to other module key. Scripture references in module tex
 Estimated as the largest single chunk of "SWORD work" — OSIS+ThML+plain covers the
 vast majority of useful modules; GBF/TEI can come later.
 
+OSIS is the only Bible module type that has been thoroughly tested.
+
 ## 6. Locked modules
 `CipherKey` modules use a stream cipher (Sapphire II **[verify]**). Supporting
 user-supplied unlock keys is small once reading works. Store keys outside the vault.
@@ -162,7 +159,7 @@ The archive and conf logic is `crates/sword/src/package.rs` (no UI, no network);
 
 - **List**: name, description, language, version, license, size on disk, folder, and whether the app
   can read it. "Readable" is exactly `Module::bible/commentary/lexicon` succeeding (locked, other
-  drivers, compression, versification or markup are shown as unreadable with that reason), and
+  drivers, compression, versification, or markup are shown as unreadable with that reason), and
   that the data files exist.
 - **Remove**: deletes `mods.d/<name>.conf` and the module's data (a `DataPath` folder, or the files
   of a dictionary's stem), and folders left empty. Data another conf shares is kept. A module in
@@ -175,8 +172,8 @@ The archive and conf logic is `crates/sword/src/package.rs` (no UI, no network);
   taken back.
 - **Download** (only on a button press): the list is `raw/mods.d.tar.gz` (every `.conf`; name,
   description, `Lang`, `Version`, `InstallSize`, `DistributionLicense`, `Category`, locked or
-  not), filterable by text, language, kind and "free to download" (public domain, GPL, Creative
-  Commons and similar licenses; it is a marker, the license text is shown too). A module comes
+  not), filterable by text, language, kind, and "free to download" (public domain, GPL, Creative
+  Commons, and similar licenses; it is a marker, the license text is shown too). A module comes
   from `packages/rawzip/<Name>.zip`. Both run on a thread with progress and a Cancel button.
 - After any install or remove, `App::reload_modules()` (shared with adding a folder) loads the
   backend again in place; `apply_workspace` drops tabs whose module is gone.
@@ -213,13 +210,13 @@ Implemented in `crates/sword`, all read-only and checked against `mod2imp` on ev
 or entry of the installed modules (ASV, LSB, StrongsGreek, StrongsHebrew, LSBG, LSBH):
 
 - `.conf` parsing; library search over `ZOE_SWORD_PATH` (replaces the rest), folders
-  added in Settings → Bible modules (kept in `config.json`), `SWORD_PATH` and the app's own
+  added in Settings → Bible modules (kept in `config.json`), `SWORD_PATH`, and the app's own
   `~/.config/sword` (made on start if missing). Other frontends' folders are not searched; add
   one in Settings if wanted.
 - zText Bibles (ZIP-compressed, KJV versification, OSIS markup) into the shared AST:
   paragraphs, poetry, headings, footnotes, Strong's words, words of Jesus.
-- RawLD and zLD dictionaries, with TEI, ThML and plain entries parsed to lemma,
-  transliteration and definition.
+- RawLD and zLD dictionaries, with TEI, ThML, and plain entries parsed to lemma,
+  transliteration, and definition.
 
 Not yet: other versifications and the mapping between them, LZSS/XZ/BZIP2 compression,
 RawText, commentaries, GenBooks, ThML/GBF Bibles, cipher keys, cross-chapter `osisRef`s.

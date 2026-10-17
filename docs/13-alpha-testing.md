@@ -1,7 +1,7 @@
 # Giving an alpha to testers
 
 For the person releasing: make a release as usual (`scripts/release.sh minor`, or `patch` for a follow-up, then push the
-commit and the tag). The Release workflow drafts a GitHub release with the macOS, Windows and Linux downloads. Tick
+commit and the tag). The Release workflow drafts a GitHub release with the macOS, Windows, and Linux downloads. Tick
 **Set as a pre-release** when publishing the draft, and send the testers the link (the repository must be public or the
 testers invited to it; see `11-releasing.md`). Until the packages are signed, send the notes below with it.
 
@@ -18,14 +18,16 @@ Installing, by system. The packages are not signed yet, so each system asks you 
 
 - **Windows.** Run `Zoe-X.Y.Z-setup.exe`. Windows SmartScreen says "Windows protected your PC": choose **More info**, then
   **Run anyway**.
-- **macOS.** Open the `.dmg` and drag Zoe to Applications. If it will not open (or says it is damaged), run
-  `xattr -dr com.apple.quarantine /Applications/Zoe.app` in Terminal, or right-click the app and choose Open. Once
-  the build is signed and notarized this is not needed.
+- **macOS.** Open the `.dmg` and drag Zoe to Applications. If it will not open (or says it is damaged), open
+  **System Settings**, then **Privacy & Security**, scroll to **Security**, and choose **Open Anyway** next to the
+  message about Zoe (try opening Zoe first, so the message appears). If that does not work, run
+  `xattr -dr com.apple.quarantine /Applications/Zoe.app` in Terminal. Once the build is signed and notarized this is not
+  needed.
 - **Linux.** The `.deb` installs with `sudo apt install ./Zoe_X.Y.Z_amd64.deb`. The AppImage runs after `chmod +x` on it.
 
 Update by installing the newer build over the old one. Your notes and settings stay.
 
 ## Sending feedback
 
-Say what you did, what you expected and what happened; include the version from **Settings, About** and your system. A
+Say what you did, what you expected, and what happened; include the version from **Settings, About** and your system. A
 screenshot helps. If the program will not start, say so and what it printed, if anything.

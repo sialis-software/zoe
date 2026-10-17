@@ -1,4 +1,4 @@
-# Releasing, installing and upgrading
+# Releasing, installing, and upgrading
 
 How the app is built for use, kept apart from the one being worked on, and moved from one version to the next.
 
@@ -49,7 +49,7 @@ original, so that nothing the sandbox does can reach it.
 scripts/release.sh <patch|minor|major|X.Y.Z> [--dry-run] [--skip-tests] [--no-build] [--universal]
 ```
 
-It stops unless the tree is clean, the new version is after the old, the tag is free and the changelog has something
+It stops unless the tree is clean, the new version is after the old, the tag is free, and the changelog has something
 under Unreleased. Then it runs the tests, sets the version, dates the changelog, commits "vX.Y.Z release", tags `vX.Y.Z`
 (annotated) and, on a Mac, builds `target/Zoe.app` and `target/dist/Zoe-X.Y.Z-macos-<arch>.dmg`. It never pushes: that is
 `git push && git push origin vX.Y.Z`. A release that is not pushed is undone with `git tag -d vX.Y.Z && git reset --hard HEAD~1`.
@@ -70,13 +70,13 @@ git push && git push origin v0.4.0
 
 The tag must equal the version in `Cargo.toml`, and `Cargo.toml` and `Packager.toml` must agree, or the run stops at
 once. Then three builds run side by side (the tests are not repeated: `scripts/release.sh` ran them, and `ci.yml` runs them on every push): a macOS disk image for Apple silicon and Intel in one
-(`UNIVERSAL=1 scripts/bundle-macos.sh`), a Windows installer and a Linux `.deb` and AppImage (both `cargo packager`).
+(`UNIVERSAL=1 scripts/bundle-macos.sh`), a Windows installer, and a Linux `.deb` and AppImage (both `cargo packager`).
 The last job puts them on a **draft** GitHub release, titled "Zoe X.Y.Z", with that version's section of `CHANGELOG.md`
 as the notes. Read it, then publish it from the Releases page. Mark it a pre-release when publishing an alpha
 (`13-alpha-testing.md`).
 
 To try the builds without a tag: Actions, Release, Run workflow. The bundles are kept as artifacts of the run and no
-release is made. `.github/workflows/ci.yml` runs the tests on Linux, macOS and Windows for every push to `main` and every
+release is made. `.github/workflows/ci.yml` runs the tests on Linux, macOS, and Windows for every push to `main` and every
 pull request.
 
 ### Signing and notarizing the macOS image
@@ -119,7 +119,7 @@ ZOE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ZOE_NOTARY_PROF
 
 `ZOE_SIGN_IDENTITY=-` signs ad hoc (no certificate, no notarizing), which is enough to see that the script and the
 hardened runtime work. To check a result: `codesign --verify --strict -vv target/Zoe.app`,
-`spctl --assess --type execute -vv target/Zoe.app` ("accepted, source=Notarized Developer ID") and
+`spctl --assess --type execute -vv target/Zoe.app` ("accepted, source=Notarized Developer ID"), and
 `xcrun stapler validate target/Zoe.app`.
 
 Windows and Linux packages are not signed. (Windows shows a SmartScreen warning for an unsigned installer; signing it
@@ -131,7 +131,7 @@ needs a code-signing certificate, which is a separate purchase.)
 scripts/install-macos.sh [target/Zoe.app | path/to/Zoe-X.Y.Z-macos-arm64.dmg]
 ```
 
-Asks a running Zoe to quit, replaces `/Applications/Zoe.app`, clears the quarantine mark and says which version replaced
+Asks a running Zoe to quit, replaces `/Applications/Zoe.app`, clears the quarantine mark, and says which version replaced
 which. A build for developing (the bundle says `ZoeChannel: dev`) is refused without `--force`. Data is never touched by
 installing.
 
@@ -141,7 +141,7 @@ The data folder keeps `version.json`, the version that last opened it (`crates/a
 
 - **First run** (nothing there): the version is noted.
 - **Same version:** nothing.
-- **Upgrade** (older noted, or none noted but files of an earlier version there): the settings, layouts and session are
+- **Upgrade** (older noted, or none noted but files of an earlier version there): the settings, layouts, and session are
   copied to `backups/<from>-to-<to>/` (the last ten are kept), then each migration for a version after the old one and up
   to the new one runs, oldest first. "Updated to X from Y" shows. If a migration fails, the problem shows in the bar and
   the new version is **not** noted, so the next start tries again.

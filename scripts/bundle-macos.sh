@@ -25,6 +25,8 @@ app="target/Zoe.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$program" "$app/Contents/MacOS/Zoe"
+# The licences go with the program.
+cp LICENSE-MIT LICENSE-APACHE NOTICES.md THIRD-PARTY-LICENSES.txt "$app/Contents/Resources/"
 # The icon: the artwork on a rounded square, at every size.
 swift scripts/make-icon.swift crates/app/assets/app/zoe.png target/Zoe.iconset
 iconutil -c icns target/Zoe.iconset -o "$app/Contents/Resources/Zoe.icns"

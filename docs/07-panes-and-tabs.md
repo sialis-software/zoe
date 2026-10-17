@@ -2,7 +2,7 @@
 
 The window is a workspace: **panes** side by side, each holding **tabs**, one showing.
 A tab is one of a small set of self-contained *types*, each in its own module with its own
-state, messages, `update` and `view`:
+state, messages, `update`, and `view`:
 
 | Tab type | Module | Holds | Per-tab state |
 |---|---|---|---|
@@ -11,7 +11,7 @@ state, messages, `update` and `view`:
 | Note | `note_tab.rs` | one markdown document (a note or a margin file) | the document, the selector panel; a header bar like the Bible tab's |
 
 Everything a tab type needs to read or change that is not its own (the backend, the notes,
-the marks, the vault, theme and status) is in `Shared` (`shared.rs`); tabs get `&Shared` to
+the marks, the vault, theme, and status) is in `Shared` (`shared.rs`); tabs get `&Shared` to
 draw and `&mut Shared` to update. Nothing in a tab type knows about panes.
 
 ## The workspace (`main.rs`)
@@ -23,7 +23,7 @@ out what one tab asks of another, so tab types never reach into each other:
 - A tab returns a **request** when it cannot do something alone (`bible_tab::Request`,
   `note_tab::Request`): open this note, show this verse, look up this word.
 - A change that other tabs must follow is recorded in `Shared` as an **event** (a mark was
-  removed, a file was rewritten, renamed or deleted); `App::settle` passes events to the
+  removed, a file was rewritten, renamed, or deleted); `App::settle` passes events to the
   tabs showing them after every update.
 - **Which Bible tab?** Notes work with the *reference* Bible tab: the one last used if it is
   showing, else any showing one. Its selection feeds the strip of notes on the selected verses and its module
@@ -43,10 +43,10 @@ about two seconds; a clock subscription runs only while one is showing). A selec
 pop-up closes when anything outside it is clicked, in any pane.
 
 A margin note opened in a note tab shows its mark's details in place of the properties strip: the verse it is
-on (a link: it shows that verse in the reader, as a `[[@John 3:16]]` does: right click for where to open it, pull it away to carry it to a tab or pane), the style, module, created time
+on (a link: it shows that verse in the reader, as a `[[@John 3:16]]` does: right click for where to open it, pull it away to carry it to a tab or pane), the style, module, created time,
 and tags.
 
-A new tab asks only what *kind* of tab it is to be (Bible, Dictionary or Notes); which module, dictionary or
+A new tab asks only what *kind* of tab it is to be (Bible, Dictionary, or Notes); which module, dictionary, or
 note comes after, from the tab's own pickers. It opens on the module the other Bible tab is reading, the first
 dictionary, and the first note.
 
@@ -76,7 +76,7 @@ People find notes by tag; folders are the app's business. Every new note is file
 templates say what they are with a starting tag: `prayer`, `topic`, `daily`) and the selector lists
 notes flat, with chips for the tags in use (with counts, colored if a pen has the tag). Click chips to
 narrow (a note must have them all; `topic` includes `topic/grace`); the search box matches names,
-text and tags, and `#words` match tags only. Tags are kept lower case, `-` for spaces, `/` to nest.
+text, and tags, and `#words` match tags only. Tags are kept lower case, `-` for spaces, `/` to nest.
 A tag box offers the tags in use as you type, in the note's property strip, in the card of a mark
 being written in (so a mark's note can be tagged from the text), and when naming a pen's tag.
 
@@ -88,7 +88,7 @@ Clicking a pen's swatch cycles its color; add one by typing a tag.
 
 The note tab's menu has **New note…**, which asks what kind (and then for a title, unless the kind
 says it needs none). The kinds are the **templates**: ordinary markdown notes in the vault's
-`templates/` folder (a new vault is given Prayer list, Topic, Daily and Blank as files, once), so
+`templates/` folder (a new vault is given Prayer list, Topic, Daily, and Blank as files, once), so
 they sync and back up with the rest of it. They are not found by the note selector or its search (changing
 what a kind starts with is for those who go looking): the pencil beside a kind in the New note dialog opens
 its template to edit. Adding a file adds a kind; deleting one removes it.
@@ -158,7 +158,7 @@ Every link, from any kind of tab, is followed to *a place* (`opening.rs`). A pla
 | Alt | in the other pane (its tab, if it has one of the right kind; else a new tab there; the next pane in order, splitting if there is only one) |
 | Shift | in a new pane, split off this one |
 
-Right-clicking a link in the reader, a note or a card offers the same four, and "Copy link"
+Right-clicking a link in the reader, a note, or a card offers the same four, and "Copy link"
 (the link as it is written in a note). The app follows the keys held through a
 `ModifiersChanged` subscription, so any link control gets this without handling keys itself.
 A link in a note's text that is being edited keeps its own rule (Alt-click edits it); the
@@ -167,7 +167,7 @@ right-click menu is always there.
 ## Header bars
 
 Every tab's bar is laid out the same way: back and forward arrows, then whatever the tab uses to
-choose what it shows (the Bible pickers, the note selector, the dictionary and its lookup box), then
+choose what it shows (the Bible pickers, the note selector, the dictionary, and its lookup box), then
 a hamburger menu at the right edge. A note's menu holds Rename and Delete.
 
 ## History
@@ -175,7 +175,7 @@ a hamburger menu at the right edge. A note's menu holds Rename and Delete.
 Each tab keeps its own history, like a browser tab (`history.rs`, up to 100 places). Back and
 forward arrows sit at the left of the tab's bar, greyed when there is nowhere to go; ⌘[ / ⌘]
 (Ctrl elsewhere) and the mouse's back and forward buttons act on the focused pane's tab.
-A Bible tab records module, chapter, selected verses and how far down it was scrolled (restored
+A Bible tab records module, chapter, selected verses, and how far down it was scrolled (restored
 on return); changing module counts as a move, scrolling does not. A note tab records the notes it
 showed (renames are followed, deleted notes dropped); a dictionary tab the entries. Going
 somewhere new forgets what was ahead. Opening in a new tab or pane starts a fresh history.
@@ -187,14 +187,14 @@ Right-clicking the Bible tab's arrows lists its places to jump to.
   a pane it goes to that pane; over a band along an edge it splits that pane and takes the new
   half on that side (a pane cannot be split for its own only tab); over another tab it goes in
   front of it; over the empty tab bar, to the end. A pane left empty goes away.
-- **A link** pulled away from where it is (in the reader, a card or a note) is carried the same
+- **A link** pulled away from where it is (in the reader, a card, or a note) is carried the same
   way and dropped on a pane: a new tab there, or a new pane on an edge. A plain click still
   follows it; pulling it no longer starts a text selection.
 - While carrying, each pane shows its drop places (the middle, and a band along each edge) with
   the one under the pointer lit; the name of what is carried follows the pointer; Esc cancels.
   The pointer is followed by a subscription that only runs while something is pressed or carried.
 
-## The reader's menu, references and dictionaries
+## The reader's menu, references, and dictionaries
 
 The hamburger at the right of a Bible tab's bar turns on and off what the text shows: Strong's
 numbers, marks (their highlights and cards), footnotes, and references. **References** are the
@@ -211,7 +211,7 @@ one is renamed `*.bad` instead of failing the start:
 
 - `settings.json`: the color scheme (the name of any of iced's themes), a text size for Bible panes and one for note panes, and the font family for
   Bible and note text. A size applies to the whole pane: in a Bible pane the reading text, footnote and
-  dictionary cards and margin cards (these at 75% of it, so notes sit quietly beside the text) and the chapter title (headings and small labels in proportion); in a
+  dictionary cards, and margin cards (these at 75% of it, so notes sit quietly beside the text) and the chapter title (headings and small labels in proportion); in a
   note pane the writer's text. Changed in the Settings window (its own window, opened from the top
   bar, so the workspace stays as it is), applied and saved at once. Missing or out-of-range values are repaired on load.
   The window is fixed-size and cannot be minimized. On macOS (`native.rs`) it is also made a child of the
@@ -228,7 +228,7 @@ one is renamed `*.bad` instead of failing the start:
   open; saving under a name already used replaces it.
 
 A saved workspace holds the split tree (axes and sizes), each pane's tabs and which one shows, the
-focused and zoomed pane, and per tab what it shows: Bible module, book, chapter, scroll and which
+focused and zoomed pane, and per tab what it shows: Bible module, book, chapter, scroll, and which
 markers are on; note path; dictionary and key. Restoring leaves out a tab whose module or note is gone
 (a chapter the module lacks opens at its first), drops panes left empty, and changes nothing if no tab
 at all can be put back.
@@ -251,9 +251,9 @@ not text glyphs or boxes drawn in code.
 
 A commentary (a SWORD `zCom` module such as Gill's Exposition) opens in its own tab, beside the
 reader. It shows the notes on one chapter, verse by verse, under the verse each starts at (a note
-that covers several verses shows once). Pickers choose the commentary, book and chapter, and the
+that covers several verses shows once). Pickers choose the commentary, book, and chapter, and the
 arrows step to the previous or next chapter across books. Notes are converted from ThML or OSIS to
-paragraphs with bold, italic and links; a passage a note points to is a link that shows the verse in
+paragraphs with bold, italic, and links; a passage a note points to is a link that shows the verse in
 the reader (with the same modifier keys as any link). The reader's menu has *Commentary…*, which
 opens (or reuses) the commentary tab at the chapter, and scrolls toward the selected verse. The text is the editor's own widget in a read-only mode, so it selects like any text (drag, double and
 triple click, Shift-arrows, Select All) and copies the words without the markdown marks; it cannot be
@@ -304,10 +304,10 @@ while something is added to it keeps the caret in the words it was in.
 The log has a **tab of its own** (*Reading log* in a new tab, or the way to it from the clock card of a chapter): it is the
 app's note, not one of the notes. It grows **down** (the earliest day first, the latest last), and the tab is shown scrolled to the
 end, where the caret is. No note leads to it and it leads to none: the notes selector, links (`[[Reading log]]` finds no note),
-searching the notes and a chapter's backlinks all leave it out, a note tab will not show it, and a link to a note in the log
+searching the notes, and a chapter's backlinks all leave it out, a note tab will not show it, and a link to a note in the log
 does nothing (a link to a verse, or a web address, does what it does anywhere). The tab is written in with everything a note
-has (the Vim keys, links, embeds), but it has no header, no selector, history or menu, no frontmatter section, no rename, and
-its title (`# Reading log`) is shown but out of reach of the caret, the selection and editing, like the frontmatter every note
+has (the Vim keys, links, embeds), but it has no header, no selector, history, or menu, no frontmatter section, no rename, and
+its title (`# Reading log`) is shown but out of reach of the caret, the selection, and editing, like the frontmatter every note
 has (a `Document::lock_title`). A session saved when the log was a note tab opens the new tab.
 
 The same page of the settings has *Add each new highlight or note to today's note, under Bookmarks* (off

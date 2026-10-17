@@ -5,7 +5,11 @@ product-name = "Zoe"
 identifier = "cc.sialis.Zoe"
 version = "0.4.0"
 description = "Bible study that let's you focus on God's word without distractions"
-authors = ["Sialis"]
+authors = ["Sialis LLC"]
+copyright = "Copyright (c) 2026 Sialis LLC"
+license-file = "LICENSE-MIT"
+# The licences go with the program (the macOS app is made by scripts/bundle-macos.sh).
+resources = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICES.md", "THIRD-PARTY-LICENSES.txt"]
 category = "Education"
 out-dir = "target/dist"
 # The program is built first (scripts/package.sh does both): the target decides where it is.

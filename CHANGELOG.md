@@ -5,16 +5,24 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+- Zoe is licensed under MIT or Apache-2.0 (Sialis LLC). The licences, the notices for what comes with the app and the
+  texts of the libraries' licences are at the top of the repository and go with the program; the About page says so.
+- The sample notes made in a new vault no longer mention people.
+- The passages a Bible prints under a section's heading, `(Colossians 1:1-2; Philemon 1:1-3)`, are a small quiet line
+  under the heading, not a second bold heading; each passage in it is a link.
+- A font setting of "System Font" (macOS's name for its interface font, which has no bold face of its own) now means the
+  default font, so bold headings stay in the same face as the text.
+
 ## [0.4.0] - 2026-10-17
 
-- Tests run on GitHub for every push, and pushing a version tag builds the macOS, Windows and Linux bundles onto a
+- Tests run on GitHub for every push, and pushing a version tag builds the macOS, Windows, and Linux bundles onto a
   draft release (`.github/workflows`).
 - The macOS disk image can be signed and notarized (`scripts/sign-macos.sh`), so that it opens on other Macs without a
   warning. It is when the Apple secrets are set in GitHub.
 
 ## [0.3.0] - 2026-10-16
 
-- A build for developing (`cargo run`, `dev.sh`, the tests) keeps its settings, session, vault and modules in `zoe-dev`
+- A build for developing (`cargo run`, `dev.sh`, the tests) keeps its settings, session, vault, and modules in `zoe-dev`
   folders of its own, so it can no longer touch the installed app's. `scripts/dev-sandbox.sh` looks at them, clears
   them, or fills them with a copy of the installed app's. `--reseed` works only there.
 - The app notes the version that last opened its folders. On an upgrade it copies the settings and session to

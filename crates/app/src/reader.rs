@@ -293,6 +293,29 @@ fn build_blocks(chapter: &Chapter, opts: &ViewOptions) -> Vec<Block<Link>> {
                 });
                 prev = Some(Kind::Heading);
             }
+            ast::Block::Parallel(line) => {
+                // Quiet and small, close under the heading it belongs to; each passage is a link.
+                let size = opts.body * 0.7;
+                let mut spans = Vec::new();
+                for item in line {
+                    spans.push(match item {
+                        ast::Inline::Ref { label, target } => {
+                            span(label.clone()).size(size).font(opts.font).color(pal.link).link(Link::Ref(*target))
+                        }
+                        ast::Inline::Text(t) => span(t.clone()).size(size).font(opts.font).color(pal.muted),
+                        _ => continue,
+                    });
+                }
+                let meta = spans.iter().map(|_| SpanMeta { copy: false, verse: None, number: false, dotted: false }).collect();
+                blocks.push(Block {
+                    spans,
+                    meta,
+                    indent: 0.0,
+                    gap_before: 2.0,
+                    soft_break: false,
+                });
+                prev = Some(Kind::Heading);
+            }
             ast::Block::Paragraph(p) => {
                 let mut b = Builder { opts, spans: Vec::new(), meta: Vec::new(), verse: None, after_space: false, glue: false };
                 for (i, run) in p.runs.iter().enumerate() {

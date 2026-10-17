@@ -11,3 +11,8 @@ for name, version, license in rows:
     print(f"{name} {version}  {license}")
 ' > crates/app/assets/third-party.txt
 echo "Made crates/app/assets/third-party.txt ($(wc -l < crates/app/assets/third-party.txt | tr -d ' ') libraries)"
+
+# The full licence texts of the same libraries, in THIRD-PARTY-LICENSES.txt at the top of the repository (MIT and Apache
+# ask that the notices are kept with copies of the program).
+cargo metadata --format-version 1 --locked | python3 scripts/third-party-licenses.py > THIRD-PARTY-LICENSES.txt
+echo "Made THIRD-PARTY-LICENSES.txt ($(wc -c < THIRD-PARTY-LICENSES.txt | tr -d ' ') bytes)"

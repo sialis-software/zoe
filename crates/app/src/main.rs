@@ -3024,7 +3024,7 @@ impl App {
                     column![label("Notes pane text size"), size_row(settings.notes_size, state::NOTES_SIZES, Message::SetNotesSize)].spacing(6),
                     column![
                         label("Bible and note font"),
-                        pick_list(fonts, Some(FontChoice(settings.font.clone())), Message::SetFont).text_size(13).width(Length::Fill)
+                        pick_list(fonts, Some(FontChoice(settings.font.clone().filter(|f| !state::is_system_alias(f)))), Message::SetFont).text_size(13).width(Length::Fill)
                     ]
                     .spacing(6),
                 ]

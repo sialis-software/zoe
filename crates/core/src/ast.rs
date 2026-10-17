@@ -185,6 +185,10 @@ impl Chapter {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     Heading(String),
+    /// The passages that parallel the section above it, as a Bible prints them under its heading:
+    /// `(Colossians 1:1-2; Philemon 1:1-3)`.
+    /// Text, with a [`Inline::Ref`] for each passage that could be read.
+    Parallel(Vec<Inline>),
     Paragraph(Paragraph),
 }
 

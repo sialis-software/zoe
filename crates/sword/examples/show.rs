@@ -26,6 +26,7 @@ fn main() {
     for block in &chapter.blocks {
         match block {
             Block::Heading(h) => println!("\n## {h}"),
+            Block::Parallel(line) => println!("   {}", line.iter().map(inline).collect::<String>()),
             Block::Paragraph(p) => {
                 let pad = match p.style {
                     ParagraphStyle::Prose => String::from("¶ "),

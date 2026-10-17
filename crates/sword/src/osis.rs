@@ -149,6 +149,8 @@ enum Frame {
     /// A note listing cross references: its passages are collected, its text is not shown.
     CrossNote(Vec<RefRange>),
     Title { keep: bool },
+    /// The passages parallel to a section (`<title type="parallel">`), shown quietly under its heading.
+    Parallel,
     Reference(Option<RefRange>),
 }
 
@@ -235,7 +237,7 @@ impl ChapterBuilder {
         if skip {
             return;
         }
-        let in_text_frame = self.stack.iter().any(|o| matches!(o.frame, Frame::Note { .. } | Frame::Title { .. }));
+        let in_text_frame = self.stack.iter().any(|o| matches!(o.frame, Frame::Note { .. } | Frame::Title { .. } | Frame::Parallel));
         self.out().push(if red && !in_text_frame { Inline::RedLetter(vec![inline]) } else { inline });
     }
 
@@ -292,7 +294,11 @@ impl ChapterBuilder {
             }
             "title" => {
                 let ty = tag.attr("type").unwrap_or("");
-                Frame::Title { keep: !ty.contains("hapter") && !ty.starts_with("x-") && !in_note }
+                if ty == "parallel" && !in_note {
+                    Frame::Parallel
+                } else {
+                    Frame::Title { keep: !ty.contains("hapter") && !ty.starts_with("x-") && !in_note }
+                }
             }
             "reference" if in_note => {
                 // The passages of a cross reference note belong to the note.
@@ -382,6 +388,14 @@ impl ChapterBuilder {
                     self.blocks.push(Block::Heading(text));
                 }
             }
+            Frame::Parallel => {
+                let text = collapse(plain(&inlines).trim());
+                if !text.is_empty() {
+                    self.flush_run();
+                    self.close_paragraph();
+                    self.blocks.push(Block::Parallel(parallel_inlines(&text)));
+                }
+            }
             Frame::Reference(Some(target)) => {
                 let label = plain(&inlines);
                 self.out().push(Inline::Ref { label, target });
@@ -434,6 +448,33 @@ fn capitalize(s: &str) -> String {
 }
 
 /// Runs of whitespace (including newlines) become one space.
+/// The text of a line of parallel passages, `(Colossians 1:1\u{2013}2; Philemon 1:1\u{2013}3)`, with a link for each passage
+/// that can be read as one (what cannot, such as `(Joshua\u{2013}Malachi)`, stays as it is).
+fn parallel_inlines(text: &str) -> Vec<Inline> {
+    let mut out = Vec::new();
+    for (i, piece) in text.split(';').enumerate() {
+        if i > 0 {
+            out.push(Inline::Text(";".into()));
+        }
+        let lead = piece.len() - piece.trim_start_matches(|c: char| c == '(' || c.is_whitespace()).len();
+        let core = piece[lead..].trim_end_matches(|c: char| c == ')' || c.is_whitespace());
+        let end = lead + core.len();
+        if lead > 0 {
+            out.push(Inline::Text(piece[..lead].to_string()));
+        }
+        let dashed = core.replace(['\u{2013}', '\u{2014}'], "-");
+        match RefRange::parse(&dashed) {
+            Some(target) if !core.is_empty() => out.push(Inline::Ref { label: core.to_string(), target }),
+            _ if !core.is_empty() => out.push(Inline::Text(core.to_string())),
+            _ => {}
+        }
+        if end < piece.len() {
+            out.push(Inline::Text(piece[end..].to_string()));
+        }
+    }
+    out
+}
+
 fn collapse(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut space = false;
@@ -604,6 +645,33 @@ mod tests {
     fn a_cross_reference_note_with_no_usable_passage_leaves_nothing() {
         let c = one(2, r#"text<note type="crossReference"><reference osisRef="Gen.1.1-Gen.2.3">x</reference></note>"#);
         assert_eq!(runs(&c)[0].inlines, vec![Inline::Text("text".into())]);
+    }
+
+    #[test]
+    fn the_passages_parallel_to_a_section_are_a_line_of_their_own_under_its_heading() {
+        let mut b = ChapterBuilder::new(Book::PHILIPPIANS, 1);
+        b.verse(1, r#"<title>Greetings from Paul and Timothy</title> <title type="parallel"> (Colossians 1:1-2; Philemon 1:1-3) </title>Paul and Timothy"#);
+        let c = b.finish();
+        assert_eq!(c.blocks[0], Block::Heading("Greetings from Paul and Timothy".into()));
+        let Block::Parallel(line) = &c.blocks[1] else { panic!("a line of parallel passages") };
+        assert_eq!(plain(line), "(Colossians 1:1-2; Philemon 1:1-3)");
+        let targets: Vec<RefRange> = line.iter().filter_map(|i| if let Inline::Ref { target, .. } = i { Some(*target) } else { None }).collect();
+        assert_eq!(targets, [RefRange::parse("Col 1:1-2").unwrap(), RefRange::parse("Philemon 1:1-3").unwrap()]);
+        assert!(matches!(&c.blocks[2], Block::Paragraph(_)));
+    }
+
+    #[test]
+    fn parallel_passages_are_read_with_en_dashes_and_what_is_not_a_passage_stays_text() {
+        let line = parallel_inlines("(1 Corinthians 1:4\u{2013}9; Colossians 1:3\u{2013}14)");
+        let found: Vec<(String, RefRange)> =
+            line.iter().filter_map(|i| if let Inline::Ref { label, target } = i { Some((label.clone(), *target)) } else { None }).collect();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], ("1 Corinthians 1:4\u{2013}9".to_string(), RefRange::parse("1 Corinthians 1:4-9").unwrap()));
+        assert_eq!(plain(&line), "(1 Corinthians 1:4\u{2013}9; Colossians 1:3\u{2013}14)");
+        // A span of books is not one passage: all of it is text.
+        let books = parallel_inlines("(Joshua\u{2013}Malachi)");
+        assert!(books.iter().all(|i| matches!(i, Inline::Text(_))));
+        assert_eq!(plain(&books), "(Joshua\u{2013}Malachi)");
     }
 
     #[test]

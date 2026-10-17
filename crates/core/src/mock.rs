@@ -134,11 +134,11 @@ const NOTES: [(&str, &str); 3] = [
     ),
     (
         "notes/Memory verses.md",
-        "# Memory verses\n\n1. [[@John 3:16]] — learned with the kids, October.\n2. [[@Ps 23:1-3@KJV]] — the shepherd psalm.\n\nBack to [[Nicodemus]]. This link goes nowhere yet: [[Unwritten note]].\n",
+        "# Memory verses\n\n1. [[@John 3:16]] — one to learn by heart.\n2. [[@Ps 23:1-3@KJV]] — the shepherd psalm.\n\nBack to [[Nicodemus]]. This link goes nowhere yet: [[Unwritten note]].\n",
     ),
     (
         "prayers/Prayer list.md",
-        "---\ntype: prayer\ntags: [prayer]\n---\n# Prayer list\n\n- [ ] Wisdom for my sister's decision  #family  [[@Jas 1:5]]\n- [x] Healing for Tom (answered 2026-10-09)\n- [ ] Peace in a busy week — [[@Ps 23]]\n",
+        "---\ntype: prayer\ntags: [prayer]\n---\n# Prayer list\n\n- [ ] Wisdom for a hard decision  #family  [[@Jas 1:5]]\n- [x] Healing for a friend (answered)\n- [ ] Peace in a busy week — [[@Ps 23]]\n",
     ),
 ];
 

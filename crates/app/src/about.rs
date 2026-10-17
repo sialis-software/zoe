@@ -29,7 +29,7 @@ pub fn version_line() -> String {
 }
 
 /// Whose work comes with the app, as (what, who and on what terms).
-const CREDITS: [(&str, &str); 5] = [
+const CREDITS: [(&str, &str); 7] = [
     (
         "Bible text",
         "The Berean Standard Bible (BSB), from berean.bible, with Strong's numbers: dedicated to the public domain (CC0) by the Berean Bible Translation Committee, Bible Hub, Discovery Bible, OpenBible.com and others.",
@@ -42,6 +42,14 @@ const CREDITS: [(&str, &str); 5] = [
     (
         "Reading plans",
         "The M'Cheyne plan is Robert Murray M'Cheyne's calendar of 1842: public domain. \"Bible in a year\" was made for this app.",
+    ),
+    (
+        "App icon",
+        "The Greek letter zeta (Zeta_uc_lc.svg on Wikimedia Commons): public domain.",
+    ),
+    (
+        "Licence",
+        "Zoe is free software: you may use it under either the MIT licence or the Apache licence 2.0, as you choose. Copyright (c) 2026 Sialis LLC.",
     ),
     (
         "Software",

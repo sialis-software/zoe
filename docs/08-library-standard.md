@@ -12,13 +12,13 @@ note. Library notes are read-only in the app (see "Read-only" below).
 | Bibles | SWORD modules, read in place. |
 | Strong's lexicons (and other dictionaries) | SWORD modules, read in place. |
 | Commentaries | SWORD modules, read in place. |
-| Daily devotionals (`Feature=DailyDevotion`) | Not supported: recognised, so as not to be taken for a dictionary, but not read, offered or imported. |
+| Daily devotionals (`Feature=DailyDevotion`) | Not supported: recognised, so as not to be taken for a dictionary, but not read, offered, or imported. |
 | Reading plans | Imported to markdown, as a plan. |
 
 Bibles and the Strong's lexicons stay as SWORD modules because the app reads them by verse and by
-number, with Strong's tagging, versification and the module manager that installs them. A reading plan
+number, with Strong's tagging, versification, and the module manager that installs them. A reading plan
 is a list for a day. It gains from being a note that other notes can link to: a **plan** is a note for each day,
-a completion log, optional passages to read and optional text to read (docs/09-reading-plans.md).
+a completion log, optional passages to read, and optional text to read (docs/09-reading-plans.md).
 
 A devotional is told apart from a dictionary by its conf, not by its driver: SWORD stores a devotional
 as a `zLD` or `RawLD` dictionary keyed by day, and `sword::Module::kind()` answers `Kind::Devotional`
@@ -37,7 +37,7 @@ the files.
 
 ## Read-only
 
-Everything under `library/` is read-only in the app: it is shown, searched and linked to (`[[library/M'Cheyne/01-01]]`, or by its name), but not edited. What a person writes about a day goes in a note of their own that
+Everything under `library/` is read-only in the app: it is shown, searched, and linked to (`[[library/M'Cheyne/01-01]]`, or by its name), but not edited. What a person writes about a day goes in a note of their own that
 links to it. Completion of a plan's days is kept in the plan log, a note outside the library (docs/09).
 
 ## Every library file
@@ -63,5 +63,5 @@ docs/09-reading-plans.md. A day's note may have text of its own as well as passa
 - `study_core::commentary::{markdown, escape, plain_text, passage_range}` is the shared
   OSIS-to-markdown writing, which the commentary tab uses as well.
 
-The library is out of the plain list of notes, out of the tag chips and out of what opens first; it is found by
+The library is out of the plain list of notes, out of the tag chips, and out of what opens first; it is found by
 searching (the notes selector has a *Library* group while there is a search), by link, and in the Plans window.

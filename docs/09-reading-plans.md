@@ -31,7 +31,7 @@ Matthew to John, a chapter or two a day.
 
 - `type: plan` is what makes a note a plan's manifest. `name` is the plan's name (the title, else the file's name, when it is
   missing). `description` is optional (the body's text under the title is used when the property is missing).
-- `kind` says what the days' keys are: `sequential` (`Day N`), `dated` (a date) or `calendar` (a day of the year, `MM-DD`,
+- `kind` says what the days' keys are: `sequential` (`Day N`), `dated` (a date), or `calendar` (a day of the year, `MM-DD`,
   every year). It is the kind of the first day when it is missing.
 - `start: YYYY-MM-DD` is optional. It is the date day 1 falls on, set when a sequential plan is started. Only sequential plans
   have one.
@@ -40,7 +40,7 @@ Matthew to John, a chapter or two a day.
 ### The day notes
 
 One note for each day, `library/<Plan name>/<key>.md`, where the key is `Day 001` (sequential, zero-padded to the width of the
-plan's length), `2026-02-18` (dated) or `01-01` (calendar, `MM-DD`; February 29 is `02-29`):
+plan's length), `2026-02-18` (dated), or `01-01` (calendar, `MM-DD`; February 29 is `02-29`):
 
 ```markdown
 ---
@@ -70,7 +70,7 @@ tags: [plan-day]
   Both the passages and the text are optional: a reading-only day has no text, and a day of text may have no passages (docs/08).
 - A chapter range (`Genesis 1-3`) is read as one passage for each chapter, and a verse range across chapters
   (`John 3:16-4:3`) is split by chapter, so that progress can be counted in chapters. Written back, the pieces are joined again.
-- Book names go through `Book::parse`: `Gen`, `Genesis`, `1 Cor`, `Psalm` and `Psalms` all work. Text after a spaced dash is a note
+- Book names go through `Book::parse`: `Gen`, `Genesis`, `1 Cor`, `Psalm`, and `Psalms` all work. Text after a spaced dash is a note
   and is not read for passages.
 
 ### The three shapes
@@ -139,21 +139,21 @@ Each importer returns a `Plan` (with its `problems`), and the app writes `plan.t
   dated plan, `Jan 1` or `01-01` a calendar plan. Further columns are more readings for the same day.
 - `plan_from_ics(name, text)`: iCalendar. Each VEVENT with a `DTSTART` date (`DTSTART;VALUE=DATE:20260101` or a date-time) and readings in
   `SUMMARY` (or, if the summary has none, `DESCRIPTION`) becomes a dated day. Folded lines are unfolded, and events on one date are one day.
-- `to_ics(&plan, start)`: export as all-day events, one per day, with a UID per day, CRLF line endings and lines folded at 75 octets. Day 1
+- `to_ics(&plan, start)`: export as all-day events, one per day, with a UID per day, CRLF line endings, and lines folded at 75 octets. Day 1
   falls on `start`; a calendar day on its first date on or after `start`.
 - `plan_from_sword_lines(name, text)`: EXPERIMENTAL. The CrossWire/Xiphos plan file shape is not confirmed, because no sample was available. It
   reads the guessed common shape, one day per line: `1:Gen.1,Gen.2` or `2=Gen 3-4; Ps.23`, with readings in OSIS or in words, and `#` or `;`
   comment lines. Until a real sample is checked, treat the result as unreliable. The line shape lives in `sword_line` and the readings in
   `sword_reading`, so adjusting it is a small change.
-- `from_csv`, `from_ics` and `from_sword_lines` are the same importers returning the single-file markdown.
+- `from_csv`, `from_ics`, and `from_sword_lines` are the same importers returning the single-file markdown.
 
 Readings an importer cannot read are left out of the plan; they are in its `problems`.
 
 ## The plans window and the plan tab
 
 The **Plans** button in the top bar opens a window for managing plans: each plan with its size and progress and *Open*
-(read it in the plan tab), *Start today* (a numbered plan) and *Remove* (asks first); *Import…* for a markdown plan, a CSV,
-or an iCalendar file or the experimental SWORD lines.
+(read it in the plan tab), *Start today* (a numbered plan), and *Remove* (asks first); *Import…* for a markdown plan, a CSV,
+an iCalendar file, or the experimental SWORD lines.
 
 Plans are read in the plan tab (also *Plans* in a new tab): the list of plans with how far each has got, then one day at
 a time, its note read-only, with ‹ › for the day before and after, *Today* and
@@ -172,13 +172,13 @@ A vault made by the first-run window (and any empty folder opened as a new vault
 - **M'Cheyne**: Robert Murray M'Cheyne's 1842 calendar (public domain), a calendar plan with four readings a day, from
   `crates/core/data/mcheyne.csv` (columns: date, two family readings, two private ones). February 29 has no reading. The file was
   made from a published transcription, checked against the plan's own rules: every chapter of the Old Testament once, the New
-  Testament and the Psalms twice, each column reading on in order, and day 1 and day 365 as printed. The test
+  Testament, and the Psalms twice, each column reading on in order, and day 1 and day 365 as printed. The test
   `mcheyne_has_a_day_for_each_date_and_reads_every_chapter_as_often_as_it_should_be` keeps it so.
 - **Chronological**: the whole Bible in a chronological order, a numbered plan of 365 days, from `crates/core/data/chronological.csv`.
   The order is that of a list of 77 passages (book and chapter range, with a phase and a note for each) compiled by the project owner
   from their own research and released by them into the public domain (the file itself states neither; this is the owner's word, and
   the plan's source says so). Its order is kept exactly (Job after
-  Genesis, Psalms and Proverbs among the kings, the Gospels side by side, the letters set among Acts). The chapters were cut into days
+  Genesis, Psalms, and Proverbs among the kings, the Gospels side by side, the letters set among Acts). The chapters were cut into days
   by `cargo run -q -p sword --example chronological_plan -- chronological_bible.csv > crates/core/data/chronological.csv`, whole
   chapters only, each day ending near an even share of the verses (7 to 176 a day, mean 85; Psalm 119 is a day and Psalm 120 follows
   alone). Checks: every book name parses; all 1,189 chapters of the Bible are read, none twice and none missing; the day numbers and

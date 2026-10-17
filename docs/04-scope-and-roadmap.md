@@ -64,7 +64,7 @@ parallel Bibles, footnotes/cross-refs, full-text search across modules + notes,
 all remaining versifications with mapping.
 
 **M4 – Personal journey.** Margin layer (pens, margin notes), reading plans, bookmarks,
-user commentaries and books presented as modules.
+user commentaries, and books presented as modules.
 
 **M5 – Documents & ecosystem.** GenBook, ThML/GBF/TEI, locked-module keys, in-app module
 download from CrossWire repos, import/export (OSIS export of user books).
@@ -105,10 +105,10 @@ the casual reader.
   (`md-editor`) plus one custom widget, used by both the writer pane and the margin cards. See
   06 §0 for what exists and what does not.
 - **Content model:** margin notes (anchored, `type: margin`, one file each; a highlight
-  is a margin note with no body) and documents (linked). Prayer lists, journals and the like
+  is a margin note with no body) and documents (linked). Prayer lists, journals, and the like
   are ordinary documents with no special treatment; plan progress is checkboxes in the
   plan file. See 02 and 05.
-- **Series (future):** a series is a collection of related notes, highlights and documents.
+- **Series (future):** a series is a collection of related notes, highlights, and documents.
   Planned as members carrying `series: ["[[Name]]"]` plus a `type: series` document; not
   built. See 02 §4 and 05 §9.
 - **Margin cards:** built in the prototype. A reader wide enough shows a permanent margin of
@@ -117,7 +117,7 @@ the casual reader.
   ticks, whether cards edit in place long-term. See 05 §4.
 - **Index:** SQLite, fully regenerable from vault + modules, kept outside the vault; two
   databases (vault, modules); FTS5 replaces tantivy. See 05 §6.
-- **Platforms:** macOS, Windows and Linux from day one. This favors cross-platform
+- **Platforms:** macOS, Windows, and Linux from day one. This favors cross-platform
   toolkits, avoids platform-specific APIs, and means CI builds all three early.
 - **Module library:** use the standard SWORD locations (default `~/.sword`, plus
   `$SWORD_PATH` and user-added paths) so modules are shared with Xiphos and other
@@ -133,5 +133,5 @@ the casual reader.
 ## 5. Suggested next step
 
 Start **Phase 1**: create the Cargo workspace with `scripture` (types only), `core`
-(traits + mock backend) and `app`, then build the Bible reader screen in iced against
+(traits + mock backend), and `app`, then build the Bible reader screen in iced against
 mock data. The format spikes (M0b) follow once the UI direction is settled.

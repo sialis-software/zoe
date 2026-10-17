@@ -10,16 +10,13 @@ This document covers the layout, metadata, and link syntax they share.
 
 ## 1. Rules
 
-1. **Folders are for people, `type` is for the app.** The app finds files by frontmatter
-   `type`, never by location. Users can reorganize freely and nothing breaks. The app only
-   chooses default locations for the files it creates.
-2. **App-managed vs user-managed.** `margins/` is created and organised by the app (one
+1. **App-managed vs user-managed.** `margins/` is created and organised by the app (one
    file per mark). Everything else is the user's; unknown folders are indexed as documents.
-3. **Files are self-describing.** A mark carries its own colour and tags; it does not
+2. **Files are self-describing.** A mark carries its own colour and tags; it does not
    depend on a settings file to be understood.
-4. **No special machinery for ordinary content.** A prayer list is a document. A journal
+3. **No special machinery for ordinary content.** A prayer list is a document. A journal
    is documents in a folder. Structure is the user's.
-5. **Nothing precious outside markdown.** Indexes live elsewhere and are rebuildable
+4. **Nothing precious outside markdown.** Indexes live elsewhere and are rebuildable
    (see 05 §6). Per-device state (window layout, module paths, unlock keys) lives in the OS
    config dir, never in the vault, so the vault stays portable.
 
@@ -45,8 +42,7 @@ Vault/
 Margin file naming: `margins/<OsisBook>/<chapter, 2+ digits>/<verse or range>-<style>-<4 random chars>.md`.
 - OSIS book ids (`1Cor`, `Song`) are language-independent and unambiguous.
 - The random suffix means two devices can mark the same verse without a sync collision.
-- Sharding by book and chapter keeps folders to a few dozen files even for a heavy user
-  (expect 5,000–20,000 marks over years).
+- Sharding by book and chapter keeps folders to a few dozen files even for a heavy user.
 
 ## 3. Frontmatter
 
@@ -151,7 +147,7 @@ The reference parser is the single source of truth for turning prose into links.
 
 ### Reference identifiers: what is standard and what is ours
 
-- **Identity: OSIS** (the CrossWire standard). A reference is stored, indexed and written into
+- **Identity: OSIS** (the CrossWire standard). A reference is stored, indexed, and written into
   mark files as an OSIS `osisRef`: `John.3.16`, `Ps.23`, and ranges as two full ids joined by a
   hyphen, `John.3.16-John.3.17`. Our 66 book ids are the same as CrossWire's list (checked).
   OSIS also defines more than we handle yet: ranges across chapters, whole books, the

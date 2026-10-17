@@ -25,10 +25,10 @@ add one): those the app gives no control of their own.
 - A **margin note** has a *Reference* section in the place the other has its *Mark* button: the passage and the words marked (shown,
   not edited here; nothing is said of a mark on whole verses, and the quote is shown only if there is one), how it marks them (a
   drop-down of the styles, and a color swatch whose panel floats over the note instead of making it taller), and two buttons. **Reselect** waits for the next
-  selection to settle in a Bible reader and makes it the note's passage (its reference, quote and context, and the module the words
-  were chosen in); the note's text, tags, look and time stay, and its file is renamed for the new passage, the links to it following.
+  selection to settle in a Bible reader and makes it the note's passage (its reference, quote, and context, and the module the words
+  were chosen in); the note's text, tags, look, and time stay, and its file is renamed for the new passage, the links to it following.
   **Unlink** lets it go from the text, and takes **only** what only a mark has from the note: the file moves out of `margins/`
-  to `notes/` under the **same name**, with the **same words**, tags and time, and without `type: margin`, its reference and
+  to `notes/` under the **same name**, with the **same words**, tags, and time, and without `type: margin`, its reference and
   quote (`anchor`, `module`, `quote`, `prefix`, `suffix`) and its look (`style`, `color`). Nothing is added to it (no link, no
   blockquote). It is an ordinary note; putting it on a passage again is **Mark**, as for any note.
 - An **ordinary note** has *Not on a passage* and **Mark**, which waits for a selection the same way and makes the note a margin
@@ -78,7 +78,7 @@ back to any look it takes the first pen's color. A `style` this version does not
 
 **Verse-level marks.** If the selection when a pen is applied is whole verses (from a verse
 number, a triple-click, or a drag that happens to cover them exactly), the mark is tied to
-the *reference*, not to words: no `quote`, `prefix`, `suffix` or `module` keys.
+the *reference*, not to words: no `quote`, `prefix`, `suffix`, or `module` keys.
 
 ```yaml
 ---
@@ -166,7 +166,7 @@ module's numbering is done at display time (01 §4).
   - *Narrower*: **no margin and no cards**. Clicking a mark floats its card (or the cards, when
     marks overlap) under the click, like a toolbar; clicking elsewhere or Esc dismisses it. A
     bare highlight shows a card offering "Add a note…". Popup cards always offer Open in writer,
-    Unlink and Delete.
+    Unlink, and Delete.
   With no margin the text takes the whole width, so no empty space is left at the right.
   The reader tells the app which of the two it chose, so the app decides what a click means.
   Hovering a card or its marked text emphasises both; an underline or note gets a calmer
@@ -247,9 +247,9 @@ The app now runs on a real vault and real modules (crates `vault`, `sword`).
   name the new folder inside it), *Open an existing vault* (pick a folder; an Obsidian vault is
   fine and its `.obsidian` is left alone), or use the default location. The same two actions are
   in Settings → Vault, with *Show in folder*. A card confirms the folder after it is looked at
-  (note count, Obsidian or ours) and offers to add sample notes (only to a folder with no notes)
+  (note count, Obsidian, or ours) and offers to add sample notes (only to a folder with no notes)
   and the starting templates (only where there are none). Switching saves what is open, loads
-  the new notes, remembers the choice and opens the default layout; the old vault is untouched.
+  the new notes, remembers the choice, and opens the default layout; the old vault is untouched.
 - **Index per vault**: `cache/index-<hash of the vault path>.sqlite` in the data folder (the default vault
   keeps `index.sqlite`), so nothing but notes is ever written into a vault.
 - **Seed data**: an empty vault is seeded with four linked notes and nine marks anchored in
@@ -310,7 +310,7 @@ design so nothing built now rules it out.
   that merges badly when synced, and renaming a member would need the manifest edited.
 
 **Ideas this enables**
-- An **active series**: while it is set, newly created marks, margin notes and documents
+- An **active series**: while it is set, newly created marks, margin notes, and documents
   join it automatically.
 - A series view: its members by date, or by the passage each covers (derived from anchors
   and links).
@@ -332,9 +332,9 @@ What the person chose and what the app makes are kept apart, in the places the X
 (on macOS and Linux alike; `%APPDATA%\zoe` and `%LOCALAPPDATA%\zoe` on Windows):
 
 - **Config**, `$XDG_CONFIG_HOME/zoe` (`~/.config/zoe`): `config.json` (the vault and the module folders
-  chosen), `settings.json` (look and feel, text sizes, font) and `layouts.json` (saved layouts).
+  chosen), `settings.json` (look and feel, text sizes, font), and `layouts.json` (saved layouts).
 - **Data**, `$XDG_DATA_HOME/zoe` (`~/.local/share/zoe`): `session.json` (what was open at shutdown),
-  `cache/` (the search indexes, which can be deleted) and `vault/` (the vault made when none was chosen).
+  `cache/` (the search indexes, which can be deleted), and `vault/` (the vault made when none was chosen).
 - **Modules** are not the app's: `$XDG_CONFIG_HOME/sword` (`~/.config/sword`), shared with other SWORD programs.
 
 `ZOE_CONFIG_HOME` and `ZOE_DATA_HOME` change the first two, and `ZOE_HOME` puts both under one folder
@@ -346,7 +346,7 @@ are followed to their new places.
 ### Names
 
 The app is called Zoe. The hidden folder in a vault is `.zoe` (earlier `.bible-study`, moved when the vault is opened), and the environment variables are `ZOE_HOME`, `ZOE_CONFIG_HOME`,
-`ZOE_DATA_HOME`, `ZOE_SWORD_PATH` and `ZOE_MODULE`
+`ZOE_DATA_HOME`, `ZOE_SWORD_PATH`, and `ZOE_MODULE`
 (the old `BIBLE_STUDY_*` names still work). On a Mac, `scripts/bundle-macos.sh` makes `target/Zoe.app`
 so the Dock and menu bar use the name and the icon (the artwork in `crates/app/assets/app/zoe.png` on a
 rounded square, made by `scripts/make-icon.swift`, whose 1024 px result is also kept as `zoe-rounded.png`); run outside a bundle the app sets its own Dock icon,
@@ -358,7 +358,7 @@ and on other systems the window's icon, from that rounded picture.
 (config: `Packager.toml`; `cargo install cargo-packager cargo-xwin --locked`), from a Mac. They land in `target/dist`, unsigned:
 
 - macOS: `Zoe.app` and a `.dmg`, for this Mac's architecture.
-- Windows: an NSIS installer for x64, cross-built with `cargo xwin` (needs brew's `llvm@21`, `lld@21` and `makensis`).
+- Windows: an NSIS installer for x64, cross-built with `cargo xwin` (needs brew's `llvm@21`, `lld@21`, and `makensis`).
   The icon and name are written into the .exe by `crates/app/build.rs`, and a release build has no console window.
 - Linux: a `.deb` and an AppImage, built in a `rust:1-bookworm` Docker container (`LINUX_PLATFORM=linux/amd64` for x86_64, slowly, by emulation).
 
@@ -367,7 +367,7 @@ installed into the app's own module folder once, on the first run, when no Bible
 
 The icon files in `packaging/icons` (PNGs and `zoe.ico`) are made from the rounded artwork by `scripts/make-icons.sh` and kept in git.
 `scripts/bundle-macos.sh` is the older, hand-made macOS bundle, kept for what cargo-packager does not do: a universal binary (`UNIVERSAL=1`).
-Only the macOS, Windows installer and Linux packages' building has been tried; none has been run on Windows or Linux.
+Only the macOS, Windows installer, and Linux packages' building has been tried; none has been run on Windows or Linux.
 
 The program file is `Zoe` (a `[[bin]]` in `crates/app/Cargo.toml`; `cargo run -p zoe` still runs it), so that
 the Dock shows the capital outside a bundle. The mark in the header bar is `crates/app/assets/app/zoe.svg`,
@@ -385,5 +385,5 @@ The app never checks for updates or sends anything about the person, with or wit
 
 **About** is the last page of the settings (all systems: `about.rs`) with the credits for what comes with the app and the list of
 libraries it is built from and their licences (`assets/third-party.txt`, made by `scripts/third-party.sh`; re-run it when dependencies
-change). On a Mac the application menu's About item shows the system's panel with the same credits, the version and the picture.
+change). On a Mac the application menu's About item shows the system's panel with the same credits, the version, and the picture.
 The libraries' licence *texts* are not included yet, only the names and licences.

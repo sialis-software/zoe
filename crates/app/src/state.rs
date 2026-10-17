@@ -176,10 +176,16 @@ impl Settings {
     /// The face for Bible and note text.
     pub fn text_font(&self) -> Font {
         match &self.font {
-            Some(family) => Font::with_name(intern(family)),
-            None => crate::fonts::UI,
+            Some(family) if !is_system_alias(family) => Font::with_name(intern(family)),
+            _ => crate::fonts::UI,
         }
     }
+}
+
+/// Names a system gives its own interface font that are not a family with faces of their own (macOS lists "System Font"):
+/// asked for by name, the regular weight is found and the bold falls to a monospace face. They mean the default font.
+pub fn is_system_alias(family: &str) -> bool {
+    family == "System Font"
 }
 
 /// `Font::with_name` wants a name that lives forever. Each distinct family is kept once.
@@ -202,7 +208,7 @@ pub fn installed_families() -> Vec<String> {
         .db()
         .faces()
         .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
-        .filter(|name| !name.starts_with('.'))
+        .filter(|name| !name.starts_with('.') && !is_system_alias(name))
         .collect();
     names.sort_by_key(|n| n.to_lowercase());
     names.dedup();
@@ -473,6 +479,14 @@ mod tests {
             focus: 2,
             zoomed: None,
         }
+    }
+
+    #[test]
+    fn the_systems_alias_for_its_own_font_means_the_default_font() {
+        let chosen = |family: &str| Settings { font: Some(family.into()), ..Settings::default() }.text_font();
+        assert_eq!(chosen("System Font"), crate::fonts::UI);
+        assert_eq!(chosen("Georgia"), Font::with_name("Georgia"));
+        assert!(!installed_families().iter().any(|f| f == "System Font"));
     }
 
     #[test]

@@ -53,7 +53,7 @@ Steps 1 to 3 give a safe synced-folder mode on their own and are useful to peopl
 ## 4. Identity of a file, and the revision log
 
 - The server keeps an append-only log: each change gets a number (a sequence per account), with `path`, `op`
-  (`put`, `delete`, `move`), the new content hash, the time and the device that made it.
+  (`put`, `delete`, `move`), the new content hash, the time, and the device that made it.
 - A file's state is *(path, content hash, revision)*. Deletes are **tombstones** in the log, so a device that was away
   does not bring a deleted note back.
 - Content is addressed by hash (SHA-256 of the bytes), so an unchanged file is never sent again, and attachments (images,
@@ -84,7 +84,7 @@ acknowledged it.
 
 ## 6. The document API (for thin clients)
 
-The mobile app should not need the whole vault to open a note, run a search or add a mark. The same store is exposed by
+The mobile app should not need the whole vault to open a note, run a search, or add a mark. The same store is exposed by
 document, not by log:
 
 - `GET /v1/notes?prefix=` (listing with titles, modified time, tags), `GET /v1/notes/<path>` (text and revision),
@@ -119,7 +119,7 @@ Notes are small markdown files edited by one person, mostly one device at a time
   merge like notes.
 - **Never last-writer-wins:** it loses text silently, and this is a place people write prayers and sermon notes.
 
-## 8. Accounts, security and encryption
+## 8. Accounts, security, and encryption
 
 This is the decision with the largest consequences, so it comes before any code:
 
@@ -128,14 +128,14 @@ This is the decision with the largest consequences, so it comes before any code:
 - **Server-side encryption at rest** is the minimum.
 - **End-to-end encryption** (the server stores only ciphertext; keys stay on devices) suits private devotional writing,
   but it works against the design above:
-  - Server-side **search, backlinks and the verse index** (section 6) need the plaintext. With E2E, a thin mobile client
+  - Server-side **search, backlinks, and the verse index** (section 6) need the plaintext. With E2E, a thin mobile client
     cannot ask the server to search, so mobile would have to hold an index (and so much of the vault) itself: the
     offline replica the plan hoped to avoid.
   - Server-side three-way merge is impossible; merging moves to the clients.
   - Recovery: a lost key is a lost vault, so a recovery key or phrase has to be part of setup.
 - **Suggested path:** version one is TLS plus encryption at rest, with the server run by the person (self-hosted); leave room in the format for an E2E mode later (blobs addressed by hash of ciphertext, a
   per-vault key id in the manifest). If E2E is a requirement from the start, plan on the mobile client being a replica.
-- The vault's `README.md`, attachments and the `.`-folders are subject to the same rules as notes (hidden folders such as
+- The vault's `README.md`, attachments, and the `.`-folders are subject to the same rules as notes (hidden folders such as
   `.biblestudy` hold vault settings and are synced; app caches never are).
 
 ## 9. The shared Rust core
@@ -153,7 +153,7 @@ platform is not decided here):
 | `app` | no | the iced desktop UI |
 
 So the work is: factor a `sync-core` crate (the protocol types, the merge, the manifest, the storage trait), used by the
-desktop app, the server and the mobile core alike. One definition of the wire types (serde structs) in that crate keeps the
+desktop app, the server, and the mobile core alike. One definition of the wire types (serde structs) in that crate keeps the
 three from drifting.
 
 Open question for mobile: **where do Bible texts come from?** The desktop reads SWORD modules the person installed. A
@@ -167,7 +167,7 @@ syncs *the person's notes*, and each device has its own copy of the texts it is 
   for blobs. It runs on a small VPS or a home machine; a single container image is the install.
 - **One owner** with several device tokens (the self-hosted case); the storage is laid out per vault, so accounts could
   be added without a migration, but none are built.
-- **Easy to run yourself:** one binary or container, one config file (listen address, data folder, TLS certificate or a
+- **Easy to run yourself:** one binary or container, one config file (listen address, data folder, TLS certificate, or a
   reverse proxy in front), a first-run command that makes the owner and prints a device-pairing code, and a health
   endpoint. Documented behind Caddy or nginx for TLS.
 - **Index:** the server keeps an `Index` per vault, updated on each accepted change, for the search and link endpoints.
@@ -219,4 +219,4 @@ Made:
 Still open:
 
 - Mobile platform and UI technology, and whether it needs any offline reading of notes.
-- Whether a hosted option is ever wanted (it would reopen accounts, quotas and the encryption question).
+- Whether a hosted option is ever wanted (it would reopen accounts, quotas, and the encryption question).
