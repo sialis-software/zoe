@@ -166,9 +166,16 @@ jobs:
         env:
           VERSION: ${{ needs.check.outputs.version }}
         run: |
+          # GitHub shows every line break in release notes, so a bullet the changelog has wrapped over several lines (older
+          # entries are) is joined back into one line.
           awk -v v="$VERSION" '
             /^## \[/ { if (on) exit; on = index($0, "[" v "]") > 0; next }
-            on { print }
+            !on { next }
+            /^[ \t]*$/ { next }
+            /^- / { if (item != "") print item; item = $0; next }
+            /^[ \t]+/ && item != "" { sub(/^[ \t]+/, ""); item = item " " $0; next }
+            { if (item != "") print item; item = ""; print }
+            END { if (item != "") print item }
           ' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "Version $VERSION" > notes.md
           ls -l bundles
@@ -178,5 +185,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" bundles/* \
             --draft --verify-tag \
-            --title "Zoe ${GITHUB_REF_NAME#v}" \
+            --title "Zoe ${GITHUB_REF_NAME}" \
             --notes-file notes.md
