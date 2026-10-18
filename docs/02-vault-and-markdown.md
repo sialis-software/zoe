@@ -6,6 +6,7 @@ The two kinds of user content — **margin notes** attached to Scripture text, a
 
 ## 1. Rules
 
+0. **Markdown is the foundation, and we never override it.** Nothing the app invents may change what valid Markdown (CommonMark, and the extensions in common use: GitHub-flavored Markdown, YAML frontmatter, and Obsidian-style `[[wikilinks]]` with `#heading` targets and `|aliases`) already means. Where the app needs more, it adds a convention that an ordinary Markdown reader shows as plain text or a plain link, builds on the established one where there is one (a `#` after a note's name names a heading in a link, as in Obsidian, so it is never used for anything else), and gives a piece of syntax one meaning. If something the app writes could be read as Markdown meaning something else, change what the app writes. Examples: a passage is `[[@John 3:16]]`, a Strong's entry is `[[%G25]]` (a marker inside the link, which a Markdown reader shows as text), a dictionary entry elsewhere is an ordinary link with a `sword:` address, and the plan log's ticks are a passage link and a note link, not a `#` after a day's name.
 1. **App-managed vs user-managed.** `margins/` is created and organised by the app (one file per mark). Everything else is the user's; unknown folders are indexed as documents.
 2. **Files are self-describing.** A mark carries its own colour and tags; it does not depend on a settings file to be understood.
 3. **No special machinery for ordinary content.** A prayer list is a document. A journal is documents in a folder. Structure is the user's.
