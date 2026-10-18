@@ -2593,7 +2593,7 @@ impl App {
             return;
         };
         self.open_note_at(from, path.clone(), dest);
-        // The note opened either way: a heading it has not is not an error (a plan log's `Day 001#Genesis 1` names a reading).
+        // The note opened either way: a heading it has not is not an error (plan logs written by older versions have `Day 001#Genesis 1`).
         if let Some(heading) = heading {
             self.go_to_heading(&path, &heading);
         }
@@ -9638,7 +9638,7 @@ mod tests {
         let _ = app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("#Nicodemus".into()))));
         assert_eq!(caret(&app), heading_at(&app, "notes/Nicodemus.md", "Nicodemus"));
         assert_eq!(app.note().path, "notes/Nicodemus.md", "the same note");
-        // A heading the note has not: the note opens all the same, with nothing said (a plan log's `Day 001#Genesis 1` names a
+        // A heading the note has not: the note opens all the same, with nothing said (an old plan log's `Day 001#Genesis 1` names a
         // reading, which is no heading, and is no error).
         app.sh.status.clear();
         let _ = app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("Memory verses#Nowhere".into()))));
@@ -9681,6 +9681,16 @@ mod tests {
         let _ = app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("library/Plan/Day 001#Genesis 1".into()))));
         assert_eq!(app.sh.status, "", "the day opens; its reading is not a heading, and that is no error");
         assert!(app.tabs.values().any(|t| matches!(t, Tab::Note(n) if n.path == "library/Plan/Day 001.md")));
+    }
+
+    #[test]
+    fn the_plan_log_is_not_among_the_notes_that_link_to_a_chapter() {
+        let mut app = App::new();
+        let now = chrono::Local::now();
+        app.sh.tick_reading("library/Plan/Day 001.md", "John 3", "Plan \u{b7} Day 1", &now);
+        assert!(app.sh.notes[shared::PLAN_LOG].contains("[[@John 3]] from [[library/Plan/Day 001|Plan \u{b7} Day 1]]"), "{}", app.sh.notes[shared::PLAN_LOG]);
+        let chapter = scripture::RefRange::parse("John 3").unwrap();
+        assert!(app.sh.backlinks(&chapter).iter().all(|b| b.path != shared::PLAN_LOG));
     }
 
     #[test]

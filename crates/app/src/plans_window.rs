@@ -5,7 +5,7 @@
 //! `study_core::plan` and docs/08, docs/09). They are read-only notes that can be linked to like any.
 //!
 //! Progress is not kept in the plan: it is the completion log (`Plan log.md`, a link to the day's note
-//! under the date). A day is done when it is there on or after the plan's baseline. There is no pace:
+//! under the date; a ticked reading is a link to its passage, from the day's note). A day is done when it is there on or after the plan's baseline. There is no pace:
 //! nothing is behind. Marking a day done from here records it there and also logs its chapters in the
 //! reading log.
 
@@ -298,7 +298,7 @@ impl App {
         } else {
             for c in &chapters {
                 if let Some(note) = &day.note {
-                    self.sh.tick_reading(note, &c.to_string(), &format!("{} \u{b7} {c}", day.label), &now);
+                    self.sh.tick_reading(note, &c.to_string(), &day.label, &now);
                 }
                 if !self.sh.read_on(c.book, c.chapter, &now) {
                     let _ = self.sh.log_reading(c.book, c.chapter, &now);
@@ -322,7 +322,7 @@ impl App {
             self.sh.unlog_reading(range.book, range.chapter, &now);
             return;
         }
-        self.sh.tick_reading(&note, &reading, &format!("{} \u{b7} {reading}", day.label), &now);
+        self.sh.tick_reading(&note, &reading, &day.label, &now);
         if !self.sh.read_on(range.book, range.chapter, &now) {
             let _ = self.sh.log_reading(range.book, range.chapter, &now);
         }

@@ -5,6 +5,7 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 ## [Unreleased]
 
 - A link can name a heading of a note: `[[Nicodemus#Questions]]` opens the note with that heading scrolled to the top and the caret on it (the link shows as "Nicodemus > Questions"), `[[#Questions]]` goes to a heading of the note you are in, and typing `#` after a note's name offers its headings. Renaming a note keeps the headings in the links to it.
+- A reading ticked in a plan is written in the plan log as a link to its passage from the day's note (`- [[@Genesis 1]] from [[library/Plan/Day 001|…]]`), where it was a `#` after the day's name, which now names a heading. Lines written before are still read, and taken back. The plan log is no longer among the notes that link to a chapter.
 
 ## [0.5.0] - 2026-10-17
 

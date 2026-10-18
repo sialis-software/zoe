@@ -561,8 +561,8 @@ impl Shared {
                 }
         };
         let mut out = Vec::new();
-        // (Not the reading log, which would be among the notes that link to every chapter there is.)
-        for (path, body) in self.notes.iter().filter(|(path, _)| !templates::is_template(path) && path.as_str() != READING_LOG) {
+        // (Not the reading log or the plan log, which would be among the notes that link to every chapter there is.)
+        for (path, body) in self.notes.iter().filter(|(path, _)| !templates::is_template(path) && path.as_str() != READING_LOG && path.as_str() != PLAN_LOG) {
             let lines: Vec<String> = body
                 .lines()
                 .filter(|line| {

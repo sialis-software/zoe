@@ -83,9 +83,12 @@ Progress is kept in a note `Plan log` (the app owns its path), which works like 
 ## 2026-10-13
 
 - [[library/Morning and Evening/01-01|Morning and Evening · January 1]]
+- [[@Genesis 1]] from [[library/Gospels/Day 1|Gospels in 30 days · Day 1]]
 ```
 
-`plan_log::{new_log, add, remove, completed}`: `add(log, day_path, label, now)` adds a day under today's heading (`None` when it is there), `remove(log, day_path, now)` takes today's line back, and `completed(log)` maps each day note's path (with `.md`) to the latest date it was completed.
+The first bullet **completes** a day. The second **ticks** one reading of a day, on the way to completing it: a passage link and a note link, each meaning what it says (so the log's lines can be followed, and nothing in them overloads Markdown, see docs/02 §1). Logs written by earlier versions have ticks as `[[library/Gospels/Day 1#Genesis 1|label]]`; those lines are still read and taken back, and new ticks are written the new way.
+
+`plan_log::{new_log, add, remove, completed, tick, untick, ticked, uncomplete}`: `add(log, day_path, label, now)` adds a day under today's heading (`None` when it is there), `remove(log, day_path, now)` takes today's line back, and `completed(log)` maps each day note's path (with `.md`) to the latest date it was completed. `tick(log, day_path, reading, label, now)` adds the second kind of line (`label` is the day's; `None` when it is there today, or when the reading is not a passage), `untick(log, day_path, reading)` takes it back (written either way), and `ticked(log)` maps each day note's path to its readings (as the passage is written, `Genesis 1`) with the latest date each was ticked. The plan log is left out of a chapter's backlinks, like the reading log, since it would link to every chapter read.
 
 A day is **done** when it has a completion entry on or after the plan's baseline, and only then: reading the chapters elsewhere does not count (marking a day done also logs its chapters in the reading log, but not the other way round).
 
@@ -115,7 +118,7 @@ Readings an importer cannot read are left out of the plan; they are in its `prob
 
 The **Plans** button in the top bar opens a window for managing plans: each plan with its size and progress and *Open* (read it in the plan tab), *Start today* (a numbered plan), and *Remove* (asks first); *Import…* for a markdown plan, a CSV, an iCalendar file, or the experimental SWORD lines.
 
-Plans are read in the plan tab (also *Plans* in a new tab): the list of plans with how far each has got, then one day at a time, its note read-only, with ‹ › for the day before and after, *Today* and *Mark as done*. Each reading of the day (a chapter) has a box to tick as it is done; ticking one records it in the plan log (`- [[library/Plan/Day 001#Genesis 1|label]]`, which is not a completion) and in the reading log, the last one ticked completes the day, and unticking any takes the completion back. A link to a note in `library/` opens in this tab at that day.
+Plans are read in the plan tab (also *Plans* in a new tab): the list of plans with how far each has got, then one day at a time, its note read-only, with ‹ › for the day before and after, *Today* and *Mark as done*. Each reading of the day (a chapter) has a box to tick as it is done; ticking one records it in the plan log (`- [[@Genesis 1]] from [[library/Plan/Day 001|label]]`, which is not a completion) and in the reading log, the last one ticked completes the day, and unticking any takes the completion back. A link to a note in `library/` opens in this tab at that day.
 
 ## The plans a new vault starts with
 

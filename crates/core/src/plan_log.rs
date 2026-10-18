@@ -7,9 +7,16 @@
 //! ## 2026-10-13
 //!
 //! - [[library/Morning and Evening/01-01|Morning and Evening · January 1]]
+//! - [[@Genesis 1]] from [[library/Gospels/Day 1|Gospels · Day 1]]
 //! ```
+//!
+//! The first line completes a day. The second ticks one reading of a day on the way to completing it: a passage
+//! link and a note link, each meaning what it says. (Ticks were once written `[[library/Gospels/Day 1#Genesis 1|label]]`,
+//! with the reading after a `#`, which is how a link names a heading; those lines are still read, and taken back.)
 
+use crate::markdown::{LinkTarget, find_links};
 use chrono::{DateTime, Local};
+use scripture::RefRange;
 use std::collections::HashMap;
 
 /// The heading of the day in the log.
@@ -23,18 +30,31 @@ fn with_extension(path: &str) -> String {
     if path.ends_with(".md") { path.to_string() } else { format!("{path}.md") }
 }
 
+/// A reading as the log compares it: a passage as it is written (`Matthew 1`) whatever it was spelt, else the words as they are.
+fn reading_name(reading: &str) -> String {
+    let reading = reading.trim();
+    RefRange::parse(reading).map_or_else(|| reading.to_string(), |r| r.to_string())
+}
+
 /// What a bullet of the log links to: the note (`- [[library/X/01-01|label]]`, as a path with `.md`) and,
-/// for a reading ticked on the way to completing the day (`- [[library/X/Day 1#Genesis 1|label]]`), that
-/// reading.
+/// for a reading ticked on the way to completing the day (`- [[@Genesis 1]] from [[library/X/Day 1|label]]`, or in the
+/// old form `- [[library/X/Day 1#Genesis 1|label]]`), that reading.
 fn link_of(line: &str) -> Option<(String, Option<String>)> {
     let rest = line.trim_start().strip_prefix("- ")?;
-    let inner = rest.split_once("[[")?.1.split_once("]]")?.0;
-    let target = inner.split('|').next()?.trim();
-    let (path, reading) = match target.split_once('#') {
-        Some((path, reading)) => (path.trim(), Some(reading.trim().to_string()).filter(|r| !r.is_empty())),
-        None => (target, None),
+    let links = find_links(rest);
+    let note = links.iter().find_map(|l| match &l.target {
+        LinkTarget::Note(name) => Some(name.as_str()),
+        _ => None,
+    })?;
+    let (path, old_reading) = match note.split_once('#') {
+        Some((path, reading)) => (path.trim(), Some(reading_name(reading)).filter(|r| !r.is_empty())),
+        None => (note.trim(), None),
     };
-    (!path.is_empty()).then(|| (with_extension(path), reading))
+    let passage = links.iter().find_map(|l| match &l.target {
+        LinkTarget::Verse { range, .. } => Some(range.to_string()),
+        _ => None,
+    });
+    (!path.is_empty()).then(|| (with_extension(path), passage.or(old_reading)))
 }
 
 /// The note a completion bullet links to; a ticked reading is not a completion.
@@ -98,24 +118,27 @@ pub fn remove(log: &str, day_path: &str, now: &DateTime<Local>) -> Option<String
     })
 }
 
-/// `log` with a line that says the reading (such as `Genesis 1`) of the day note at `day_path` was
-/// done on the day of `now`, under that day's heading. `None` when it is already there today.
+/// `log` with a line that says the reading (a passage, such as `Genesis 1`) of the day note at `day_path`, which is
+/// labelled `label`, was done on the day of `now`, under that day's heading. `None` when it is already there today, or when
+/// the reading is not a passage.
 pub fn tick(log: &str, day_path: &str, reading: &str, label: &str, now: &DateTime<Local>) -> Option<String> {
     let heading = day_heading(now);
     let path = with_extension(day_path);
-    let reading: String = reading.chars().filter(|c| !matches!(c, '|' | '[' | ']' | '#' | '\n')).collect();
+    let passage = RefRange::parse(reading.trim())?;
+    let reading = passage.to_string();
     let lines: Vec<&str> = log.lines().collect();
     let last_heading = lines.iter().rposition(|l| l.starts_with("## "));
     let is_today = last_heading.is_some_and(|at| lines[at] == heading);
     if let Some(at) = last_heading.filter(|_| is_today)
-        && lines[at + 1..].iter().any(|l| link_of(l).is_some_and(|(p, r)| p == path && r.as_deref() == Some(reading.trim())))
+        && lines[at + 1..].iter().any(|l| link_of(l).is_some_and(|(p, r)| p == path && r.as_deref() == Some(reading.as_str())))
     {
         return None;
     }
     let label: String = label.chars().map(|c| if matches!(c, '|' | '[' | ']') { ' ' } else { c }).collect();
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     let target = path.strip_suffix(".md").unwrap_or(&path);
-    let link = if label.is_empty() { format!("[[{target}#{}]]", reading.trim()) } else { format!("[[{target}#{}|{label}]]", reading.trim()) };
+    let day = if label.is_empty() { format!("[[{target}]]") } else { format!("[[{target}|{label}]]") };
+    let link = format!("[[@{reading}]] from {day}");
     let mut out = log.trim_end().to_string();
     if !is_today {
         out.push_str(&format!("\n\n{heading}\n"));
@@ -127,7 +150,8 @@ pub fn tick(log: &str, day_path: &str, reading: &str, label: &str, now: &DateTim
 /// `log` without any line (under any day) that ticks `reading` of the day note at `day_path`; `None`
 /// when there is none.
 pub fn untick(log: &str, day_path: &str, reading: &str) -> Option<String> {
-    drop_lines(log, |l| link_of(l).is_some_and(|(p, r)| p == with_extension(day_path) && r.as_deref() == Some(reading.trim())))
+    let reading = reading_name(reading);
+    drop_lines(log, |l| link_of(l).is_some_and(|(p, r)| p == with_extension(day_path) && r.as_deref() == Some(reading.as_str())))
 }
 
 /// `log` without any line (under any day) that completes the day note at `day_path`; `None` when there
@@ -258,8 +282,8 @@ mod tests {
     #[test]
     fn a_ticked_reading_is_a_line_that_is_not_a_completion_and_can_be_taken_back() {
         let log = new_log("L", "x");
-        let log = tick(&log, "library/Gospels/Day 1", "Matthew 1", "Gospels \u{b7} Day 1 \u{b7} Matthew 1", &at(13, 9)).unwrap();
-        assert!(log.ends_with("## 2026-10-13\n\n- [[library/Gospels/Day 1#Matthew 1|Gospels \u{b7} Day 1 \u{b7} Matthew 1]]\n"), "{log}");
+        let log = tick(&log, "library/Gospels/Day 1", "Matthew 1", "Gospels \u{b7} Day 1", &at(13, 9)).unwrap();
+        assert!(log.ends_with("## 2026-10-13\n\n- [[@Matthew 1]] from [[library/Gospels/Day 1|Gospels \u{b7} Day 1]]\n"), "{log}");
         assert_eq!(tick(&log, "library/Gospels/Day 1.md", "Matthew 1", "x", &at(13, 20)), None, "once a day");
         let log = tick(&log, "library/Gospels/Day 1", "Matthew 2", "", &at(13, 21)).unwrap();
         assert!(completed(&log).is_empty(), "a tick does not complete the day");
@@ -269,6 +293,34 @@ mod tests {
         let log = untick(&log, "library/Gospels/Day 1", "Matthew 1").unwrap();
         assert_eq!(ticked(&log)["library/Gospels/Day 1.md"].len(), 1);
         assert_eq!(untick(&log, "library/Gospels/Day 1", "Matthew 1"), None);
+    }
+
+    #[test]
+    fn a_tick_is_a_passage_link_and_a_note_link_that_mean_what_they_say() {
+        let log = tick(&new_log("L", "x"), JAN_1, "Genesis 1", "Morning and Evening \u{b7} January 1", &at(13, 9)).unwrap();
+        let line = log.lines().last().unwrap();
+        let links = find_links(line);
+        assert_eq!(links.len(), 2);
+        assert!(matches!(&links[0].target, LinkTarget::Verse { range, .. } if *range == RefRange::parse("Gen 1").unwrap()));
+        assert_eq!(links[1].target, LinkTarget::Note("library/Morning and Evening/01-01".into()));
+        // The reading is read as the passage it is, whatever it was spelt, and a reading that is no passage is not ticked.
+        assert_eq!(tick(&log, JAN_1, "genesis 1", "x", &at(13, 20)), None);
+        assert_eq!(ticked(&log)[JAN_1].keys().collect::<Vec<_>>(), ["Genesis 1"]);
+        assert_eq!(tick(&new_log("L", "x"), JAN_1, "the first chapter", "x", &at(13, 9)), None);
+    }
+
+    #[test]
+    fn ticks_written_the_old_way_with_a_hash_are_still_read_and_taken_back() {
+        let log = "# L\n\n## 2026-10-12\n\n- [[library/Gospels/Day 1#Matthew 1|Gospels \u{b7} Day 1 \u{b7} Matthew 1]]\n- [[library/Gospels/Day 1#matthew 2]]\n- [[library/Gospels/Day 1|Gospels \u{b7} Day 1]]\n";
+        let seen = ticked(log);
+        assert_eq!(seen["library/Gospels/Day 1.md"]["Matthew 1"], "2026-10-12");
+        assert_eq!(seen["library/Gospels/Day 1.md"]["Matthew 2"], "2026-10-12", "read as the passage it names");
+        assert_eq!(completed(log).len(), 1, "only the plain link completes the day");
+        // Not ticked again the same day, and taken back whichever way it was written.
+        assert_eq!(tick(log, "library/Gospels/Day 1", "Matthew 1", "x", &at(12, 9)), None);
+        let taken = untick(log, "library/Gospels/Day 1", "Matthew 1").unwrap();
+        assert!(!taken.contains("#Matthew 1"));
+        assert!(taken.contains("#matthew 2"));
     }
 
     #[test]
