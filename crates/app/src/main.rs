@@ -66,7 +66,6 @@ use panes::{Node, PaneId, SplitId};
 use persist::Persist;
 use shared::{Event, Shared, TabId};
 use state::{NamedLayout, Settings, Store, Workspace};
-use study_core::markdown::resolve_note;
 use std::collections::BTreeMap;
 use std::fmt;
 use study_core::{ModuleId, StudyBackend};
@@ -2294,8 +2293,18 @@ impl App {
                 self.open_web(url);
                 None
             }
-            Spec::Note(name) => match resolve_note(&self.sh.note_paths(), name).cloned() {
-                Some(path) => Some(self.new_note(path)),
+            Spec::Note(name) => match study_core::markdown::resolve_note_heading(&self.sh.note_paths(), name).map(|(p, h)| (p.clone(), h)) {
+                Some((path, heading)) => {
+                    let mut tab = self.new_note(path);
+                    // A link to a heading opens the note with the caret there.
+                    if let (Tab::Note(note), Some(heading)) = (&mut tab, &heading)
+                        && let Some(offset) = study_core::markdown::heading_offset(note.doc.source(), heading)
+                    {
+                        note.doc.perform(md_editor::Action::SetCaret { offset, extend: false });
+                        note.jump = true;
+                    }
+                    Some(tab)
+                }
                 None => {
                     self.sh.status = format!("No note named \u{201C}{name}\u{201D} yet");
                     None
@@ -2568,11 +2577,42 @@ impl App {
     }
 
     fn open_note_link(&mut self, from: TabId, name: &str, dest: Dest) {
-        let Some(path) = resolve_note(&self.sh.note_paths(), name).cloned() else {
+        // `[[#Heading]]` is a heading of the note the link is in.
+        if let Some(heading) = name.trim().strip_prefix('#')
+            && let Some(Tab::Note(note)) = self.tabs.get(&from)
+        {
+            let path = note.path.clone();
+            // (Nothing else would show that it did nothing, so a heading that is not there is said.)
+            if !self.go_to_heading(&path, heading.trim()) {
+                self.sh.status = format!("No heading \u{201C}{}\u{201D} in this note", heading.trim());
+            }
+            return;
+        }
+        let Some((path, heading)) = study_core::markdown::resolve_note_heading(&self.sh.note_paths(), name).map(|(p, h)| (p.clone(), h)) else {
             self.sh.status = format!("No note named \u{201C}{name}\u{201D} yet");
             return;
         };
-        self.open_note_at(from, path, dest);
+        self.open_note_at(from, path.clone(), dest);
+        // The note opened either way: a heading it has not is not an error (a plan log's `Day 001#Genesis 1` names a reading).
+        if let Some(heading) = heading {
+            self.go_to_heading(&path, &heading);
+        }
+    }
+
+    /// Put the caret of the tab that shows the note at `path` at its heading `heading` (the editor scrolls to it). Whether
+    /// the note has the heading: if not, the note is left as it was.
+    fn go_to_heading(&mut self, path: &str, heading: &str) -> bool {
+        let offset = self.sh.notes.get(path).and_then(|text| study_core::markdown::heading_offset(text, heading));
+        let Some(offset) = offset else { return false };
+        let shown = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Note(n) if n.path == path).then_some(*id));
+        if let Some(id) = shown
+            && let Some(Tab::Note(tab)) = self.tabs.get_mut(&id)
+        {
+            tab.doc.perform(md_editor::Action::SetCaret { offset, extend: false });
+            tab.jump = true;
+            self.activate(id);
+        }
+        true
     }
 
     /// Follow a link from tab `from` to the note at `path`.
@@ -9581,6 +9621,73 @@ mod tests {
         // Another one: a pane each time.
         let _ = app.update(Message::Bible(bible, BibleMsg::OpenLink(verse_link("Num 21:9"))));
         assert_eq!(app.panes.len(), 4);
+    }
+
+    #[test]
+    fn a_link_to_a_heading_opens_the_note_with_the_caret_there_and_says_when_there_is_no_such_heading() {
+        let mut app = App::new();
+        let note = app.nid();
+        let heading_at = |app: &App, path: &str, heading: &str| study_core::markdown::heading_offset(&app.sh.notes[path], heading).unwrap();
+        let caret = |app: &App| app.note().doc.selection().head;
+        // `[[Nicodemus#questions]]` (any capitals): the note, and its heading.
+        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("Nicodemus#questions".into()))));
+        assert_eq!(app.note().path, "notes/Nicodemus.md");
+        assert_eq!(caret(&app), heading_at(&app, "notes/Nicodemus.md", "Questions"));
+        assert!(caret(&app) > 0, "not at the top");
+        // `[[#Nicodemus]]` in that note: its own first heading, from further down.
+        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("#Nicodemus".into()))));
+        assert_eq!(caret(&app), heading_at(&app, "notes/Nicodemus.md", "Nicodemus"));
+        assert_eq!(app.note().path, "notes/Nicodemus.md", "the same note");
+        // A heading the note has not: the note opens all the same, with nothing said (a plan log's `Day 001#Genesis 1` names a
+        // reading, which is no heading, and is no error).
+        app.sh.status.clear();
+        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("Memory verses#Nowhere".into()))));
+        assert_eq!(app.note().path, "notes/Memory verses.md");
+        assert_eq!(app.sh.status, "");
+        // Only in the note itself, where it would otherwise look as if nothing happened, it is said.
+        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("#Nowhere".into()))));
+        assert!(app.sh.status.contains("No heading"), "{}", app.sh.status);
+        // And one carried to a new tab opens at its heading too.
+        let spec = Spec::Note("Nicodemus#Questions".into());
+        let bible = app.bid();
+        let _ = app.open_spec(bible, spec, Dest::NewTab);
+        let at: Vec<usize> = app.tabs.values().filter_map(|t| match t { Tab::Note(n) if n.path == "notes/Nicodemus.md" => Some(n.doc.selection().head), _ => None }).collect();
+        assert_eq!(at, [heading_at(&app, "notes/Nicodemus.md", "Questions")]);
+    }
+
+    #[test]
+    fn following_a_link_to_a_heading_puts_its_line_at_the_top_of_the_editor_once() {
+        let mut app = App::new();
+        let long = format!("# Long\n\n{}## Target\n\nend\n{}", "a line of words\n\n".repeat(60), "more\n\n".repeat(60));
+        app.sh.notes.insert("notes/Long.md".into(), long);
+        let note = app.nid();
+        let mut h = Harness::new(app);
+        h.size = Size::new(1000.0, 500.0);
+        let _ = h.app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("Long#Target".into()))));
+        assert!(h.app.note().jump, "asked for");
+        for _ in 0..4 {
+            h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        }
+        assert!(!h.app.note().jump, "done, and the editor said so");
+        assert!(h.app.note().scroll > 500.0, "scrolled down to it: {}", h.app.note().scroll);
+    }
+
+    #[test]
+    fn a_plan_logs_link_to_a_reading_of_a_day_opens_the_day() {
+        let mut app = App::new();
+        app.sh.notes.insert("library/Plan/Day 001.md".into(), "# Day 1\n\n## Reading\n\n- [[Genesis 1]]\n".into());
+        let note = app.nid();
+        app.sh.status.clear();
+        let _ = app.update(Message::Note(note, NoteMsg::OpenLink(LinkTarget::Note("library/Plan/Day 001#Genesis 1".into()))));
+        assert_eq!(app.sh.status, "", "the day opens; its reading is not a heading, and that is no error");
+        assert!(app.tabs.values().any(|t| matches!(t, Tab::Note(n) if n.path == "library/Plan/Day 001.md")));
+    }
+
+    #[test]
+    fn a_link_to_a_heading_is_a_backlink_of_its_note() {
+        let mut app = App::new();
+        app.sh.notes.insert("notes/Study.md".into(), "See [[Nicodemus#Questions]] and [[#Mine]].\n\n# Mine\n".into());
+        assert!(app.sh.note_backlinks("notes/Nicodemus.md").iter().any(|b| b.path == "notes/Study.md"));
     }
 
     #[test]

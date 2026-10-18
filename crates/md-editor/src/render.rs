@@ -557,9 +557,34 @@ fn emit_link(out: &mut Out, text: &str, base: usize, link: &WikiLink, reveal: &R
             out.replaced(MODULE_GAP, base + at..base + at + 1, &ls);
             out.same(module, base + at + 1..base + at + 1 + module.len(), &Style { scale: ls.scale * MODULE_SCALE, ..ls.clone() });
         }
+        _ if shown_from == 0 && matches!(link.target, LinkTarget::Note(_)) && shown.char_indices().any(|(i, _)| is_heading_mark(shown, i)) => {
+            note_with_headings(out, shown, base + shown_start, &ls)
+        }
         _ => same_unbroken(out, shown, base + shown_start, &ls),
     }
     out.hidden(base + shown_start + shown_len..base + span.end);
+}
+
+/// Whether the `#` at byte `at` of a note link's target starts a heading's name: one that something that is not a space
+/// follows (`Note#Heading`, not the `C# ` of a note called `C# notes`).
+fn is_heading_mark(target: &str, at: usize) -> bool {
+    target[at..].starts_with('#') && target[at + 1..].chars().next().is_some_and(|c| !c.is_whitespace() && c != '#')
+}
+
+/// A link to a heading as it is shown: the note and the heading with an arrow between them (`Nicodemus > Questions`), and
+/// just the heading for a link to a heading of the note it is in (`#Questions`).
+fn note_with_headings(out: &mut Out, shown: &str, source_start: usize, style: &Style) {
+    let mut from = 0;
+    for (at, _) in shown.char_indices().filter(|(i, _)| is_heading_mark(shown, *i)) {
+        if at == 0 {
+            out.hidden(source_start..source_start + 1);
+        } else {
+            same_unbroken(out, &shown[from..at], source_start + from, style);
+            out.replaced(&format!("{NO_BREAK_SPACE}>{NO_BREAK_SPACE}"), source_start + at..source_start + at + 1, style);
+        }
+        from = at + 1;
+    }
+    same_unbroken(out, &shown[from..], source_start + from, style);
 }
 
 #[cfg(test)]
@@ -649,6 +674,21 @@ mod tests {
         // The marker is as big as the text, so revealing it does not change the line's height.
         assert!(shown.runs.iter().all(|r| (r.style.scale - 1.45).abs() < 1e-6));
         assert_eq!(hidden.display_to_source(0), 3, "click at the left edge lands after the hashes");
+    }
+
+    #[test]
+    fn a_link_to_a_heading_shows_the_note_and_the_heading_with_an_arrow() {
+        let line = "see [[Nicodemus#Questions]], [[#Mine]], [[C# notes]] and [[Nicodemus#Part#Sub|alias]]";
+        let r = rendered(line, false);
+        assert_eq!(r.text, "see Nicodemus\u{a0}>\u{a0}Questions, Mine, C#\u{a0}notes and alias");
+        let link = r.runs.iter().find(|x| x.text.contains("Questions")).unwrap();
+        assert_eq!(link.style.link, Some(LinkTarget::Note("Nicodemus#Questions".into())));
+        // Clicking in "Questions" lands in that word of the source.
+        let d = r.text.find("Questions").unwrap();
+        let s = r.display_to_source(d);
+        assert_eq!(&line[s..s + 9], "Questions");
+        // Revealed, it is the source.
+        assert_eq!(rendered("[[Nicodemus#Questions]]", true).text, "[[Nicodemus#Questions]]");
     }
 
     #[test]

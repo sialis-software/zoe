@@ -45,12 +45,40 @@ pub fn complete(sh: &Shared, text: &str, caret: usize, module: Option<&ModuleId>
         return None;
     }
     let from = line_start + open + 2;
+    // After a `#` the headings of the note before it (or, with nothing before it, of this note) are offered.
+    let heading_of = |note: &str| match inner.rfind('#') {
+        Some(i) if inner[..i] == *note => Some((from + i + 1, &inner[i + 1..])),
+        _ => None,
+    };
     let (from, items) = match inner.chars().next() {
         Some('%') => (from + 1, strongs(sh, &inner[1..])),
         Some('@') => (from + 1, passages(sh, &inner[1..], module)),
-        _ => (from, notes(sh, inner)),
+        Some('#') => {
+            let (at, typed) = heading_of("").unwrap_or((from + 1, ""));
+            (at, headings_of(text, typed))
+        }
+        _ => match inner.rfind('#').and_then(|i| {
+            let paths = sh.note_paths();
+            let path = study_core::markdown::resolve_note(&paths, &inner[..i])?.clone();
+            Some((i, path))
+        }) {
+            Some((i, path)) => (from + i + 1, headings_of(sh.notes.get(&path).map_or("", String::as_str), &inner[i + 1..])),
+            None => (from, notes(sh, inner)),
+        },
     };
     (!items.is_empty()).then_some(Completion { from, items, selected: 0 })
+}
+
+/// The headings of `text` that hold what was typed, in the order written. (One with a character that ends or splits a
+/// link, `#` `|` `[` `]`, cannot be written in one, and is left out.)
+fn headings_of(text: &str, typed: &str) -> Vec<Item> {
+    let needle = typed.trim().to_lowercase();
+    study_core::markdown::headings(text)
+        .into_iter()
+        .filter(|h| !h.text.contains(['#', '|', '[', ']']) && h.text.to_lowercase().contains(&needle))
+        .take(LIMIT)
+        .map(|h| Item { detail: format!("H{}", h.level), insert: h.text.clone(), label: h.text, close: true })
+        .collect()
 }
 
 /// The notes whose names hold what was typed (those that begin with it first): the notes the note tab's search bar
@@ -263,10 +291,27 @@ pub fn correct(sh: &Shared, text: &str, caret: usize) -> Option<(std::ops::Range
         _ => {
             // A note by the name it is called, when what was typed differs from it only in its capitals.
             let paths = sh.note_paths();
-            match study_core::markdown::resolve_note(&paths, typed) {
-                Some(path) => {
-                    let name = if typed.contains('/') { path.trim_end_matches(".md").to_string() } else { path.trim_end_matches(".md").rsplit('/').next().unwrap_or_default().to_string() };
-                    if name.eq_ignore_ascii_case(typed.trim_end_matches(".md")) { name } else { typed.to_string() }
+            match study_core::markdown::split_note_heading(&paths, typed) {
+                Some((path, note_part, heading)) => {
+                    let note_part = note_part.trim();
+                    let name = if note_part.contains('/') { path.trim_end_matches(".md").to_string() } else { path.trim_end_matches(".md").rsplit('/').next().unwrap_or_default().to_string() };
+                    let name = if name.eq_ignore_ascii_case(note_part.trim_end_matches(".md")) { name } else { note_part.to_string() };
+                    // A heading it has, by the words it has it in (`[[nicodemus#questions]]` is `[[Nicodemus#Questions]]`).
+                    match heading {
+                        Some(heading) => {
+                            let found = sh.notes.get(path).and_then(|text| {
+                                let at = study_core::markdown::heading_offset(text, heading)?;
+                                study_core::markdown::headings(text).into_iter().find(|h| h.start == at).map(|h| h.text)
+                            });
+                            // (Only a single heading: `Heading#Sub` is left as it was written.)
+                            match found {
+                                Some(text) if !heading.contains('#') => format!("{name}#{text}"),
+                                _ => format!("{name}#{heading}"),
+                            }
+                        }
+                        None if typed.trim_end().ends_with('#') => format!("{name}#"),
+                        None => name,
+                    }
                 }
                 None => typed.to_string(),
             }
@@ -294,6 +339,42 @@ mod tests {
 
     fn labels(c: &Option<Completion>) -> Vec<String> {
         c.as_ref().map_or_else(Vec::new, |c| c.items.iter().map(|i| i.label.clone()).collect())
+    }
+
+    #[test]
+    fn after_a_hash_the_headings_of_the_note_before_it_are_offered_and_of_this_note_when_nothing_is_before_it() {
+        let mut sh = shared();
+        sh.notes.insert("notes/Nicodemus.md".into(), "# Nicodemus\n\n## Questions\n\ntext\n\n### Why by night? ##\n\n## Bad | one\n\n## C# plans\n".into());
+        // The note's headings (not those a link cannot hold), in the order written.
+        let c = at_end(&sh, "See [[Nicodemus#");
+        assert_eq!(labels(&c), ["Nicodemus", "Questions", "Why by night?"]);
+        let c = c.unwrap();
+        assert_eq!(c.from, "See [[Nicodemus#".len(), "what follows the #");
+        assert_eq!(c.items[1].insert, "Questions");
+        assert_eq!(c.items[1].detail, "H2");
+        assert!(c.items[1].close);
+        // Narrowed by what is typed, in any capitals; by the name as it is spelt in any capitals.
+        assert_eq!(labels(&at_end(&sh, "[[nicodemus#QUEST")), ["Questions"]);
+        // With nothing before it, the headings of the note being written.
+        let own = "# Mine\n\n## Part two\n\nSee [[#";
+        let c = complete(&sh, own, own.len(), None).unwrap();
+        assert_eq!(c.items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["Mine", "Part two"]);
+        // A note with no such name has no headings to offer: its name is looked for as a note's.
+        assert!(at_end(&sh, "[[Nobody#").is_none());
+        assert!(at_end(&sh, "[[Nicodemus#zzz").is_none(), "none holds it");
+    }
+
+    #[test]
+    fn a_link_to_a_heading_just_written_is_put_right_in_its_capitals() {
+        let mut sh = shared();
+        sh.notes.insert("notes/Nicodemus.md".into(), "# Nicodemus\n\n## Questions\n".into());
+        let text = "See [[nicodemus#questions]]";
+        let (range, fixed) = correct(&sh, text, text.len()).unwrap();
+        assert_eq!(fixed, "Nicodemus#Questions");
+        assert_eq!(&text[range], "nicodemus#questions");
+        // One that is right is left; so is a heading it has not.
+        assert!(correct(&sh, "[[Nicodemus#Questions]]", "[[Nicodemus#Questions]]".len()).is_none());
+        assert!(correct(&sh, "[[Nicodemus#Nothing]]", "[[Nicodemus#Nothing]]".len()).is_none());
     }
 
     #[test]

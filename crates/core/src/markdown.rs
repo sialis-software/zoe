@@ -249,17 +249,22 @@ pub fn rename_note_links(text: &str, old_path: &str, new_path: &str) -> Option<S
         links.reverse();
         for link in links {
             let LinkTarget::Note(name) = &link.target else { continue };
-            let name = name.trim_end_matches(".md").to_lowercase();
-            let replacement = if name == old_full {
+            // A link to a heading of the note (`Old#Heading`) keeps its heading.
+            let (base, heading) = match name.find('#') {
+                Some(i) if !name.trim_end_matches(".md").eq_ignore_ascii_case(&old_stem) => (&name[..i], &name[i..]),
+                _ => (name.as_str(), ""),
+            };
+            let base = base.trim_end_matches(".md").to_lowercase();
+            let replacement = if base == old_full {
                 bare(new_path)
-            } else if name == old_stem {
+            } else if base == old_stem {
                 stem(new_path)
             } else {
                 continue;
             };
             let embed = if link.embed { "!" } else { "" };
             let alias = link.display.as_ref().map_or(String::new(), |d| format!("|{d}"));
-            line.replace_range(link.span.clone(), &format!("{embed}[[{replacement}{alias}]]"));
+            line.replace_range(link.span.clone(), &format!("{embed}[[{replacement}{heading}{alias}]]"));
             changed = true;
         }
         out.push_str(&line);
@@ -267,13 +272,97 @@ pub fn rename_note_links(text: &str, old_path: &str, new_path: &str) -> Option<S
     changed.then_some(out)
 }
 
-/// Resolve a `[[Note name]]` against note paths by case-insensitive file stem or full path.
+/// Resolve a `[[Note name]]` against note paths by case-insensitive file stem or full path. A link to a heading
+/// (`[[Note name#Heading]]`) resolves to the note.
 pub fn resolve_note<'a>(paths: &'a [String], name: &str) -> Option<&'a String> {
+    resolve_note_heading(paths, name).map(|(path, _)| path)
+}
+
+/// The note a `[[Note name]]` or `[[Note name#Heading]]` names, and the heading if it names one (`Heading#Sub` for a
+/// heading inside a heading). The whole text is tried as a name first, so a note called `C# notes` is still found; then
+/// each `#` in turn is taken to start the heading.
+pub fn resolve_note_heading<'a>(paths: &'a [String], name: &str) -> Option<(&'a String, Option<String>)> {
+    split_note_heading(paths, name).map(|(path, _, heading)| (path, heading.map(str::to_string)))
+}
+
+/// The same, with where the name was cut: the note, the part of `name` that names it, and the part that names a heading
+/// (trimmed; `None` if nothing follows the `#`).
+pub fn split_note_heading<'a, 'n>(paths: &'a [String], name: &'n str) -> Option<(&'a String, &'n str, Option<&'n str>)> {
+    if let Some(path) = find_note(paths, name) {
+        return Some((path, name, None));
+    }
+    name.match_indices('#').find_map(|(i, _)| {
+        let path = find_note(paths, &name[..i])?;
+        let heading = name[i + 1..].trim();
+        Some((path, &name[..i], (!heading.is_empty()).then_some(heading)))
+    })
+}
+
+fn find_note<'a>(paths: &'a [String], name: &str) -> Option<&'a String> {
     let want = name.trim().trim_end_matches(".md").to_lowercase();
+    if want.is_empty() {
+        return None;
+    }
     paths.iter().find(|p| {
         let no_ext = p.trim_end_matches(".md").to_lowercase();
         no_ext == want || no_ext.rsplit('/').next() == Some(want.as_str())
     })
+}
+
+/// A heading of a note.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Heading {
+    /// 1 for `#` to 6 for `######`.
+    pub level: u8,
+    /// Its words, without the `#`s.
+    pub text: String,
+    /// Where its line begins in the note.
+    pub start: usize,
+}
+
+/// The `#` headings of `text`, in order. Not those in the front matter or in a fenced block of code.
+pub fn headings(text: &str) -> Vec<Heading> {
+    let mut out = Vec::new();
+    let (mut start, mut fence, mut front) = (0, false, text.starts_with("---\n"));
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if front {
+            // The front matter ends at the next line of three dashes.
+            if n > 0 && trimmed.trim_end() == "---" {
+                front = false;
+            }
+        } else if trimmed.trim_start().starts_with("```") || trimmed.trim_start().starts_with("~~~") {
+            fence = !fence;
+        } else if !fence {
+            let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
+            let rest = &trimmed[hashes..];
+            if (1..=6).contains(&hashes) && rest.starts_with([' ', '\t']) {
+                // A closing run of `#`s (`## Heading ##`) is not part of the words.
+                let words = rest.trim().trim_end_matches('#').trim();
+                if !words.is_empty() {
+                    out.push(Heading { level: hashes as u8, text: words.to_string(), start });
+                }
+            }
+        }
+        start += line.len();
+    }
+    out
+}
+
+/// Where the heading a link names begins in `text`: the line of the first heading that reads as `heading` (in any
+/// capitals, and spaces counting as one). `Heading#Sub` is a heading `Sub` after the heading `Heading`, and `Sub` is
+/// looked for after it only.
+pub fn heading_offset(text: &str, heading: &str) -> Option<usize> {
+    let plain = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let all = headings(text);
+    let mut from = 0;
+    let mut found = None;
+    for part in heading.split('#').map(plain).filter(|p| !p.is_empty()) {
+        let at = all.iter().skip(from).position(|h| plain(&h.text) == part)? + from;
+        found = Some(all[at].start);
+        from = at + 1;
+    }
+    found
 }
 
 #[cfg(test)]
@@ -374,5 +463,47 @@ mod tests {
         assert_eq!(resolve_note(&paths, "nicodemus"), Some(&paths[0]));
         assert_eq!(resolve_note(&paths, "prayers/list"), Some(&paths[1]));
         assert_eq!(resolve_note(&paths, "missing"), None);
+    }
+
+    #[test]
+    fn a_link_can_name_a_heading_of_a_note() {
+        let links = find_links("See [[Nicodemus#Questions]] and [[Nicodemus#Questions|the questions]] and [[#Here]].");
+        assert_eq!(links[0].target, LinkTarget::Note("Nicodemus#Questions".into()));
+        assert_eq!(links[1].target, LinkTarget::Note("Nicodemus#Questions".into()));
+        assert_eq!(links[1].display.as_deref(), Some("the questions"));
+        assert_eq!(links[2].target, LinkTarget::Note("#Here".into()));
+        let paths = vec!["notes/Nicodemus.md".to_string(), "notes/C# notes.md".to_string()];
+        assert_eq!(resolve_note_heading(&paths, "nicodemus#Questions"), Some((&paths[0], Some("Questions".to_string()))));
+        assert_eq!(resolve_note_heading(&paths, "Nicodemus"), Some((&paths[0], None)));
+        assert_eq!(resolve_note_heading(&paths, "Nicodemus#"), Some((&paths[0], None)));
+        assert_eq!(resolve_note_heading(&paths, "C# notes"), Some((&paths[1], None)), "a note's own # is not a heading");
+        assert_eq!(resolve_note_heading(&paths, "C# notes#Part"), Some((&paths[1], Some("Part".to_string()))));
+        assert_eq!(resolve_note(&paths, "Nicodemus#Questions"), Some(&paths[0]));
+        assert_eq!(resolve_note(&paths, "Nobody#Questions"), None);
+        assert_eq!(resolve_note(&paths, "#Questions"), None, "no note by that name: a link to this note's own heading is the editor's");
+    }
+
+    #[test]
+    fn headings_are_found_outside_front_matter_and_code() {
+        let text = "---\ntitle: T\n# not a heading\n---\n# Nicodemus\n\nText #hashtag\n\n## Questions ##\n\n```\n# in code\n```\n\n### Sub  heading\n####### seven\n#nospace\n";
+        let all = headings(text);
+        let found: Vec<(u8, &str)> = all.iter().map(|h| (h.level, h.text.as_str())).collect();
+        assert_eq!(found, [(1, "Nicodemus"), (2, "Questions"), (3, "Sub  heading")]);
+        assert_eq!(&text[all[1].start..][..12], "## Questions");
+        assert_eq!(heading_offset(text, "questions"), Some(all[1].start), "any capitals");
+        assert_eq!(heading_offset(text, "Sub heading"), Some(all[2].start), "spaces count as one");
+        assert_eq!(heading_offset(text, "Questions#Sub heading"), Some(all[2].start), "a heading inside a heading");
+        assert_eq!(heading_offset(text, "Sub heading#Questions"), None, "which comes after the first");
+        assert_eq!(heading_offset(text, "in code"), None);
+        assert_eq!(heading_offset(text, "Nothing"), None);
+    }
+
+    #[test]
+    fn renaming_a_note_keeps_the_headings_its_links_name() {
+        let text = "See [[Old name#Part one]], [[Old name#Part|part]], [[notes/Old name#Part]] and [[Other#Part]].\n";
+        assert_eq!(
+            rename_note_links(text, "notes/Old name.md", "notes/Fresh.md").as_deref(),
+            Some("See [[Fresh#Part one]], [[Fresh#Part|part]], [[notes/Fresh#Part]] and [[Other#Part]].\n")
+        );
     }
 }

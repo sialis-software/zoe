@@ -80,6 +80,8 @@ Every link, from any kind of tab, is followed to *a place* (`opening.rs`). A pla
 | Alt | in the other pane (its tab, if it has one of the right kind; else a new tab there; the next pane in order, splitting if there is only one) |
 | Shift | in a new pane, split off this one |
 
+A link to a heading of a note (`[[Nicodemus#Questions]]`, or `[[#Questions]]` for the note it is in) follows these keys to the note and then puts the heading's line at the top of its editor, with the caret on it. A heading the note does not have is not an error: the note opens at the top (only `[[#Heading]]`, which would otherwise do nothing, says it is not there). Typing `#` after a note's name offers its headings, and the link is shown as `Nicodemus > Questions`.
+
 Right-clicking a link in the reader, a note, or a card offers the same four, and "Copy link" (the link as it is written in a note). The app follows the keys held through a `ModifiersChanged` subscription, so any link control gets this without handling keys itself. A link in a note's text that is being edited keeps its own rule (Alt-click edits it); the right-click menu is always there.
 
 ## Header bars

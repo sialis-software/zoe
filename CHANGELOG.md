@@ -4,6 +4,8 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+- A link can name a heading of a note: `[[Nicodemus#Questions]]` opens the note with that heading scrolled to the top and the caret on it (the link shows as "Nicodemus > Questions"), `[[#Questions]]` goes to a heading of the note you are in, and typing `#` after a note's name offers its headings. Renaming a note keeps the headings in the links to it.
+
 ## [0.5.0] - 2026-10-17
 
 - The passages a Bible prints under a section's heading, `(Colossians 1:1-2; Philemon 1:1-3)`, are a small quiet line under the heading, not a second bold heading, and each passage in it is a link.

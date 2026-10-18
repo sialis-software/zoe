@@ -114,6 +114,8 @@ pub enum NoteMsg {
     Completion(CompletionEvent),
     /// The card of choices was scrolled this far.
     ChoicesScrolled(f32),
+    /// The editor put the caret's line at the top, as a link to a heading asked.
+    Jumped,
     /// A key the Vim bindings take (see `Settings::vim_mode`).
     Vim(VimKey),
     /// Open the link under the editor cursor, or one clicked in the text.
@@ -462,6 +464,8 @@ pub struct NoteTab {
     pub picking: bool,
     /// How far down the text is scrolled, to put back when the tab is shown again.
     pub scroll: f32,
+    /// The caret was just moved to a heading by a link: the editor puts its line at the top, then says so (`Jumped`).
+    pub jump: bool,
     /// Whether a margin note's colors to choose from are showing.
     pub mark_colors: bool,
     /// What a value box shows while what is typed is not (yet) a value of its type: a number
@@ -638,6 +642,7 @@ impl NoteTab {
             front_open: false,
             picking: false,
             scroll: 0.0,
+            jump: false,
             mark_colors: false,
             drafts: BTreeMap::new(),
             completion: None,
@@ -1203,6 +1208,7 @@ impl NoteTab {
             }
             NoteMsg::ToggleFront => self.front_open = !self.front_open,
             NoteMsg::Scrolled(y) => self.scroll = y,
+            NoteMsg::Jumped => self.jump = false,
             NoteMsg::SetKind(KindChoice(kind)) => self.change_properties(sh, |f| f.kind = kind),
             NoteMsg::PropEdit(i, typed) => {
                 let kind = frontmatter::parse(self.doc.source()).front.props.get(i).and_then(|p| p.value.prop_type());
@@ -1409,6 +1415,8 @@ impl NoteTab {
                 .on_link_menu(NoteMsg::LinkMenu)
                 .on_link_drag(NoteMsg::LinkDrag)
                 .on_scroll(NoteMsg::Scrolled)
+                .caret_to_top(self.jump)
+                .on_jumped(|| NoteMsg::Jumped)
                 .embed(move |target| sh.embed_for(&embed_module, target))
                 .placeholder("Write here…")
                 .size(sh.settings.notes_size)

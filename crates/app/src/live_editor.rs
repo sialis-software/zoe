@@ -116,6 +116,9 @@ pub struct LiveEditor<'a, Message> {
     reading: bool,
     /// Told where it is scrolled to when that changes.
     on_scroll: Option<Box<dyn Fn(f32) -> Message + 'a>>,
+    /// Scroll so that the caret's line is at the top (as a link to a heading asks), until `on_jumped` tells the owner it has.
+    caret_to_top: bool,
+    on_jumped: Option<Box<dyn Fn() -> Message + 'a>>,
     /// What copying makes of the selected source text (the clipboard gets the result).
     copy_as: Option<fn(&str) -> String>,
     /// Vim key bindings: what the modal state looks like, and where its keys go.
@@ -174,6 +177,8 @@ fn editor<'a, Message>(doc: Cow<'a, Document>, pal: Palette, read_only: bool) ->
         embed: None,
         reading: false,
         on_scroll: None,
+        caret_to_top: false,
+        on_jumped: None,
         copy_as: None,
         vim: None,
         on_vim_key: None,
@@ -205,6 +210,18 @@ impl<'a, Message> LiveEditor<'a, Message> {
 
     pub fn on_scroll(mut self, f: impl Fn(f32) -> Message + 'a) -> Self {
         self.on_scroll = Some(Box::new(f));
+        self
+    }
+
+    /// Put the caret's line at the top of the view, as long as `on`: the owner turns it on when it moves the caret to a
+    /// heading, and off when `on_jumped` says the editor has done it.
+    pub fn caret_to_top(mut self, on: bool) -> Self {
+        self.caret_to_top = on;
+        self
+    }
+
+    pub fn on_jumped(mut self, f: impl Fn() -> Message + 'a) -> Self {
+        self.on_jumped = Some(Box::new(f));
         self
     }
 
@@ -471,6 +488,8 @@ struct State {
     scroll: f32,
     /// The scroll last told to `on_scroll`.
     reported_scroll: f32,
+    /// The caret's line was put at the top (and the owner is yet to be told).
+    jumped: bool,
     view_h: f32,
     content_h: f32,
     laid: Vec<Laid>,
@@ -847,6 +866,13 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         // Keep the caret in view when it moves (typing, arrows), but leave the scroll alone
         // when something else (the wheel) moved the view.
         let head = self.vim.and_then(|v| v.cursor).unwrap_or(self.doc.selection().head);
+        if self.caret_to_top
+            && let Some(rect) = self.caret_rect(state, head)
+        {
+            state.scroll = rect.y.clamp(0.0, (content_h - view_h).max(0.0));
+            state.last_head = Some(head);
+            state.jumped = true;
+        }
         if !self.read_only && state.last_head != Some(head) {
             state.last_head = Some(head);
             state.touch();
@@ -1113,6 +1139,12 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
         {
             state.reported_scroll = state.scroll;
             shell.publish(f(state.scroll));
+        }
+        if state.jumped {
+            state.jumped = false;
+            if let Some(f) = &self.on_jumped {
+                shell.publish(f());
+            }
         }
 
         if let Event::Keyboard(keyboard::Event::ModifiersChanged(m)) = event {
