@@ -2176,7 +2176,7 @@ dependencies = [
 
 [[package]]
 name = "md-editor"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "study-core",
  "unicode-segmentation",
@@ -3384,7 +3384,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scripture"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "sctk-adwaita"
@@ -3729,7 +3729,7 @@ dependencies = [
 
 [[package]]
 name = "study-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "scripture",
@@ -3770,7 +3770,7 @@ dependencies = [
 
 [[package]]
 name = "sword"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "flate2",
  "scripture",
@@ -4261,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "vault"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "rusqlite",
  "scripture",
@@ -5307,7 +5307,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zoe"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "iced",

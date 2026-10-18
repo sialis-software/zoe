@@ -4,6 +4,8 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-17
+
 - "Add Note" on the toolbar under a selection is now "Add Mark", and it opens a card of its own: the caret is in the tags (Enter adds a tag and stays for the next, Tab goes on to the words), then a color (choosing one makes the mark a highlight in it) and a drop-down for the look, then buttons. The words are not shown until you press "Add note" (or Tab). A mark with tags and no words is no longer thrown away when you stop. Marks made with a pen work as before.
 - Pointing at a mark shows its tags in a label over the left end of its first line, each tag in its pen's color where it has one.
 - A link can name a heading of a note: `[[Nicodemus#Questions]]` opens the note with that heading scrolled to the top and the caret on it (the link shows as "Nicodemus > Questions"), `[[#Questions]]` goes to a heading of the note you are in, and typing `#` after a note's name offers its headings. Renaming a note keeps the headings in the links to it.
