@@ -66,6 +66,8 @@ pub struct ViewOptions {
     pub reveal: Option<(u64, u16)>,
     /// Margin marks to paint, already resolved to canonical coordinates.
     pub marks: Vec<MarkDraw>,
+    /// The tags of each mark (by the number `marks` gives it), each with its color if a pen has it, shown over the mark while the pointer is on it.
+    pub mark_tips: std::collections::HashMap<usize, Vec<(String, Option<iced::Color>)>>,
     /// Changing this clears the reader's text selection.
     pub clear_token: u64,
     /// Keep the text this wide and leave the remaining width for margin cards (margins mode).
@@ -266,6 +268,7 @@ pub fn chapter_view<'a, M: 'a>(
         .select_words(opts.select_words)
         .restore_selection(opts.restore.clone())
         .marks(opts.marks.clone())
+        .mark_tips(opts.mark_tips.clone())
         .clear_selection(opts.clear_token)
         .toolbar(toolbar)
         .cards(cards)
@@ -378,6 +381,7 @@ mod tests {
             annotated: BTreeSet::new(),
             reveal: None,
             marks: Vec::new(),
+            mark_tips: Default::default(),
             clear_token: 0,
             text_width: None,
             both_sides: false,

@@ -250,6 +250,33 @@ struct Piece {
     canon: usize,
 }
 
+/// Where the label of a mark's tags goes: over the left end of the first line of the mark, or under it where there is no room
+/// above, and back inside the window at the right.
+fn tip_area(anchor: Rectangle, size: Size, viewport: Rectangle) -> Rectangle {
+    let mut x = anchor.x;
+    if x + size.width > viewport.x + viewport.width - 4.0 {
+        x = (viewport.x + viewport.width - 4.0 - size.width).max(viewport.x);
+    }
+    let mut y = anchor.y - size.height - 2.0;
+    if y < viewport.y + 2.0 {
+        y = anchor.y + anchor.height + 2.0;
+    }
+    Rectangle::new(Point::new(x, y), size)
+}
+
+/// The tags of the marks under the pointer, each once in the order they come (several marks can overlap), if any have tags.
+fn tags_under(tips: &HashMap<usize, Vec<(String, Option<Color>)>>, marks: &[usize]) -> Option<Vec<(String, Option<Color>)>> {
+    let mut tags: Vec<(String, Option<Color>)> = Vec::new();
+    for mark in marks {
+        for (tag, color) in tips.get(mark).into_iter().flatten() {
+            if !tags.iter().any(|(t, _)| t == tag) {
+                tags.push((tag.clone(), *color));
+            }
+        }
+    }
+    (!tags.is_empty()).then_some(tags)
+}
+
 /// Locate every verse's canonical text in the blocks. Mirrors `Chapter::canonical_verses`:
 /// copyable spans of a run (consecutive spans of one verse) concatenate, and separate
 /// runs of the same verse are joined by one space.
@@ -599,6 +626,8 @@ pub struct ReaderText<'a, L, Message> {
     select_words: Option<(u64, CanonSlice)>,
     restore: Option<Vec<CanonSlice>>,
     marks: Vec<MarkDraw>,
+    /// The tags of marks (by their number), shown by the pointer over them.
+    mark_tips: HashMap<usize, Vec<(String, Option<Color>)>>,
     on_selection: Option<Box<dyn Fn(TextSelection) -> Message + 'a>>,
     clear_token: u64,
     /// Shown under the selection once it settles; hosted (laid out, drawn, fed events) here
@@ -637,6 +666,7 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
             select_words: None,
             restore: None,
             marks: Vec::new(),
+            mark_tips: HashMap::new(),
             on_selection: None,
             clear_token: 0,
             toolbar: None,
@@ -715,6 +745,12 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
     /// Marks to paint over the text, in canonical coordinates.
     pub fn marks(mut self, marks: Vec<MarkDraw>) -> Self {
         self.marks = marks;
+        self
+    }
+
+    /// The tags to show by the pointer while it is over a mark (the marks' numbers are those of `marks`).
+    pub fn mark_tips(mut self, tips: HashMap<usize, Vec<(String, Option<Color>)>>) -> Self {
+        self.mark_tips = tips;
         self
     }
 
@@ -820,6 +856,11 @@ impl<'a, L, Message> ReaderText<'a, L, Message> {
 impl<L: Clone + 'static, Message> ReaderText<'_, L, Message> {
     /// The layers peeking out below the top card of a stack, and its bar of arrows.
     #[allow(clippy::too_many_arguments)]
+    /// The tags of the marks the pointer is over (each once, in the order they are written), when there are any.
+    fn tip_tags(&self, state: &State<L>) -> Option<Vec<(String, Option<Color>)>> {
+        tags_under(&self.mark_tips, &state.hover_marks)
+    }
+
     fn draw_stack_behind(
         &self,
         renderer: &mut iced::Renderer,
@@ -1490,6 +1531,45 @@ where
         }
     }
 
+    /// What the cards and the toolbar hosted here open over the window (a drop-down's menu, a panel of colors): the
+    /// reader lays them out and draws them itself, so it is for it to pass their overlays on.
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        let bounds = layout.bounds();
+        let toolbar_offset = {
+            let state = tree.state.downcast_ref::<State<L>>();
+            self.toolbar_geometry(state, bounds, &state.viewport).map(|(offset, _)| offset)
+        };
+        let Tree { state, children, .. } = tree;
+        let State { cards, card_trees, toolbar_node, .. } = state.downcast_mut::<State<L>>();
+        let cards: &'b Vec<CardLaid> = cards;
+        let mut overlays = Vec::new();
+        // (Each card's tree, by its key: taken out of the map one at a time, which a lookup for each in turn could not be.)
+        let mut trees: HashMap<u64, &'b mut Tree> = card_trees.iter_mut().map(|(key, tree)| (*key, tree)).collect();
+        for (spec, laid) in self.cards.iter_mut().zip(cards.iter()) {
+            if laid.hidden {
+                continue;
+            }
+            let (Some(card_tree), Some(element)) = (trees.remove(&spec.key), spec.element.built.as_mut()) else { continue };
+            if let Some(found) = element.as_widget_mut().overlay(card_tree, Layout::with_offset(laid.offset(bounds), &laid.node), renderer, viewport, translation) {
+                overlays.push(found);
+            }
+        }
+        if let (Some(offset), Some(node), Some(toolbar), Some(child)) =
+            (toolbar_offset, toolbar_node.as_ref(), self.toolbar.as_mut(), children.get_mut(0))
+            && let Some(found) = toolbar.as_widget_mut().overlay(child, Layout::with_offset(offset, node), renderer, viewport, translation)
+        {
+            overlays.push(found);
+        }
+        (!overlays.is_empty()).then(|| iced::advanced::overlay::Group::with_children(overlays).overlay())
+    }
+
     fn layout(
         &mut self,
         tree: &mut Tree,
@@ -1777,6 +1857,8 @@ where
     ) {
         let state = tree.state.downcast_ref::<State<L>>();
         let origin = layout.position();
+        // Where the first line of the mark the pointer is on was drawn: the label of its tags keeps to it.
+        let mut tip_anchor: Option<Rectangle> = None;
         let mut emphasised: BTreeSet<usize> = state
             .hover_marks
             .iter()
@@ -1853,6 +1935,9 @@ where
                         let (c0, c1) = (cosmic_text::Cursor::new(0, s), cosmic_text::Cursor::new(0, e));
                         for run in laid.para.buffer().layout_runs() {
                             let Some((x, w)) = run.highlight(c0, c1) else { continue };
+                            if pass == 0 && tip_anchor.is_none() && state.hover_marks.first() == Some(&mark.mark) {
+                                tip_anchor = Some(Rectangle::new(top_left + Vector::new(x, run.line_top), Size::new(w, run.line_height)));
+                            }
                             if pass == 1 && mark.kind != MarkKind::Highlight {
                                 // Underlines get the hover highlight highlights have: a calmer
                                 // version of their colour behind the line.
@@ -2095,6 +2180,75 @@ where
                     }
                 });
             }
+        }
+
+        // The tags of the marks under the pointer, over the first line of the first of them (under it where there is no room
+        // above), so that the label keeps its place as the pointer moves along the mark.
+        if let (Some(tags), Some(anchor)) = (self.tip_tags(state), tip_anchor) {
+            let palette = theme.extended_palette();
+            // Each tag in its own color where a pen has it (as the chips of a card have), the others in the text's, a little
+            // larger than the text of a card's small print, with room between.
+            let size = self.size.0 * 0.82;
+            let font = renderer.default_font();
+            let measure = |content: &str| {
+                Para::with_text(Text {
+                    content,
+                    bounds: Size::new(f32::INFINITY, f32::INFINITY),
+                    size: Pixels(size),
+                    line_height: LineHeight::Relative(1.2),
+                    font,
+                    align_x: Alignment::Left,
+                    align_y: alignment::Vertical::Top,
+                    shaping: Shaping::Basic,
+                    wrapping: Wrapping::None,
+                })
+                .min_bounds()
+            };
+            let (pad_x, pad_y, gap) = (10.0, 5.0, 12.0);
+            let words: Vec<(String, Size, Color)> = tags
+                .iter()
+                .map(|(tag, color)| {
+                    let content = format!("#{tag}");
+                    let inner = measure(&content);
+                    (content, inner, color.unwrap_or(palette.background.base.text))
+                })
+                .collect();
+            let width: f32 = words.iter().map(|(_, inner, _)| inner.width).sum::<f32>() + gap * (words.len() as f32 - 1.0);
+            let height = words.iter().map(|(_, inner, _)| inner.height).fold(0.0, f32::max);
+            let box_size = Size::new(width + 2.0 * pad_x, height + 2.0 * pad_y);
+            let area = tip_area(anchor, box_size, *viewport);
+            renderer.with_layer(*viewport, |renderer| {
+                renderer.fill_quad(
+                    Quad {
+                        bounds: area,
+                        border: iced::Border { color: palette.background.strong.color, width: 1.0, radius: 8.0.into() },
+                        ..Quad::default()
+                    },
+                    palette.background.weak.color,
+                );
+                // (As text, not paragraphs: the renderer holds a paragraph weakly until the frame is drawn, and these are gone
+                // by then.)
+                let mut x = area.x + pad_x;
+                for (content, inner, color) in words {
+                    renderer.fill_text(
+                        Text {
+                            content,
+                            bounds: inner,
+                            size: Pixels(size),
+                            line_height: LineHeight::Relative(1.2),
+                            font,
+                            align_x: Alignment::Left,
+                            align_y: alignment::Vertical::Top,
+                            shaping: Shaping::Basic,
+                            wrapping: Wrapping::None,
+                        },
+                        Point::new(x, area.y + pad_y),
+                        color,
+                        *viewport,
+                    );
+                    x += inner.width + gap;
+                }
+            });
         }
 
         // The toolbar goes in its own layer so it paints over the text beneath it.
@@ -3154,5 +3308,35 @@ mod tests {
         assert_eq!(range_in_block(sel, 2, 10), Some((0, 10)));
         assert_eq!(range_in_block(sel, 3, 10), Some((0, 2)));
         assert_eq!(range_in_block(sel, 4, 10), None);
+    }
+
+    #[test]
+    fn the_pointer_over_marks_shows_their_tags_once_each() {
+        let gold = Some(Color::from_rgb(0.9, 0.8, 0.2));
+        let tips: HashMap<usize, Vec<(String, Option<Color>)>> = [
+            (0, vec![("promise".to_string(), gold), ("prayer".to_string(), None)]),
+            (2, vec![("prayer".to_string(), None), ("growth".to_string(), None)]),
+        ]
+        .into();
+        assert_eq!(tags_under(&tips, &[0]), Some(vec![("promise".into(), gold), ("prayer".into(), None)]), "each with its color");
+        let names = |tags: Option<Vec<(String, Option<Color>)>>| tags.map(|t| t.into_iter().map(|(name, _)| name).collect::<Vec<_>>());
+        assert_eq!(names(tags_under(&tips, &[0, 2])), Some(vec!["promise".into(), "prayer".into(), "growth".into()]), "overlapping marks: each tag once");
+        assert_eq!(tags_under(&tips, &[1]), None, "a mark with no tags shows nothing");
+        assert_eq!(tags_under(&tips, &[]), None);
+    }
+
+    #[test]
+    fn the_label_of_tags_keeps_to_the_mark_not_the_pointer() {
+        let viewport = Rectangle::new(Point::new(0.0, 0.0), Size::new(800.0, 600.0));
+        let label = Size::new(100.0, 20.0);
+        let line = Rectangle::new(Point::new(300.0, 200.0), Size::new(120.0, 30.0));
+        // Over the left end of the line.
+        assert_eq!(tip_area(line, label, viewport), Rectangle::new(Point::new(300.0, 178.0), label));
+        // Under it where the line is at the top of the window.
+        let top = Rectangle::new(Point::new(300.0, 5.0), Size::new(120.0, 30.0));
+        assert_eq!(tip_area(top, label, viewport).y, 37.0);
+        // Back inside at the right.
+        let right = Rectangle::new(Point::new(780.0, 200.0), Size::new(20.0, 30.0));
+        assert_eq!(tip_area(right, label, viewport).x, 696.0);
     }
 }

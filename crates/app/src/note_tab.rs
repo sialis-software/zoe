@@ -219,8 +219,8 @@ fn chip_label<'a>(tag: &str, count: usize, chosen: bool) -> Element<'a, NoteMsg>
     label.into()
 }
 
-/// The box for a new tag: rounded, and only a little lighter under the pointer.
-fn tag_box_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+/// The box for a new tag: rounded, and only a little lighter under the pointer (the writer's, and the reader's cards').
+pub(crate) fn tag_box_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let base = text_input::default(theme, status);
     let palette = theme.extended_palette();
     let edge = match status {

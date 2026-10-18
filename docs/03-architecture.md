@@ -65,7 +65,7 @@ Facts here move quickly; **re-verify current state of each before choosing**.
 - **Left:** navigator (module list, vault tree, search, reading plan).
 - **Center:** tabbed panes — Bible (single/parallel), notes editor, commentary.
 - **Right:** context panel for the focused verse: cross-references, commentary entries from chosen modules, **my notes**, Strong's popover.
-- Verse tap -> "Add note", "Highlight", "Copy ref", "Pray about this".
+- Verse tap -> "Add mark", "Highlight", "Copy ref", "Pray about this".
 - Plain-English labels; advanced options (Strong's, morphology, versification) behind a "More".
 
 ## 6. Cross-cutting concerns

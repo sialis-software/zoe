@@ -115,7 +115,7 @@ pub enum BibleMsg {
     SelectionChanged(Option<Vec<CanonSlice>>),
     ApplyPen(usize),
     /// Add a note-only mark (no highlight) to the selection and start writing it.
-    AddComment,
+    AddMark,
     /// Put a link to the selected verses on the clipboard, to paste into a note.
     CopyReference,
     /// Put an embedded quote of the selected verses on the clipboard.
@@ -201,6 +201,17 @@ pub enum BibleMsg {
     CardTagDraft(String),
     AddCardTag(String),
     RemoveCardTag(String),
+    /// The tag box was clicked into (so that Tab leaves it for the words), and Tab was pressed in it.
+    CardTagsFocused,
+    CardTab,
+    /// The look of the mark being written in: how it marks the text, and its color (a swatch, and a panel of the colors).
+    CardStyle(MarkStyle),
+    CardColors,
+    CloseCardColors,
+    CardColor(usize),
+    /// The new mark's card: show the place for its words (and put the caret in it).
+    ShowCardNote,
+    FocusCardNote,
 }
 
 /// Something the tab cannot do alone, for the workspace to carry out.
@@ -308,6 +319,12 @@ pub struct BibleTab {
     pub in_margin: crate::state::MarginKinds,
     /// What is typed in the tag box of the card being written in.
     pub card_tag_draft: String,
+    /// The tag box has the keyboard (Tab goes on to the words), and the panel of colors under the card's swatch is open.
+    pub card_tags_focus: bool,
+    pub card_colors: bool,
+    /// The card being written in is a new mark's (see `new_mark_card`), and whether the place for its words is showing.
+    pub card_new: bool,
+    pub card_note_shown: bool,
     pub note_card: Option<NoteCard>,
     /// The text of the reference cards (footnotes, references, dictionary entries) as it is selected, by
     /// card, with the markdown it was made from (the text is made again when that changes).
@@ -382,7 +399,7 @@ fn pen_toolbar(sh: &Shared, backlinks: bool) -> Element<'static, BibleMsg> {
         };
         bar = bar.push(button(label).padding([5, 8]).style(button::text).on_press(BibleMsg::ApplyPen(i)));
     }
-    let bar = bar.push(button(text("Add Note").size(13)).padding([5, 8]).style(button::text).on_press(BibleMsg::AddComment));
+    let bar = bar.push(button(text("Add Mark").size(13)).padding([5, 8]).style(button::text).on_press(BibleMsg::AddMark));
     // What can be taken to a note: plain text on the clipboard, pasted wherever it is wanted.
     let icon = |picture: crate::icons::Icon, tip: &'static str, msg: BibleMsg| {
         tooltip(
@@ -633,6 +650,10 @@ impl BibleTab {
             menu_open: false,
             in_margin: crate::state::MarginKinds::default(),
             card_tag_draft: String::new(),
+            card_tags_focus: false,
+            card_colors: false,
+            card_new: false,
+            card_note_shown: false,
             note_card: None,
             card_texts: Default::default(),
             words: Vec::new(),
@@ -647,6 +668,11 @@ impl BibleTab {
 
     pub fn card_editor_id(&self) -> iced::widget::Id {
         iced::widget::Id::from(format!("card-editor-{}", self.id))
+    }
+
+    /// The tag box of the card being written in.
+    pub fn card_tags_id(&self) -> iced::widget::Id {
+        iced::widget::Id::from(format!("card-tags-{}", self.id))
     }
 
     pub fn title(&self, sh: &Shared) -> String {
@@ -938,6 +964,16 @@ impl BibleTab {
         self.select_words = Some((self.select_token, CanonSlice { verse, start, end }));
     }
 
+    /// The tags of each mark that has some, under the number `mark_draws` gives it.
+    pub fn mark_tips(&self, sh: &Shared) -> std::collections::HashMap<usize, Vec<(String, Option<Color>)>> {
+        sh.marks
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.tags.is_empty())
+            .map(|(i, m)| (i, m.tags.iter().map(|t| (t.clone(), sh.tag_color(t).and_then(|hex| hex_color(&hex, 1.0)))).collect()))
+            .collect()
+    }
+
     pub fn mark_draws(&self, sh: &Shared) -> Vec<MarkDraw> {
         let mut out = Vec::new();
         for (index, slices) in self.visible_marks(sh) {
@@ -1023,7 +1059,7 @@ impl BibleTab {
     }
 
     /// Mark the selected text with pen `pen`, and open the mark's card to write a note in, as
-    /// "Add Note" does.
+    /// "Add Mark" does.
     pub fn apply_pen(&mut self, sh: &mut Shared, pen: usize) -> Task<BibleMsg> {
         let Some(pen) = sh.settings.pens.get(pen).cloned() else { return Task::none() };
         self.stop_edit(sh);
@@ -1034,6 +1070,10 @@ impl BibleTab {
             Some(index) => {
                 self.card_doc = Document::new("");
                 self.editing = Some(index);
+                self.card_tags_focus = false;
+                self.card_colors = false;
+                self.card_new = false;
+                self.card_note_shown = false;
                 iced::widget::operation::focus(self.card_editor_id())
             }
             None => Task::none(),
@@ -1066,6 +1106,10 @@ impl BibleTab {
         // The caret goes after the last character, not on the empty line a trailing newline
         // leaves, so typing adds to what is there.
         self.card_tag_draft.clear();
+        self.card_tags_focus = false;
+        self.card_colors = false;
+        self.card_new = false;
+        self.card_note_shown = false;
         self.card_doc = Document::new(&mark.body);
         let end = mark.body.trim_end_matches(['\n', '\r']).len();
         self.card_doc.perform(EditAction::SetCaret { offset: end, extend: false });
@@ -1073,14 +1117,18 @@ impl BibleTab {
         iced::widget::operation::focus(self.card_editor_id())
     }
 
-    /// Stop editing. A note-only mark left empty is pointless, so it is removed; returns its
-    /// index if so (later indices shift down by one).
+    /// Stop editing. A mark given nothing (no look, no tag, no words) is pointless, so it is removed; returns its
+    /// index if so (later indices shift down by one). One with tags but no words stays.
     pub fn stop_edit(&mut self, sh: &mut Shared) -> Option<usize> {
         let index = self.editing.take()?;
+        self.card_tags_focus = false;
+        self.card_colors = false;
+        self.card_new = false;
+        self.card_note_shown = false;
         let empty_note = sh
             .marks
             .get(index)
-            .is_some_and(|m| m.style == MarkStyle::None && m.body.trim().is_empty());
+            .is_some_and(|m| m.style == MarkStyle::None && m.body.trim().is_empty() && m.tags.is_empty());
         if empty_note {
             self.delete_mark(sh, index);
             return Some(index);
@@ -1150,15 +1198,20 @@ impl BibleTab {
                 }
                 Task::none()
             }
-            BibleMsg::AddComment => {
+            BibleMsg::AddMark => {
                 self.stop_edit(sh);
                 // With no margin the card appears under the selection, so keep it selected.
                 let keep = !self.marks_in_margin();
                 match self.make_mark(sh, MarkStyle::None, "#8A9099", Vec::new(), keep) {
                     Some(index) => {
+                        // The tags come first: Enter adds one and stays for the next, Tab goes on to the words.
                         self.card_doc = Document::new("");
                         self.editing = Some(index);
-                        iced::widget::operation::focus(self.card_editor_id())
+                        self.card_tags_focus = true;
+                        self.card_colors = false;
+                        self.card_new = true;
+                        self.card_note_shown = false;
+                        iced::widget::operation::focus(self.card_tags_id())
                     }
                     None => Task::none(),
                 }
@@ -1471,6 +1524,74 @@ impl BibleTab {
             }
             BibleMsg::CardTagDraft(draft) => {
                 self.card_tag_draft = draft;
+                self.card_tags_focus = true;
+                Task::none()
+            }
+            BibleMsg::CardTagsFocused => {
+                self.card_tags_focus = true;
+                Task::none()
+            }
+            BibleMsg::CardTab => {
+                if !self.card_tags_focus || self.editing.is_none() {
+                    return (Task::none(), None);
+                }
+                // Out of the tags and into the words (a tag half typed is added first).
+                self.card_tags_focus = false;
+                if !self.card_tag_draft.trim().is_empty()
+                    && let Some(index) = self.editing
+                    && let Some(mark) = sh.marks.get(index)
+                {
+                    let mut tags = mark.tags.clone();
+                    tags.push(std::mem::take(&mut self.card_tag_draft));
+                    sh.set_mark_tags(index, tags);
+                }
+                if self.card_new && !self.card_note_shown {
+                    // A new mark's card has no place for words until it is asked for; the caret goes there once it is.
+                    self.card_note_shown = true;
+                    return (Task::done(BibleMsg::FocusCardNote), None);
+                }
+                iced::widget::operation::focus(self.card_editor_id())
+            }
+            BibleMsg::ShowCardNote => {
+                self.card_note_shown = true;
+                self.card_tags_focus = false;
+                Task::done(BibleMsg::FocusCardNote)
+            }
+            BibleMsg::FocusCardNote => iced::widget::operation::focus(self.card_editor_id()),
+            BibleMsg::CardStyle(style) => {
+                if let Some(index) = self.editing
+                    && let Some(mark) = sh.marks.get(index)
+                {
+                    // A plain mark has no color: it is let go of. A mark made a highlight or an underline again, with no color
+                    // of its own, takes the first pen's.
+                    let had = mark.color.clone();
+                    let color = match style {
+                        MarkStyle::None => String::new(),
+                        _ if hex_color(&had, 1.0).is_some() => had,
+                        _ => sh.default_look().1,
+                    };
+                    self.card_colors = false;
+                    sh.set_mark_look(index, style, &color);
+                }
+                Task::none()
+            }
+            BibleMsg::CardColors => {
+                self.card_colors = !self.card_colors;
+                Task::none()
+            }
+            BibleMsg::CloseCardColors => {
+                self.card_colors = false;
+                Task::none()
+            }
+            BibleMsg::CardColor(n) => {
+                self.card_colors = false;
+                if let (Some(index), Some(color)) = (self.editing, crate::state::PEN_COLORS.get(n))
+                    && let Some(mark) = sh.marks.get(index)
+                {
+                    // A plain mark given a color is a highlight in it.
+                    let style = if mark.style == MarkStyle::None { MarkStyle::Highlight } else { mark.style };
+                    sh.set_mark_look(index, style, color);
+                }
                 Task::none()
             }
             BibleMsg::AddCardTag(tag) => {
@@ -1484,7 +1605,9 @@ impl BibleTab {
                     tags.push(tag);
                     sh.set_mark_tags(index, tags);
                 }
-                Task::none()
+                // Enter adds a tag and stays for the next.
+                self.card_tags_focus = true;
+                iced::widget::operation::focus(self.card_tags_id())
             }
             BibleMsg::RemoveCardTag(tag) => {
                 if let Some(index) = self.editing
@@ -1749,6 +1872,7 @@ impl BibleTab {
             annotated: sh.annotated_verses(self.book, self.chapter_no),
             reveal: self.reveal,
             marks: self.mark_draws(sh),
+            mark_tips: self.mark_tips(sh),
             clear_token: self.clear_token,
             text_width: Some(TEXT_COLUMN),
             both_sides: false,
@@ -1861,7 +1985,7 @@ impl BibleTab {
 
     /// The tags of the mark being written in: each can be taken off, and others added, with the
     /// ones in use offered as the name is typed.
-    fn card_tags<'a>(&'a self, sh: &'a Shared, index: usize) -> Element<'a, BibleMsg> {
+    fn card_tags<'a>(&'a self, sh: &'a Shared, index: usize, with_look: bool) -> Element<'a, BibleMsg> {
         let meta = sh.settings.bible_size * 0.7;
         let tags = sh.marks.get(index).map(|m| m.tags.clone()).unwrap_or_default();
         let chip = |label: String, color: Option<Color>, msg: BibleMsg| {
@@ -1881,15 +2005,64 @@ impl BibleTab {
             let color = sh.tag_color(tag).and_then(|hex| hex_color(&hex, 1.0));
             chips = chips.push(chip(format!("#{tag} \u{00D7}"), color, BibleMsg::RemoveCardTag(tag.clone())));
         }
-        chips = chips.push(
+        // (Clicking into the box tells the tab it has the keyboard, so that Tab goes on to the words.)
+        chips = chips.push(iced::widget::mouse_area(
             iced::widget::text_input("Add tag", &self.card_tag_draft)
+                .id(self.card_tags_id())
                 .on_input(BibleMsg::CardTagDraft)
                 .on_submit(BibleMsg::AddCardTag(String::new()))
                 .size(meta)
-                .padding([1, 6])
-                .width(90),
-        );
+                .padding([2, 8])
+                .style(crate::note_tab::tag_box_style)
+                .width(100),
+        )
+        .on_press(BibleMsg::CardTagsFocused));
+        // A new mark's card also has how the mark marks the text and in what color, in a row under the tags: the color first (a ring with nothing in it while the mark is plain, and choosing one
+        // makes the mark a highlight in it), then a drop-down for the look. Their menus open over the window (the reader
+        // passes on the overlays of the cards it hosts).
+        let mut look_row = None;
+        if with_look && let Some(mark) = sh.marks.get(index) {
+            let color = (mark.style != MarkStyle::None).then(|| hex_color(&mark.color, 1.0)).flatten();
+            let open = self.card_colors;
+            let dot = button(space::horizontal())
+                .width(18)
+                .height(18)
+                .padding(0)
+                .style(move |theme: &Theme, _| button::Style {
+                    background: color.map(Into::into),
+                    border: iced::Border {
+                        radius: 9.0.into(),
+                        color: if open { theme.extended_palette().background.base.text } else { Color { a: 0.5, ..theme.extended_palette().background.base.text } },
+                        width: if open { 2.5 } else { 1.0 },
+                    },
+                    ..button::Style::default()
+                })
+                .on_press(BibleMsg::CardColors);
+            let panel = open.then(|| {
+                container(crate::color_grid(
+                    crate::state::PEN_COLORS.iter().position(|c| c.eq_ignore_ascii_case(&mark.color)).unwrap_or(usize::MAX),
+                    BibleMsg::CardColor,
+                ))
+                .padding(10)
+                .style(crate::popup_style)
+                .into()
+            });
+            look_row = Some(
+                row![
+                    popover(dot, panel, BibleMsg::CloseCardColors),
+                    pick_list(crate::note_tab::StyleChoice::ALL.to_vec(), Some(crate::note_tab::StyleChoice(mark.style)), |choice| BibleMsg::CardStyle(choice.0))
+                        .text_size(meta)
+                        .padding([1, 6]),
+                ]
+                .spacing(8)
+                .align_y(iced::Center),
+            );
+        }
+        let chips = chips.wrap();
         let mut out = column![chips].spacing(4);
+        if let Some(look) = look_row {
+            out = out.push(look);
+        }
         let offered = sh.tag_suggestions(&self.card_tag_draft, &tags, 5);
         if !offered.is_empty() {
             let mut row = row![].spacing(4);
@@ -1972,6 +2145,10 @@ impl BibleTab {
     /// A mark's card. In the floating popup (`popup`) its actions are always offered, since
     /// there is nowhere else to reach them; in the margin only while it is being written.
     pub fn card_view<'a>(&'a self, sh: &'a Shared, index: usize, popup: bool) -> Element<'a, BibleMsg> {
+        // A mark just made by Add Mark has a card of its own while it is first written.
+        if self.editing == Some(index) && self.card_new {
+            return self.new_mark_card(sh, index);
+        }
         let mark = &sh.marks[index];
         let color = hex_color(mark.shown_color(), 1.0).unwrap_or(Color::WHITE);
         let writing = self.editing == Some(index);
@@ -1989,7 +2166,8 @@ impl BibleTab {
             header = header.push(text(mark.anchor.to_string()).size(meta).style(text::secondary));
             has_header = true;
         }
-        if !mark.tags.is_empty() {
+        // (Not while it is written: the tags are there to change then, and would be said twice.)
+        if !mark.tags.is_empty() && !writing {
             header = header.push(text(mark.tags.join(", ")).size(meta).style(text::secondary));
             has_header = true;
         }
@@ -2057,7 +2235,7 @@ impl BibleTab {
             content = content.push(header);
         }
         if writing {
-            content = content.push(self.card_tags(sh, index));
+            content = content.push(self.card_tags(sh, index, false));
         }
         let content = content.push(body).push(footer);
         container(content)
@@ -2069,6 +2247,54 @@ impl BibleTab {
                     border: iced::Border { color, width: 1.0, radius: 6.0.into() },
                     ..base
                 }
+            })
+            .into()
+    }
+
+    /// The card of a mark just made by Add Mark, while it is first written: its tags (the caret begins there), how it marks the
+    /// text and in what color, and buttons, with no place for words until one is asked for (the Add note button, or Tab from
+    /// the tags). It stands in for the ordinary card, which a mark has again once the card is put away.
+    fn new_mark_card<'a>(&'a self, sh: &'a Shared, index: usize) -> Element<'a, BibleMsg> {
+        let mark = &sh.marks[index];
+        let color = hex_color(mark.shown_color(), 1.0).unwrap_or(Color::WHITE);
+        let meta = card_size(sh) * 0.7;
+        let mut content = column![].spacing(6).width(Length::Fill);
+        // (A mark on a whole verse has nothing lit in the text: say which verse.)
+        if mark.is_verse_level() {
+            content = content.push(text(mark.anchor.to_string()).size(meta).style(text::secondary));
+        }
+        content = content.push(self.card_tags(sh, index, true));
+        if self.card_note_shown || !mark.body.trim().is_empty() {
+            let module = self.module.clone();
+            content = content.push(
+                live_editor(&self.card_doc, Palette::for_theme(&sh.theme()))
+                    .id(self.card_editor_id())
+                    .on_action(BibleMsg::CardAction)
+                    .on_link(BibleMsg::OpenLink)
+                    .on_link_menu(BibleMsg::CardLinkMenu)
+                    .on_link_drag(BibleMsg::CardLinkDrag)
+                    .embed(move |target| sh.embed_for(&module, target))
+                    .size(card_size(sh))
+                    .font(sh.settings.text_font())
+                    .padding(4)
+                    .max_height(card_body_max(sh)),
+            );
+        }
+        let small = |label: &'static str, msg: BibleMsg| button(text(label).size(meta)).padding([2, 6]).style(button::text).on_press(msg);
+        let mut footer = row![].spacing(2);
+        if !self.card_note_shown && mark.body.trim().is_empty() {
+            footer = footer.push(small("Add note", BibleMsg::ShowCardNote));
+        }
+        footer = footer
+            .push(small("Open", BibleMsg::OpenMarkInWriter(index)))
+            .push(small("Unlink", BibleMsg::UnlinkMarkAt(index)))
+            .push(small("Delete", BibleMsg::DeleteMarkAt(index)));
+        container(content.push(footer))
+            .padding(10)
+            .width(Length::Fill)
+            .style(move |theme: &Theme| {
+                let base = container::rounded_box(theme);
+                container::Style { border: iced::Border { color, width: 1.0, radius: 6.0.into() }, ..base }
             })
             .into()
     }

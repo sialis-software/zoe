@@ -431,6 +431,8 @@ enum Message {
     Plans(plans_window::PlansMsg),
     /// Escape: put away the card that is open.
     EscapeCard,
+    /// Tab, while the tag box of a mark's card has the keyboard: on to the words.
+    CardTab,
     /// A menu bar item was chosen (macOS).
     Command(commands::Command),
     /// The menu bar is in place: it is told what the app is like now.
@@ -2046,6 +2048,13 @@ impl App {
                 self.reader_mode = None;
                 Task::none()
             }
+            Message::CardTab => {
+                let tab = self.tabs.iter().find_map(|(id, t)| matches!(t, Tab::Bible(b) if b.card_tags_focus && b.editing.is_some()).then_some(*id));
+                match tab {
+                    Some(id) => self.handle(Message::Bible(id, BibleMsg::CardTab)),
+                    None => Task::none(),
+                }
+            }
             Message::EscapeCard => {
                 if self.setup.is_some() {
                     self.setup = None;
@@ -2862,6 +2871,17 @@ impl App {
                     key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                     ..
                 }) if status == iced::event::Status::Ignored => Some(Message::EndReading),
+                _ => None,
+            }));
+        }
+        // Tab goes from the tag box of a mark's card on to its words.
+        if self.tabs.values().any(|t| matches!(t, Tab::Bible(b) if b.card_tags_focus && b.editing.is_some())) {
+            all.push(iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab),
+                    modifiers,
+                    ..
+                }) if !modifiers.shift() => Some(Message::CardTab),
                 _ => None,
             }));
         }
@@ -4370,6 +4390,12 @@ mod tests {
         /// Bounds of the focusable widget with this id, looked up in the live UI.
         fn bounds_of(&mut self, id: impl Into<iced::advanced::widget::Id>) -> Rectangle {
             let id = id.into();
+            self.try_bounds_of(id.clone()).unwrap_or_else(|| panic!("no focusable widget with id {id:?}"))
+        }
+
+        /// The bounds of the focusable widget `id`, if the view has one.
+        fn try_bounds_of(&mut self, id: impl Into<iced::advanced::widget::Id>) -> Option<Rectangle> {
+            let id = id.into();
             use iced::advanced::widget::{Id, Operation, operation::Focusable};
             struct Find {
                 id: Id,
@@ -4395,7 +4421,7 @@ mod tests {
             let mut find = Find { id: id.clone(), found: None };
             ui.operate(&self.renderer, &mut find);
             self.cache = ui.into_cache();
-            find.found.unwrap_or_else(|| panic!("no focusable widget with id {id:?}"))
+            find.found
         }
 
         fn click(&mut self, x: f32, y: f32) {
@@ -4612,7 +4638,7 @@ mod tests {
         let mut h = Harness::new(App::new());
         let marks = h.app.sh.marks.len();
         h.select_some_reader_text();
-        let (x, y) = h.center_of("Add Note").expect("the pen toolbar offers Add Note");
+        let (x, y) = h.center_of("Add Mark").expect("the pen toolbar offers Add Mark");
         h.move_to(x, y);
         h.press();
         h.release();
@@ -5392,7 +5418,7 @@ mod tests {
         h.click_n(300.0, 500.0, 2);
         frames(&mut h);
         assert!(h.app.bible().text_selection.is_some());
-        assert!(h.center_of("Add Note").is_some(), "the selection's toolbar is there");
+        assert!(h.center_of("Add Mark").is_some(), "the selection's toolbar is there");
         // Even a card that is somehow still open when the widget is made again is let go of.
         h.app.bible_mut().note_card = Some(bible_tab::NoteCard { content: bible_tab::NoteContent::Footnote("x".into()) });
         h.app.bible_mut().text_selection = None;
@@ -5913,7 +5939,7 @@ mod tests {
         let mut app = blank_app();
         app.bible_mut().margin_showing = true; // with a margin the selection is spent; see the narrow test
         select_so_loved(&mut app);
-        let _ = app.update(app.b(BibleMsg::AddComment));
+        let _ = app.update(app.b(BibleMsg::AddMark));
         let index = app.bible().editing.expect("a new comment is being written");
         let mark = &app.sh.marks[index];
         assert_eq!(mark.style, MarkStyle::None);
@@ -5932,10 +5958,214 @@ mod tests {
     }
 
     #[test]
+    fn add_mark_starts_in_the_tags_enter_adds_one_tab_asks_for_the_words_and_a_mark_with_tags_stays_empty() {
+        let mut app = blank_app();
+        app.bible_mut().margin_showing = true;
+        select_so_loved(&mut app);
+        let _ = app.update(app.b(BibleMsg::AddMark));
+        let index = app.bible().editing.expect("the new mark's card is open");
+        assert!(app.bible().card_tags_focus, "the tags come first");
+        assert!(app.bible().card_new && !app.bible().card_note_shown, "a card of its own, with no place for words yet");
+        // Enter adds a tag and stays in the tags for the next.
+        let _ = app.update(app.b(BibleMsg::CardTagDraft("prayer".into())));
+        let _ = app.update(app.b(BibleMsg::AddCardTag(String::new())));
+        let _ = app.update(app.b(BibleMsg::CardTagDraft("hard-sayings".into())));
+        let _ = app.update(app.b(BibleMsg::AddCardTag(String::new())));
+        assert_eq!(app.sh.marks[index].tags, ["prayer", "hard-sayings"]);
+        assert!(app.bible().card_tags_focus && app.bible().card_tag_draft.is_empty());
+        // Tab takes a tag half typed and asks for the words.
+        let _ = app.update(app.b(BibleMsg::CardTagDraft("new-birth".into())));
+        let _ = app.update(app.b(BibleMsg::CardTab));
+        assert!(!app.bible().card_tags_focus && app.bible().card_note_shown);
+        assert_eq!(app.sh.marks[index].tags, ["prayer", "hard-sayings", "new-birth"]);
+        // (Another Tab, with the words having the keyboard, does nothing.)
+        let _ = app.update(app.b(BibleMsg::CardTab));
+        assert_eq!(app.sh.marks[index].tags.len(), 3);
+        // Giving it a color makes a plain mark a highlight in it; the look can be changed after, and plain takes the color away.
+        assert_eq!(app.sh.marks[index].style, MarkStyle::None);
+        let _ = app.update(app.b(BibleMsg::CardColor(3)));
+        assert_eq!(app.sh.marks[index].style, MarkStyle::Highlight);
+        assert_eq!(app.sh.marks[index].color, crate::state::PEN_COLORS[3]);
+        let _ = app.update(app.b(BibleMsg::CardStyle(MarkStyle::Underline)));
+        assert_eq!(app.sh.marks[index].style, MarkStyle::Underline);
+        assert_eq!(app.sh.marks[index].color, crate::state::PEN_COLORS[3], "the color stays");
+        let _ = app.update(app.b(BibleMsg::CardColor(5)));
+        assert_eq!(app.sh.marks[index].style, MarkStyle::Underline, "a mark that is not plain keeps its look");
+        assert_eq!(app.sh.marks[index].color, crate::state::PEN_COLORS[5]);
+        let _ = app.update(app.b(BibleMsg::CardStyle(MarkStyle::None)));
+        assert_eq!(app.sh.marks[index].color, "", "a plain mark has none");
+        // The tags are shown by the pointer over the mark.
+        let tips: Vec<String> = app.bible().mark_tips(&app.sh)[&index].iter().map(|(tag, _)| tag.clone()).collect();
+        assert_eq!(tips, ["prayer", "hard-sayings", "new-birth"]);
+        // No words, but tags: it stays when editing stops, and the card is the ordinary one again.
+        app.finish_editing();
+        assert_eq!(app.sh.marks.len(), 1);
+        assert_eq!(app.sh.marks[0].tags.len(), 3);
+        assert!(app.sh.marks[0].body.is_empty());
+        assert!(!app.bible().card_new);
+    }
+
+    #[test]
+    fn a_new_marks_words_are_asked_for_with_a_button() {
+        let mut app = blank_app();
+        app.bible_mut().margin_showing = true;
+        select_so_loved(&mut app);
+        let _ = app.update(app.b(BibleMsg::AddMark));
+        assert!(!app.bible().card_note_shown);
+        let _ = app.update(app.b(BibleMsg::ShowCardNote));
+        assert!(app.bible().card_note_shown && !app.bible().card_tags_focus);
+    }
+
+    #[test]
+    fn the_card_of_a_new_mark_has_tags_a_color_and_a_look_and_buttons_but_no_words_until_asked_and_does_not_say_its_tags_twice() {
+        let mut app = blank_app();
+        app.zoomed = Some(app.panes[0].id);
+        app.bible_mut().margin_showing = true;
+        select_so_loved(&mut app);
+        let _ = app.update(app.b(BibleMsg::AddMark));
+        let _ = app.update(app.b(BibleMsg::AddCardTag("grace".into())));
+        let mut h = Harness::new(app);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        // The tags are in the box to change, so not also in the small print at the top.
+        assert!(h.center_of("grace").is_none(), "no small print of the tags (the chip says #grace)");
+        let (chip_x, chip_y) = h.center_of("#grace \u{00D7}").expect("the tag, to take off");
+        // Tags, a color and a look, and buttons: and no place for words.
+        assert!(h.center_of("Add note").is_some() && h.center_of("Delete").is_some());
+        let editor = h.app.bible().card_editor_id();
+        assert!(h.try_bounds_of(editor.clone()).is_none(), "no editor for the words yet");
+        // The look is a drop-down, whose menu opens over the window although the card is drawn by the reader. (Its choices are
+        // drawn, not widgets that can be found by their words, so the menu is told by what it paints.)
+        let shot = |h: &mut Harness| -> Vec<u8> {
+            let theme = h.app.theme();
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            h.cache = ui.into_cache();
+            h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK)
+        };
+        let index = h.app.bible().editing.expect("writing");
+        // (The row of the color and the look is under the tags: the color at the left, the drop-down after it.)
+        let (px, py) = (chip_x - 30.0 + 80.0, chip_y + 30.0);
+        h.cursor = mouse::Cursor::Unavailable;
+        let shut = shot(&mut h);
+        h.click(px, py);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let open = shot(&mut h);
+        let w = h.size.width as usize;
+        let differ = |a: &[u8], b: &[u8]| {
+            (py as usize + 10..py as usize + 160)
+                .flat_map(|y| (px as usize - 30..px as usize + 100).map(move |x| (x, y)))
+                .filter(|&(x, y)| a[(y * w + x) * 4..(y * w + x) * 4 + 3] != b[(y * w + x) * 4..(y * w + x) * 4 + 3])
+                .count()
+        };
+        let changed = differ(&shut, &open);
+        assert!(changed > 1000, "the menu opened under the drop-down: {changed} pixels differ");
+        // A choice in it (the first, just under the box) is taken, and the menu shuts.
+        h.click(px, py + 26.0);
+        assert_ne!(h.app.sh.marks[index].style, MarkStyle::None, "a look was chosen");
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        h.cursor = mouse::Cursor::Unavailable;
+        let after = shot(&mut h);
+        assert!(differ(&shut, &after) < changed / 2, "the menu shut");
+        // The button asks for the words, and they have a place.
+        let (x, y) = h.center_of("Add note").expect("the button");
+        h.click(x, y);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        assert!(h.app.bible().card_note_shown);
+        assert!(h.try_bounds_of(editor).is_some(), "the place for the words is there now");
+        assert!(h.center_of("Add note").is_none(), "and the button is not");
+    }
+
+    #[test]
+    fn the_look_drop_down_opens_in_a_card_that_floats_under_the_selection_too() {
+        let mut h = Harness::new(App::new());
+        let _ = h.select_some_reader_text();
+        let (x, y) = h.center_of("Add Mark").expect("the toolbar under the selection");
+        h.click(x, y);
+        let index = h.app.bible().editing.expect("writing in the card under the selection");
+        assert!(!h.app.bible().margin_showing, "no margin: the card floats under the selection");
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        // The row of the color and the look is under the tag box, the drop-down after the color.
+        let tags = { let id = h.app.bible().card_tags_id(); h.bounds_of(id) };
+        let mut chosen = false;
+        for dx in [50.0, 70.0, 90.0] {
+            let (px, py) = (tags.x + dx, tags.y + tags.height + 16.0);
+            h.click(px, py);
+            h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+            h.click(px, py + 26.0);
+            if h.app.sh.marks.get(index).is_some_and(|m| m.style != MarkStyle::None) {
+                chosen = true;
+                break;
+            }
+        }
+        assert!(chosen, "a look was chosen from the menu that opened over the card");
+    }
+
+    #[test]
+    fn pointing_at_a_mark_with_tags_draws_a_label_of_them_over_the_mark_with_its_words_on_it() {
+        let mut app = App::new();
+        app.zoomed = Some(app.panes[0].id);
+        let mut h = Harness::new(app);
+        h.size = Size::new(1500.0, 800.0);
+        h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
+        let weak = h.app.theme().extended_palette().background.weak.color.into_rgba8();
+        let shot = |h: &mut Harness| -> Vec<u8> {
+            let theme = h.app.theme();
+            let mut ui = UserInterface::build(h.app.view(), h.size, std::mem::take(&mut h.cache), &mut h.renderer);
+            ui.draw(&mut h.renderer, &theme, &iced::advanced::renderer::Style { text_color: iced::Color::WHITE }, h.cursor);
+            h.cache = ui.into_cache();
+            h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK)
+        };
+        // The label's box is a flat patch of the panel color just above the mark, with the words in a lighter color on it: what is
+        // not the panel color inside the box (the border left out) is the words. (Looked for left of the margin, whose cards
+        // are the same color.)
+        let found = |h: &mut Harness, x: f32, y: f32| -> Option<(usize, usize)> {
+            h.move_to(x, y);
+            let all = shot(h);
+            let w = h.size.width as usize;
+            let is_flat = |px: usize, py: usize| all[(py * w + px) * 4..(py * w + px) * 4 + 3] == [weak[0], weak[1], weak[2]];
+            let (mut x0, mut y0, mut x1, mut y1, mut flat) = (usize::MAX, usize::MAX, 0, 0, 0);
+            for py in (y as usize).saturating_sub(70)..(y as usize).saturating_sub(2) {
+                for px in (x as usize).saturating_sub(60)..(x as usize + 300) {
+                    if is_flat(px, py) {
+                        (x0, y0, x1, y1, flat) = (x0.min(px), y0.min(py), x1.max(px), y1.max(py), flat + 1);
+                    }
+                }
+            }
+            // (A label is a short box.)
+            if flat < 100 || y1 - y0 > 40 {
+                return None;
+            }
+            let other = ((y0 + 1)..y1).flat_map(|py| ((x0 + 1)..x1).map(move |px| (px, py))).filter(|&(px, py)| !is_flat(px, py)).count();
+            Some((flat, other))
+        };
+        h.move_to(5.0, 5.0);
+        let mut seen = None;
+        'scan: for y in (250..700).step_by(14) {
+            for x in (50..700).step_by(10) {
+                if let Some(counts) = found(&mut h, x as f32, y as f32) {
+                    seen = Some(counts);
+                    break 'scan;
+                }
+            }
+        }
+        let (flat, other) = seen.expect("pointing at a mark with tags draws a label of them");
+        assert!(other > 15, "the tags are written on it, not only the box: {flat} flat, {other} other");
+    }
+
+    #[test]
+    fn a_pen_still_opens_its_card_in_the_words() {
+        let mut app = blank_app();
+        app.bible_mut().margin_showing = true;
+        select_so_loved(&mut app);
+        let _ = app.update(app.b(BibleMsg::ApplyPen(0)));
+        assert!(app.bible().editing.is_some() && !app.bible().card_tags_focus);
+    }
+
+    #[test]
     fn an_empty_comment_is_discarded_when_editing_stops() {
         let mut app = blank_app();
         select_so_loved(&mut app);
-        let _ = app.update(app.b(BibleMsg::AddComment));
+        let _ = app.update(app.b(BibleMsg::AddMark));
         assert_eq!(app.sh.marks.len(), 1);
         let path = app.sh.marks[0].path();
         app.finish_editing();
@@ -6060,7 +6290,7 @@ mod tests {
         assert!(h.app.bible().text_selection.is_some(), "pressing a pen must not clear the selection");
         h.release();
         assert_eq!(h.app.sh.marks.len(), before + 1, "pen click adds a mark");
-        // With no margin the new mark's card opens under the selection, for a note, like Add Note.
+        // With no margin the new mark's card opens under the selection, for a note, like Add Mark.
         assert!(h.app.bible().editing.is_some(), "the mark's card is open to write in");
         assert!(h.app.bible().text_selection.is_some(), "the selection stays, for the card to sit under");
         assert!(h.center_of("Promise").is_none(), "the card takes the toolbar's place");
@@ -10731,10 +10961,10 @@ mod tests {
         app.zoomed = Some(app.panes[0].id);
         select_so_loved(&mut app);
         app.bible_mut().margin_showing = true;
-        let _ = app.update(app.b(BibleMsg::AddComment));
+        let _ = app.update(app.b(BibleMsg::AddMark));
         assert_eq!(app.sh.marks.len(), 1);
         let mut h = Harness::new(app);
-        let b = { let id = h.app.bible().card_editor_id(); h.bounds_of(id) };
+        let b = { let id = h.app.bible().card_tags_id(); h.bounds_of(id) };
         h.click(b.x + 600.0, b.y + 1100.0);
         assert!(h.app.sh.marks.is_empty(), "nothing written, nothing kept");
         assert!(h.app.bible().editing.is_none());
