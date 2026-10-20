@@ -5,6 +5,9 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 ## [Unreleased]
 
 - Every button that is only a picture now says what it does when you point at it (back and forward, the menu, search, close and new tab, the speaker, the color dots, the small crosses), with its shortcut where it has one.
+- A bar of formatting buttons above a note's text: heading level, bold, italic, strikethrough, code, bulleted, numbered and task lists, quote, divider, code block, a link, and a link to a passage or note. Each acts on the selected text or the line, is one step of undo, lights up while the caret is in what it makes, and its tooltip gives the shortcut. Cmd+K (Ctrl+K) makes a link and Cmd+Shift+X strikethrough. Settings has "Formatting buttons above a note" to hide the bar.
+- With nothing selected, bold, italic, strikethrough and code go round the word the caret is in (and come off it again) instead of making an empty pair.
+- Bold, italic and code pressed on text that has it already take it off (bold inside italic, and the reverse, no longer confuse each other), and pressed on several lines mark each line.
 
 ## [0.6.0] - 2026-10-17
 

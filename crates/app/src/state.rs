@@ -49,6 +49,8 @@ pub struct Settings {
     pub bookmarks_daily: bool,
     /// Vim key bindings in the writer (normal, insert and visual modes).
     pub vim_mode: bool,
+    /// The bar of formatting buttons above a note's text (bold, headings, lists, links…).
+    pub format_bar: bool,
     /// Reading mode shows the notes and reference material in margins either side of the text.
     pub reader_margins: bool,
 }
@@ -141,7 +143,7 @@ pub fn default_pens() -> Vec<PenDef> {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: Theme::Dark.to_string(), bible_size: 19.0, notes_size: 17.0, font: None, pens: default_pens(), reading_log_auto: false, reading_log_seconds: 30, reading_log_daily: true, bookmarks_daily: false, vim_mode: false, reader_margins: false }
+        Settings { theme: Theme::Dark.to_string(), bible_size: 19.0, notes_size: 17.0, font: None, pens: default_pens(), reading_log_auto: false, reading_log_seconds: 30, reading_log_daily: true, bookmarks_daily: false, vim_mode: false, format_bar: true, reader_margins: false }
     }
 }
 
@@ -541,6 +543,16 @@ mod tests {
         assert!(!store.settings().vim_mode);
         fs::write(dir.path().join("settings.json"), r#"{ "vim_mode": true }"#).unwrap();
         assert!(store.settings().vim_mode);
+    }
+
+    #[test]
+    fn the_format_bar_is_shown_unless_the_settings_file_says_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf());
+        fs::write(dir.path().join("settings.json"), r#"{ "theme": "Dark" }"#).unwrap();
+        assert!(store.settings().format_bar);
+        fs::write(dir.path().join("settings.json"), r#"{ "format_bar": false }"#).unwrap();
+        assert!(!store.settings().format_bar);
     }
 
     #[test]

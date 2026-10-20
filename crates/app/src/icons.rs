@@ -41,6 +41,19 @@ pub enum Icon {
     /// A page with a margin either side, shown / not shown.
     MarginsOn,
     MarginsOff,
+    // The formatting bar above a note's text.
+    Bold,
+    Italic,
+    Strike,
+    /// Code in a line.
+    Code,
+    Bullets,
+    Numbers,
+    Tasks,
+    Divider,
+    CodeBlock,
+    /// A link to a passage or a note: `[[ ]]`.
+    WikiLink,
 }
 
 impl Icon {
@@ -68,6 +81,16 @@ impl Icon {
             Icon::Collapse => include_bytes!("../assets/icons/collapse.svg"),
             Icon::MarginsOn => include_bytes!("../assets/icons/margins-on.svg"),
             Icon::MarginsOff => include_bytes!("../assets/icons/margins-off.svg"),
+            Icon::Bold => include_bytes!("../assets/icons/bold.svg"),
+            Icon::Italic => include_bytes!("../assets/icons/italic.svg"),
+            Icon::Strike => include_bytes!("../assets/icons/strike.svg"),
+            Icon::Code => include_bytes!("../assets/icons/code.svg"),
+            Icon::Bullets => include_bytes!("../assets/icons/list-bullets.svg"),
+            Icon::Numbers => include_bytes!("../assets/icons/list-numbers.svg"),
+            Icon::Tasks => include_bytes!("../assets/icons/list-tasks.svg"),
+            Icon::Divider => include_bytes!("../assets/icons/divider.svg"),
+            Icon::CodeBlock => include_bytes!("../assets/icons/code-block.svg"),
+            Icon::WikiLink => include_bytes!("../assets/icons/wikilink.svg"),
         }
     }
 
@@ -176,7 +199,7 @@ mod tests {
         let _: Element<'_, ()> = Icon::Back.arrow_button(false, "Back", ());
     }
 
-    const ALL: [Icon; 22] = [
+    const ALL: [Icon; 32] = [
         Icon::Link,
         Icon::Quote,
         Icon::Trash,
@@ -199,6 +222,16 @@ mod tests {
         Icon::Collapse,
         Icon::MarginsOn,
         Icon::MarginsOff,
+        Icon::Bold,
+        Icon::Italic,
+        Icon::Strike,
+        Icon::Code,
+        Icon::Bullets,
+        Icon::Numbers,
+        Icon::Tasks,
+        Icon::Divider,
+        Icon::CodeBlock,
+        Icon::WikiLink,
     ];
 
     #[test]

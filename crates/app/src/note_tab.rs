@@ -5,6 +5,7 @@
 
 use crate::bible_tab::{BibleTab, start_of_note};
 use crate::live_editor::{CompletionEvent, live_editor};
+use crate::commands::Shortcut;
 use crate::history::History;
 use crate::opening::Spec;
 use crate::palette::Palette;
@@ -98,6 +99,40 @@ fn dropdown_style(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A button of the formatting bar: lit while the caret is in what it makes, a quiet square otherwise.
+fn format_button_style(theme: &Theme, status: button::Status, on: bool) -> button::Style {
+    let palette = theme.extended_palette();
+    let pointed = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    let (fill, edge) = match (on, pointed) {
+        (true, _) => (Some(palette.background.strong.color), palette.primary.strong.color),
+        (false, true) => (Some(palette.background.weak.color), palette.background.strong.color),
+        (false, false) => (None, iced::Color::TRANSPARENT),
+    };
+    button::Style {
+        background: fill.map(Into::into),
+        text_color: palette.background.weak.text,
+        border: iced::Border { color: edge, width: 1.0, radius: 4.0.into() },
+        ..button::Style::default()
+    }
+}
+
+/// A level of heading in the formatting bar's list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadingChoice(pub u8);
+
+impl HeadingChoice {
+    const ALL: [HeadingChoice; 4] = [HeadingChoice(0), HeadingChoice(1), HeadingChoice(2), HeadingChoice(3)];
+}
+
+impl fmt::Display for HeadingChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            0 => f.write_str("Paragraph"),
+            n => write!(f, "Heading {n}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteChoice(pub String);
 
@@ -110,6 +145,8 @@ impl fmt::Display for NoteChoice {
 #[derive(Debug, Clone)]
 pub enum NoteMsg {
     Action(EditAction),
+    /// A button of the formatting bar: the action, and then the keyboard back in the text.
+    Format(EditAction),
     /// Something done with the list of choices for the link being written.
     Completion(CompletionEvent),
     /// The card of choices was scrolled this far.
@@ -954,7 +991,8 @@ impl NoteTab {
             };
             let changes = match &message {
                 NoteMsg::Action(a) => !selects(a),
-                NoteMsg::Vim(_)
+                NoteMsg::Format(_)
+                | NoteMsg::Vim(_)
                 | NoteMsg::Completion(_)
                 | NoteMsg::AskDelete
                 | NoteMsg::ConfirmDelete
@@ -1025,6 +1063,10 @@ impl NoteTab {
                 } else {
                     self.completion = None;
                 }
+            }
+            NoteMsg::Format(action) => {
+                let (done, request) = self.update(sh, NoteMsg::Action(action));
+                return (Task::batch([done, iced::widget::operation::focus(self.editor_id())]), request);
             }
             NoteMsg::Completion(event) => task = self.complete(sh, event),
             NoteMsg::ChoicesScrolled(y) => self.choices_offset = y,
@@ -1429,6 +1471,9 @@ impl NoteTab {
             } else if sh.settings.vim_mode {
                 editor = editor.vim(&self.vim, NoteMsg::Vim);
             }
+            if sh.settings.format_bar && !self.read_only() {
+                pane = pane.push(self.format_bar()).push(rule::horizontal(1));
+            }
             pane = pane.push(editor);
             // The bar under the text. It is always there: the pane's own buttons (split, fill the window) float
             // over its right end, and the Vim mode line is at its left. A margin note's passage, as the Bible
@@ -1482,6 +1527,61 @@ impl NoteTab {
             (nothing(), nothing())
         };
         stack![pane, behind, front].into()
+    }
+
+    /// The bar of formatting buttons above the text. A button is lit while the caret is in what it makes, and its tooltip
+    /// says what it does and which keys do the same. A pane too narrow for all of them scrolls the bar sideways.
+    fn format_bar<'a>(&self) -> Element<'a, NoteMsg> {
+        use crate::icons::Icon;
+        use md_editor::{ListKind, Wrap};
+        let now = self.doc.active_format();
+        // `keys` is the shortcut's key and whether it takes shift, if there is one.
+        let tool = |icon: Icon, name: &str, keys: Option<(char, bool)>, on: bool, action: EditAction| {
+            let tip = match keys {
+                Some((key, shift)) => format!("{name} ({})", Shortcut { shift, alt: false, key }.display()),
+                None => name.to_string(),
+            };
+            iced::widget::tooltip(
+                button(container(icon.view_text(16.0, 1.0)).center(Length::Fill))
+                    .width(28)
+                    .height(28)
+                    .padding(0)
+                    .style(move |theme: &Theme, status| format_button_style(theme, status, on))
+                    .on_press(NoteMsg::Format(action)),
+                container(text(tip).size(12)).padding(4).style(container::rounded_box),
+                iced::widget::tooltip::Position::Bottom,
+            )
+        };
+        // No tooltip: it is already a labelled control, and a tooltip stays up over the open list.
+        let heading = pick_list(HeadingChoice::ALL.to_vec(), now.heading.filter(|&n| n <= 3).map(HeadingChoice), |choice| NoteMsg::Format(EditAction::Heading(choice.0)))
+            .placeholder(now.heading.map_or("Heading".to_string(), |n| format!("Heading {n}")))
+            .text_size(13)
+            .padding([3, 8])
+            .width(110);
+        let divide = || container(rule::vertical(1)).height(18);
+        let bar = row![
+            heading,
+            divide(),
+            tool(Icon::Bold, "Bold", Some(('b', false)), now.bold, EditAction::Wrap(Wrap::Bold)),
+            tool(Icon::Italic, "Italic", Some(('i', false)), now.italic, EditAction::Wrap(Wrap::Italic)),
+            tool(Icon::Strike, "Strikethrough", Some(('x', true)), now.strike, EditAction::Wrap(Wrap::Strike)),
+            tool(Icon::Code, "Code", Some(('e', false)), now.code, EditAction::Wrap(Wrap::Code)),
+            divide(),
+            tool(Icon::Bullets, "Bulleted list", None, now.list == Some(ListKind::Bullet), EditAction::List(ListKind::Bullet)),
+            tool(Icon::Numbers, "Numbered list", None, now.list == Some(ListKind::Numbered), EditAction::List(ListKind::Numbered)),
+            tool(Icon::Tasks, "Task list", None, now.list == Some(ListKind::Task), EditAction::List(ListKind::Task)),
+            divide(),
+            tool(Icon::Quote, "Quote", None, now.quote, EditAction::Quote),
+            tool(Icon::Divider, "Divider", None, false, EditAction::Divider),
+            tool(Icon::CodeBlock, "Code block", None, now.code_block, EditAction::CodeBlock),
+            divide(),
+            tool(Icon::Link, "Link", Some(('k', false)), now.link, EditAction::Link),
+            tool(Icon::WikiLink, "Link to a passage or note", None, false, EditAction::WikiLink),
+        ]
+        .spacing(2)
+        .align_y(iced::Center);
+        let sideways = scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0));
+        container(scrollable(container(bar).padding([0, 16])).direction(sideways)).padding([4, 0]).into()
     }
 
     /// The mode line under the text: "-- NORMAL --", and the command being typed.

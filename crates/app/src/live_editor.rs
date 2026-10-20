@@ -1646,6 +1646,8 @@ impl<Message> LiveEditor<'_, Message> {
                 ("b", _) => Some(Action::Wrap(Wrap::Bold)),
                 ("i", _) => Some(Action::Wrap(Wrap::Italic)),
                 ("e", _) => Some(Action::Wrap(Wrap::Code)),
+                ("k", false) => Some(Action::Link),
+                ("x", true) => Some(Action::Wrap(Wrap::Strike)),
                 ("c", _) => {
                     if let Some(selected) = self.doc.selected_text() {
                         clipboard.write(clipboard::Kind::Standard, self.copy_as.map_or(selected.clone(), |f| f(&selected)));

@@ -409,6 +409,7 @@ enum Message {
     SetReadingDaily(bool),
     SetBookmarksDaily(bool),
     SetVimMode(bool),
+    SetFormatBar(bool),
     /// A moment passes: a chapter that has been in front of the reader long enough was read.
     ReadingTick,
     /// The pens (tag shortcuts): the one being named, and changes to them.
@@ -1939,15 +1940,16 @@ impl App {
             Message::SetFont(FontChoice(font)) => self.change_settings(|s| s.font = font),
             // The look of the app only: the pens are the vault's own and are kept.
             Message::ResetSettings => self.change_settings(|s| {
-                let (pens, auto, seconds, daily, vim) =
-                    (std::mem::take(&mut s.pens), s.reading_log_auto, s.reading_log_seconds, s.reading_log_daily, s.vim_mode);
-                *s = Settings { pens, reading_log_auto: auto, reading_log_seconds: seconds, reading_log_daily: daily, vim_mode: vim, ..Settings::default() };
+                let (pens, auto, seconds, daily, vim, bar) =
+                    (std::mem::take(&mut s.pens), s.reading_log_auto, s.reading_log_seconds, s.reading_log_daily, s.vim_mode, s.format_bar);
+                *s = Settings { pens, reading_log_auto: auto, reading_log_seconds: seconds, reading_log_daily: daily, vim_mode: vim, format_bar: bar, ..Settings::default() };
             }),
             Message::SetReadingAuto(on) => self.change_settings(|s| s.reading_log_auto = on),
             Message::SetReadingSeconds(n) => self.change_settings(|s| s.reading_log_seconds = n),
             Message::SetReadingDaily(on) => self.change_settings(|s| s.reading_log_daily = on),
             Message::SetBookmarksDaily(on) => self.change_settings(|s| s.bookmarks_daily = on),
             Message::SetVimMode(on) => self.change_settings(|s| s.vim_mode = on),
+            Message::SetFormatBar(on) => self.change_settings(|s| s.format_bar = on),
             Message::ReadingTick => {
                 self.note_reading(std::time::Instant::now());
                 Task::none()
@@ -3094,7 +3096,12 @@ impl App {
             ),
             section(
                 "Writer",
-                checkbox(settings.vim_mode).label("Vim key bindings in the writer").on_toggle(Message::SetVimMode).size(16).text_size(13).into(),
+                column![
+                    checkbox(settings.format_bar).label("Formatting buttons above a note").on_toggle(Message::SetFormatBar).size(16).text_size(13),
+                    checkbox(settings.vim_mode).label("Vim key bindings in the writer").on_toggle(Message::SetVimMode).size(16).text_size(13),
+                ]
+                .spacing(10)
+                .into(),
             ),
             button(text("Reset appearance").size(13)).padding([4, 10]).style(button::secondary).on_press(Message::ResetSettings),
         ]
@@ -6632,6 +6639,42 @@ mod tests {
         // Not in Normal mode: nothing is being typed.
         h.named(Named::Escape);
         assert!(h.app.note().completion.is_none());
+    }
+
+    #[test]
+    fn the_formatting_bar_and_its_keys_edit_the_note_and_are_shut_out_of_the_library() {
+        let mut app = app_with_writer("see this now");
+        let id = app.nid();
+        let _ = app.update(Message::Note(id, NoteMsg::Action(EditAction::Select(4..8))));
+        let _ = app.update(Message::Note(id, NoteMsg::Format(EditAction::Wrap(md_editor::Wrap::Bold))));
+        assert_eq!(app.note().doc.source(), "see **this** now");
+        assert!(app.note().doc.active_format().bold, "the button shows as pressed with the caret in bold text");
+        assert_eq!(app.sh.notes[&app.note().path], "see **this** now", "kept in the vault's copy as well");
+        let _ = app.update(Message::Note(id, NoteMsg::Format(EditAction::Heading(2))));
+        assert_eq!(app.note().doc.source(), "## see **this** now");
+        let _ = app.update(Message::Note(id, NoteMsg::Action(EditAction::Undo)));
+        let _ = app.update(Message::Note(id, NoteMsg::Action(EditAction::Undo)));
+        assert_eq!(app.note().doc.source(), "see this now", "each button is one step of undo");
+
+        // The keys: Cmd+Shift+X for strikethrough, Cmd+K for a link.
+        let mut h = Harness::new(app);
+        focus_writer(&mut h);
+        h.shortcut("a", Modifiers::default());
+        h.shortcut("x", Modifiers::SHIFT);
+        assert_eq!(h.app.note().doc.source(), "~~see this now~~");
+        h.shortcut("x", Modifiers::SHIFT);
+        h.shortcut("k", Modifiers::default());
+        assert_eq!(h.app.note().doc.source(), "[see this now]()");
+
+        // A note of the library is not written in.
+        let mut app = App::new();
+        let path = "library/Morning and Evening/01-01.md";
+        app.sh.notes.insert(path.into(), "# January 1\n\nWanderings.\n".into());
+        let id = app.nid();
+        app.open_note(path.into());
+        let _ = app.update(Message::Note(id, NoteMsg::Action(EditAction::SelectAll)));
+        let _ = app.update(Message::Note(id, NoteMsg::Format(EditAction::Quote)));
+        assert_eq!(app.note().doc.source(), "# January 1\n\nWanderings.\n");
     }
 
     #[test]

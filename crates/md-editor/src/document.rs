@@ -7,6 +7,10 @@ use crate::render::Reveal;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
+mod format;
+
+pub use format::{Active, ListKind};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     /// The fixed end.
@@ -86,6 +90,20 @@ pub enum Action {
     Undo,
     Redo,
     Wrap(Wrap),
+    /// Make the lines of the selection headings of this level (1 to 6), or paragraphs (0).
+    Heading(u8),
+    /// Make the lines of the selection a list of this kind, or plain lines if they are already.
+    List(ListKind),
+    /// Quote the lines of the selection, or take the quote off if they are quoted.
+    Quote,
+    /// A horizontal rule below the selection.
+    Divider,
+    /// Fence the lines of the selection as code, or take the fences off.
+    CodeBlock,
+    /// Link the selection to an address, or take the link off.
+    Link,
+    /// Put `[[` and `]]` round the selection, for a link to a passage or a note.
+    WikiLink,
     /// Flip the checkbox of the task item on the line holding this offset.
     ToggleTask(usize),
     Indent,
@@ -408,6 +426,13 @@ impl Document {
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::Wrap(wrap) => self.toggle_wrap(wrap),
+            Action::Heading(level) => self.set_heading(level),
+            Action::List(kind) => self.toggle_list(kind),
+            Action::Quote => self.toggle_quote(),
+            Action::Divider => self.divider(),
+            Action::CodeBlock => self.toggle_code_block(),
+            Action::Link => self.toggle_link(),
+            Action::WikiLink => self.wiki_link(),
             Action::ToggleTask(offset) => self.toggle_task(offset),
             Action::Indent => self.indent(),
             Action::Outdent => self.outdent(),
@@ -677,36 +702,6 @@ impl Document {
             inserted: if done { " " } else { "x" }.to_string(),
         };
         self.apply_step(vec![edit], before, before, None);
-    }
-
-    fn toggle_wrap(&mut self, wrap: Wrap) {
-        let m = wrap.marker();
-        let sel = self.selection;
-        let r = sel.range();
-        let before = sel;
-        let src = &self.source;
-        let wrapped_outside = src[..r.start].ends_with(m) && src[r.end..].starts_with(m);
-        let wrapped_inside = r.len() >= 2 * m.len() && src[r.clone()].starts_with(m) && src[r.clone()].ends_with(m);
-        let (edits, after) = if wrapped_outside && !r.is_empty() {
-            let edits = vec![
-                Edit { at: r.end, removed: m.into(), inserted: String::new() },
-                Edit { at: r.start - m.len(), removed: m.into(), inserted: String::new() },
-            ];
-            (edits, Selection { anchor: r.start - m.len(), head: r.end - m.len() })
-        } else if wrapped_inside {
-            let edits = vec![
-                Edit { at: r.end - m.len(), removed: m.into(), inserted: String::new() },
-                Edit { at: r.start, removed: m.into(), inserted: String::new() },
-            ];
-            (edits, Selection { anchor: r.start, head: r.end - 2 * m.len() })
-        } else {
-            let edits = vec![
-                Edit { at: r.end, removed: String::new(), inserted: m.into() },
-                Edit { at: r.start, removed: String::new(), inserted: m.into() },
-            ];
-            (edits, Selection { anchor: r.start + m.len(), head: r.end + m.len() })
-        };
-        self.apply_step(edits, before, after, None);
     }
 
     fn indent(&mut self) {
