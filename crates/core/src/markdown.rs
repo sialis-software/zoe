@@ -51,9 +51,15 @@ fn scan(line: &str, classify: fn(&str) -> LinkTarget) -> Vec<WikiLink> {
     while let Some(open) = line[from..].find("[[").map(|i| i + from) {
         let Some(close) = line[open + 2..].find("]]").map(|i| i + open + 2) else { break };
         let inner = &line[open + 2..close];
+        // Another `[[` before the `]]` means this one opens nothing (a `[[` in code, say, in "type `[[` to link to a
+        // note: [[A]]"): go on from it, so that the link after it is still found.
+        if inner.contains("[[") {
+            from = open + 2;
+            continue;
+        }
         let embed = line[..open].ends_with('!');
         let start = if embed { open - 1 } else { open };
-        if !inner.trim().is_empty() && !inner.contains("[[") {
+        if !inner.trim().is_empty() {
             let (target, display) = match inner.split_once('|') {
                 Some((t, d)) => (t.trim(), Some(d.trim().to_string())),
                 None => (inner.trim(), None),
@@ -369,6 +375,13 @@ pub fn heading_offset(text: &str, heading: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use scripture::Book;
+
+    #[test]
+    fn a_stray_opener_before_a_link_does_not_swallow_it() {
+        let line = "Type `[[` to link to a note: [[My first note]] does not exist, and `[[@` is for [[@John 3:16]] or [[Romans 8]].";
+        let found: Vec<&str> = find_links(line).iter().map(|l| &line[l.span.clone()]).collect();
+        assert_eq!(found, ["[[My first note]]", "[[@John 3:16]]", "[[Romans 8]]"]);
+    }
 
     #[test]
     fn finds_verse_note_and_strongs_links_by_their_markers() {
