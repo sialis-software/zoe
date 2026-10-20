@@ -129,8 +129,11 @@ fn has_text(raw: &str) -> bool {
 fn check_lexicon(name: &str) {
     let lib = Library::open(&sword::test_roots());
     let Some(module) = lib.get(name) else { return eprintln!("skipped: {name} is not installed") };
-    let Some(text) = Command::new("mod2imp").arg(name).env("SWORD_PATH", &module.root).output().ok().filter(|o| o.status.success())
-    else {
+    // SWORD also reads `~/.sword`, and a module of the same name there (a copy of another edition, say) would be read in place
+    // of this one: so it is run with a home that has nothing in it, and sees only the folder the module is in.
+    let home = tempfile::tempdir().unwrap();
+    let ran = Command::new("mod2imp").arg(name).env("SWORD_PATH", &module.root).env("HOME", home.path()).output().ok().filter(|o| o.status.success());
+    let Some(text) = ran else {
         return eprintln!("skipped: mod2imp is not available");
     };
     let text = String::from_utf8_lossy(&text.stdout).into_owned();
