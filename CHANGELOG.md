@@ -4,6 +4,7 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+- In the writer, a line break with no blank line is shown as a small gap, a new paragraph, where Markdown would run the two lines together. A blank line is still a bigger gap. (The file is unchanged: it is the way it is shown that differs from Markdown's.)
 ## [0.7.0] - 2026-10-20
 
 - In a note tab the first actions of the menu (new note, copy link, backlinks) are buttons beside it while the pane is wide enough, and are in the menu again, last first, as it narrows. Rename, show or hide formatting, and delete are only in the menu, which is left out when nothing is in it.

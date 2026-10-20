@@ -22,7 +22,7 @@ use iced::advanced::{Clipboard, InputMethod, Renderer as _, Shell, Widget, clipb
 use iced::{
     Color, Element, Event, Font, Length, Padding, Pixels, Point, Rectangle, Size, Theme, alignment, font, keyboard,
 };
-use md_editor::{Action, Deco, Document, Motion, Rendered, Reveal, Role, Vim, VimKey, VimMode, Wrap, render};
+use md_editor::{Action, Deco, Document, Kind, Motion, Rendered, Reveal, Role, Vim, VimKey, VimMode, Wrap, render};
 use std::borrow::Cow;
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -38,6 +38,9 @@ const GUTTER: f32 = 24.0;
 const QUOTE_INDENT: f32 = 16.0;
 /// Indent per list nesting level.
 const LEVEL_INDENT: f32 = 22.0;
+/// The space between two lines of text with no blank line between them, in body lines: less than a blank line, more than
+/// none, so that a line break reads as a new paragraph (a departure from Markdown, which runs the lines together).
+const PARAGRAPH_GAP: f32 = 0.35;
 /// Padding inside a code line's background.
 const CODE_PAD: f32 = 8.0;
 /// A rendered line that is only hidden syntax (a code fence) keeps this much height.
@@ -786,6 +789,9 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
             let rendered = render(source, block, &reveal);
             if hidden == 0 || i > hidden {
                 y += rendered.gap_before * line_px;
+                if i > 0 && matches!(block.kind, Kind::Paragraph) && matches!(blocks[i - 1].kind, Kind::Paragraph) {
+                    y += PARAGRAPH_GAP * line_px;
+                }
             }
 
             let indent = rendered.level as f32 * LEVEL_INDENT
