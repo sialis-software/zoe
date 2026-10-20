@@ -497,6 +497,8 @@ pub struct NoteTab {
     pub renaming: Option<String>,
     /// The hamburger menu is open.
     pub menu_open: bool,
+    /// How many of the menu's first actions the header shows as buttons of their own, as of the last time it was laid out.
+    standalone: std::cell::Cell<usize>,
     /// The frontmatter section above the text is open (it is folded to one line until it is asked for).
     pub front_open: bool,
     /// Waiting for a selection in a Bible to be this note's passage (`PickText`).
@@ -678,6 +680,7 @@ impl NoteTab {
             tag_draft: String::new(),
             renaming: None,
             menu_open: false,
+            standalone: std::cell::Cell::new(0),
             front_open: false,
             picking: false,
             scroll: 0.0,
@@ -1366,6 +1369,11 @@ impl NoteTab {
     pub fn view<'a>(&'a self, sh: &'a Shared, reference: Option<&'a BibleTab>, outer: crate::shared::Outer) -> Element<'a, NoteMsg> {
         // The header bar, like the Bible tab's: the selector on the left, actions on the right.
         // Controls are as tall as the Bible tab's pickers so the two bars line up.
+        // The actions the menu lists. Those first in it are buttons of their own in the bar while there is room for them,
+        // and the menu has them all the same.
+        let actions = self.menu_actions(sh);
+        let in_menu_only = self.menu_only_actions(sh).len();
+        let header = container(iced::widget::responsive(move |size| {
         let open = self.picker.is_some();
         let square = |icon: Element<'a, NoteMsg>, msg: NoteMsg| {
             button(container(icon).center(Length::Fill))
@@ -1404,7 +1412,7 @@ impl NoteTab {
             .into(),
         };
         let arrow = |icon: crate::icons::Icon, on: bool, tip: String, msg: NoteMsg| icon.arrow_button(on, tip, msg);
-        let mut header = row![
+        let header = row![
             row![
                 arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, crate::commands::tip("Back", crate::commands::Command::Back), NoteMsg::Back),
                 arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, crate::commands::tip("Forward", crate::commands::Command::Forward), NoteMsg::Forward),
@@ -1414,8 +1422,23 @@ impl NoteTab {
         ]
         .spacing(16)
         .align_y(iced::Center);
-        // The menu at the right edge, as in the Bible tab.
-        header = header.push(crate::icons::with_tip(square(crate::icons::Icon::Menu.view(18.0), NoteMsg::ToggleMenu), "Open menu", iced::widget::tooltip::Position::Bottom));
+        // The menu at the right edge, as in the Bible tab, with the first of its actions beside it as far as the bar has room
+        // (what the back and forward arrows, the menu, the gaps and a selector with room for a long name take is left). An
+        // action that is a button is not in the menu, and with none left in it there is no menu.
+        let room = ((size.width - 66.0 - 31.0 - 32.0 - 300.0) / (CONTROL_HEIGHT as f32 + 4.0)).floor().max(0.0) as usize;
+        let shown = room.min(actions.len());
+        self.standalone.set(shown);
+        let mut right = row![].spacing(4).align_y(iced::Center);
+        for (icon, tip, msg) in actions.iter().take(shown).cloned() {
+            right = right.push(crate::icons::with_tip(square(icon.view(18.0), msg), tip, iced::widget::tooltip::Position::Bottom));
+        }
+        if actions.len() - shown + in_menu_only > 0 {
+            right = right.push(crate::icons::with_tip(square(crate::icons::Icon::Menu.view(18.0), NoteMsg::ToggleMenu), "Open menu", iced::widget::tooltip::Position::Bottom));
+        }
+        header.push(right).into()
+
+        }))
+        .height(CONTROL_HEIGHT);
 
         // With no note at all there is nothing to select or edit: just a way to make one.
         let no_notes = sh.first_ordinary_note().is_empty() && !sh.notes.contains_key(&self.path);
@@ -1619,29 +1642,45 @@ impl NoteTab {
             .into()
     }
 
-    /// What can be done: start a new note, rename this one (not a margin note, which is named by
-    /// its passage), delete it.
-    fn menu_panel<'a>(&self, sh: &Shared) -> Element<'a, NoteMsg> {
-        let item = |icon: crate::icons::Icon, label: &'static str, msg: NoteMsg| {
-            button(row![icon.view(16.0), text(label).size(14)].spacing(10).align_y(iced::Center))
-                .width(Length::Fill)
-                .padding([6, 10])
-                .style(button::text)
-                .on_press(msg)
-        };
-        let mut items = column![item(crate::icons::Icon::Plus, "New note\u{2026}", NoteMsg::NewNote)].spacing(2);
-        items = items.push(item(crate::icons::Icon::Link, "Copy link", NoteMsg::CopyLink));
+    /// What can be done, in the order of the menu: start a new note, copy a link to this one, see what links here (these
+    /// three may be buttons of the header's own, which is why they come first), rename it (not a margin note, which is
+    /// named by its passage), show or hide the formatting buttons, delete it (these only in the menu).
+    fn menu_actions(&self, sh: &Shared) -> Vec<(crate::icons::Icon, &'static str, NoteMsg)> {
+        use crate::icons::Icon;
+        let mut out = vec![(Icon::Plus, "New note\u{2026}", NoteMsg::NewNote), (Icon::Link, "Copy link", NoteMsg::CopyLink)];
         if self.open_mark_index(sh).is_none() {
-            items = items.push(item(crate::icons::Icon::Backlinks, "Backlinks", NoteMsg::OpenBacklinks));
-            if !self.read_only() && !self.is_log() {
-                items = items.push(item(crate::icons::Icon::Pencil, "Rename", NoteMsg::StartRename));
-            }
+            out.push((Icon::Backlinks, "Backlinks", NoteMsg::OpenBacklinks));
+        }
+        out
+    }
+
+    /// The actions that only the menu has.
+    fn menu_only_actions(&self, sh: &Shared) -> Vec<(crate::icons::Icon, &'static str, NoteMsg)> {
+        use crate::icons::Icon;
+        let mut out = Vec::new();
+        if self.open_mark_index(sh).is_none() && !self.read_only() && !self.is_log() {
+            out.push((Icon::Pencil, "Rename", NoteMsg::StartRename));
         }
         if !self.read_only() {
-            let label = if sh.settings.format_bar { "Hide formatting" } else { "Show formatting" };
-            items = items.push(item(crate::icons::Icon::Bold, label, NoteMsg::ToggleFormatBar));
-            items = items.push(item(crate::icons::Icon::Trash, "Delete", NoteMsg::AskDelete));
+            out.push((Icon::Bold, if sh.settings.format_bar { "Hide formatting" } else { "Show formatting" }, NoteMsg::ToggleFormatBar));
+            out.push((Icon::Trash, "Delete", NoteMsg::AskDelete));
         }
+        out
+    }
+
+    /// The menu: what the header does not show as buttons of their own (the first of `menu_actions`, as many as it has
+    /// room for), and the actions that are only here.
+    fn menu_panel<'a>(&self, sh: &Shared) -> Element<'a, NoteMsg> {
+        let shown = self.menu_actions(sh).into_iter().skip(self.standalone.get()).chain(self.menu_only_actions(sh));
+        let items = shown.fold(column![].spacing(2), |items, (icon, label, msg)| {
+            items.push(
+                button(row![icon.view(16.0), text(label).size(14)].spacing(10).align_y(iced::Center))
+                    .width(Length::Fill)
+                    .padding([6, 10])
+                    .style(button::text)
+                    .on_press(msg),
+            )
+        });
         container(items).padding(6).width(170).style(crate::popup_style).into()
     }
 
