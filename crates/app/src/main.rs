@@ -5475,7 +5475,9 @@ mod tests {
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
         assert!(h.center_of("John 3 was read on 2 days").is_some());
         assert!(h.center_of("2025-01-02").is_some() && h.center_of(&format!("{today}  \u{b7}  today")).is_some());
+        assert!(h.app.bible().read_card);
         let _ = h.app.update(Message::Bible(id, BibleMsg::OpenReadingLog));
+        assert!(!h.app.bible().read_card, "the card is put away when it opens the log");
         assert_eq!(h.app.log().path, crate::shared::READING_LOG, "the log has a tab of its own");
         assert!(matches!(h.app.tabs.get(&h.app.panes.iter().find_map(|p| p.active.filter(|a| *a == h.app.lid())).unwrap()), Some(Tab::Log(_))), "and it is shown");
         // Pressing the check takes the mark back (from the log, and the day's note).

@@ -1267,6 +1267,7 @@ impl BibleTab {
                 Task::none()
             }
             BibleMsg::OpenReadingLog => {
+                self.read_card = false;
                 request = Some(Request::OpenNote(crate::shared::READING_LOG.to_string()));
                 Task::none()
             }
