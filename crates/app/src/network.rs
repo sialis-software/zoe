@@ -47,7 +47,16 @@ impl App {
         self.sh.toast(if on { "Persecution mode is on" } else { "Persecution mode is off" });
     }
 
-    /// The switch, with what it does under it (the settings and the first run's window).
+    /// The switch alone, with a few words of what it does as a tooltip (the first run's window).
+    pub fn persecution_checkbox(&self) -> Element<'_, Message> {
+        crate::icons::with_tip(
+            checkbox(blocked()).label("Persecution mode").on_toggle(Message::SetPersecution).size(16).text_size(13),
+            "Turns off all network use",
+            iced::widget::tooltip::Position::Top,
+        )
+    }
+
+    /// The switch, with what it does under it (the settings).
     pub fn persecution_switch(&self) -> Element<'_, Message> {
         let faint = |t: &'static str| text(t).size(11).style(text::secondary);
         column![

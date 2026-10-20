@@ -4,6 +4,7 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+- The first run's welcome window is simpler: the Create vault button is in the middle, the folder is in dim text under it, and Persecution mode is a single switch at the foot, with a few words of what it does as a tooltip.
 - A new vault has a note, "Welcome to Zoe", that shows the editor by example: links to notes, headings and passages, a verse quoted from the Bible, and a list of tasks to tick.
 - The formatting bar has a button at its right end to hide it (it comes back from "Show formatting" in the note's menu, or from Settings), and sits closer under the line above it.
 - A `[[` that opens nothing (typed in code, say, before a link on the same line) no longer hides the link after it.

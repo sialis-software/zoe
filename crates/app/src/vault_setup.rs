@@ -377,42 +377,41 @@ impl App {
         }
         .spacing(8);
         let target = self.welcome_target();
-        let shown = target.as_deref().map(tidy).unwrap_or_else(|| "No folder to keep it in".into());
-        let found = target.as_deref().map(live::scan);
-        let mut place = column![
-            text("Your vault will be created in").size(12).style(text::secondary),
-            text(shown).size(14),
-        ]
-        .spacing(3);
-        match found {
-            Some(scan) if scan.notes > 0 => {
+        // Where the vault will be, in dim text under the button that makes it.
+        let mut place = column![].spacing(3).align_x(iced::Center);
+        if let Some(folder) = &target {
+            place = place.push(faint(tidy(folder)));
+            let scan = live::scan(folder);
+            if scan.notes > 0 {
                 place = place.push(faint(format!("That folder already has {}: they are used as they are.", notes_of(&scan))));
             }
-            _ => place = place.push(faint("A blank vault, with note templates (Prayer list, Topic, Daily, Blank) to edit.".into())),
         }
-        let mut buttons = row![
-            button(text("Choose another folder\u{2026}").size(12))
-                .padding([4, 10])
-                .style(button::secondary)
-                .on_press(Message::Vault(VaultMsg::WelcomeChoose)),
+        let mut actions = row![].spacing(8).align_y(iced::Center);
+        if let Some(dir) = &missing {
+            actions = actions.push(button(text("Try again").size(14)).padding([8, 24]).style(button::secondary).on_press_maybe(dir.is_dir().then_some(Message::Vault(VaultMsg::Retry))));
+        }
+        actions = actions.push(button(text("Create vault").size(14)).padding([8, 24]).on_press_maybe(target.is_some().then_some(Message::Vault(VaultMsg::WelcomeCreate))));
+        let mut other = row![
+            button(text("Choose another folder\u{2026}").size(12)).padding([4, 10]).style(button::text).on_press(Message::Vault(VaultMsg::WelcomeChoose)),
         ]
         .spacing(8);
         if self.welcome_folder.is_some() {
-            buttons = buttons.push(button(text("Use the default").size(12)).padding([4, 10]).style(button::text).on_press(Message::Vault(VaultMsg::WelcomePicked(None))));
+            other = other.push(button(text("Use the default").size(12)).padding([4, 10]).style(button::text).on_press(Message::Vault(VaultMsg::WelcomePicked(None))));
         }
-        let mut actions = row![space::horizontal()].spacing(8);
+        let mut middle = column![actions, place, other].spacing(10).align_x(iced::Center);
         if let Some(dir) = &missing {
-            actions = actions.push(button(text("Try again").size(13)).padding([5, 14]).style(button::secondary).on_press_maybe(dir.is_dir().then_some(Message::Vault(VaultMsg::Retry))));
-        }
-        actions = actions.push(button(text("Create vault").size(13)).padding([5, 14]).on_press_maybe(target.is_some().then_some(Message::Vault(VaultMsg::WelcomeCreate))));
-        let mut page = column![intro, place, buttons, self.persecution_switch()].spacing(20);
-        if let Some(dir) = &missing {
-            page = page.push(faint(format!("It was at {}.", tidy(dir))));
+            middle = middle.push(faint(format!("It was at {}.", tidy(dir))));
         }
         if let Some(error) = self.welcome_error.as_ref() {
-            page = page.push(text(format!("Could not use this folder: {error}")).size(12).style(text::danger));
+            middle = middle.push(text(format!("Could not use this folder: {error}")).size(12).style(text::danger));
         }
-        let page = column![container(page).height(Length::Fill), actions].spacing(12);
+        // The create button is in the middle of the window, and the one switch is at the foot of it.
+        let page = column![
+            intro,
+            container(middle).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).center_y(Length::Fill),
+            self.persecution_checkbox(),
+        ]
+        .spacing(12);
         container(page).padding(28).width(Length::Fill).height(Length::Fill).into()
     }
 
