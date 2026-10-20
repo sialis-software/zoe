@@ -47,6 +47,7 @@ mod split;
 mod upgrade;
 mod state;
 mod vault_setup;
+mod welcome;
 mod workspace;
 
 use backlinks_tab::{BacklinksMsg, BacklinksTab, Target};

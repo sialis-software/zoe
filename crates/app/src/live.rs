@@ -441,8 +441,12 @@ pub fn load_vault(backend: &dyn StudyBackend, dir: &Path, index: &Path, options:
             }
         }
     }
-    // The starting plans are library notes, written once, as the vault is made.
+    // The starting plans are library notes, written once, as the vault is made, and so is the note that teaches the editor.
     if options.plans {
+        let welcome = crate::welcome::WELCOME_NOTE.to_string();
+        if !notes.contains_key(&welcome) && vault.write(&welcome, crate::welcome::welcome_note()).is_ok() {
+            notes.insert(welcome, crate::welcome::welcome_note().to_string());
+        }
         for plan in study_core::starter_plans::starter_plans() {
             for (path, text) in plan.to_files() {
                 if !notes.contains_key(&path) && vault.write(&path, &text).is_ok() {

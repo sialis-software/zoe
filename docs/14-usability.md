@@ -36,11 +36,9 @@ Items 2 onward come from a read through the app crate (`crates/app/src`). They a
 
 ## 2. A first-run welcome and short tour
 
-**Status: built, not yet released.** `tour.rs`. Open: the welcome note is not opened automatically; the "open a passage" step ticks on any chapter change; it points at controls by name in its hints, not with highlights on them.
+**Status: the sample note is built; the tour is not wanted.** A new vault has `notes/Welcome to Zoe.md` (`welcome.rs`), which teaches the editor by example. A card of steps over the window was built and dropped: the note is enough.
 
-**Finding.** `bundled.rs` installs a Bible and the Strong's dictionaries on first run so there is something to read, but nothing then tells the user what the app is for or where to start. The ideas that matter (panes and tabs, margins, marks and tags, backlinks, reading plans, the vault of notes) are not visible from a blank window.
-
-**Suggestion.** After the first run, one welcome card with three or four steps: open a passage, click a Strong's word, add a mark, make a note. Each step points at the real control and is checked off when done. The card can be skipped, is never shown again by itself, and is reopened from Help ("Take the tour again"). A sample note in a new vault that uses wikilinks, a verse embed, and a task list teaches the editor by example.
+**Finding.** `bundled.rs` installs a Bible and the Strong's dictionaries on first run so there is something to read, but nothing then tells the user what the app is for or where to start.
 
 ## 3. Tooltips on every icon-only button
 

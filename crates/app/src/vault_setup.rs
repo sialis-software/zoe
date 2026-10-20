@@ -748,12 +748,33 @@ mod tests {
         let _ = app.vault_message(VaultMsg::WelcomeCreate);
         assert!(app.onboarding.is_none() && app.welcome_window.is_none());
         assert!(home.path().join("vault/templates").is_dir());
-        assert!(!app.sh.notes.keys().any(|p| !p.starts_with("templates/") && !p.starts_with("library/")), "blank: only the templates and the starting plans");
+        assert!(
+            !app.sh.notes.keys().any(|p| !p.starts_with("templates/") && !p.starts_with("library/") && p != crate::welcome::WELCOME_NOTE),
+            "blank: only the templates, the starting plans and the note that teaches the editor"
+        );
+        assert_eq!(app.sh.notes.get(crate::welcome::WELCOME_NOTE).map(String::as_str), Some(crate::welcome::welcome_note()));
         let plans = study_core::plan::find_plans(&app.sh.notes);
         for name in ["M'Cheyne", "Bible in a year", "Chronological"] {
             assert!(plans.iter().any(|p| p.name == name && p.days.len() == 365 && p.problems.is_empty()), "{name} is in the library");
         }
         assert!(app.manager_window.is_some(), "the module manager follows");
+    }
+
+    #[test]
+    fn the_welcome_note_is_written_once_when_a_vault_is_made_and_never_replaces_a_note() {
+        let (mut app, _home) = app_with_home();
+        let other = tempfile::tempdir().unwrap();
+        let _ = app.switch_vault(other.path().into(), Options { samples: Samples::Never, templates: true, plans: true }).unwrap();
+        assert!(app.sh.notes.contains_key(crate::welcome::WELCOME_NOTE));
+        // A note of that name is never replaced, and none is added to a vault that is only opened.
+        let mine = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mine.path().join("notes")).unwrap();
+        std::fs::write(mine.path().join(crate::welcome::WELCOME_NOTE), "mine").unwrap();
+        let _ = app.switch_vault(mine.path().into(), Options { samples: Samples::Never, templates: false, plans: true }).unwrap();
+        assert_eq!(app.sh.notes.get(crate::welcome::WELCOME_NOTE).map(String::as_str), Some("mine"));
+        let plain = tempfile::tempdir().unwrap();
+        let _ = app.switch_vault(plain.path().into(), Options { samples: Samples::Never, templates: false, plans: false }).unwrap();
+        assert!(!app.sh.notes.contains_key(crate::welcome::WELCOME_NOTE));
     }
 
     #[test]
