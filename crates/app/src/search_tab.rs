@@ -310,7 +310,7 @@ impl SearchTab {
     /// One verse: where it is, and its words with the matches marked.
     fn row_of<'a>(&'a self, sh: &'a Shared, ran: &'a Ran, found: &'a Found) -> Element<'a, SearchMsg> {
         use iced::widget::{rich_text, span};
-        let size = sh.settings.notes_size * 0.9;
+        let size = crate::state::NOTES_SIZE * 0.9;
         let base = sh.settings.text_font();
         let dark = sh.is_dark();
         let marked = Color::from_rgba(1.0, 0.82, 0.2, if dark { 0.5 } else { 0.6 });

@@ -311,7 +311,7 @@ impl PlanTab {
             .on_action(PlanMsg::Action)
             .on_link(PlanMsg::Link)
             .on_scroll(PlanMsg::Scrolled)
-            .size(sh.settings.notes_size)
+            .size(crate::state::NOTES_SIZE)
             .font(sh.settings.text_font())
             .padding(24)
             .height(Length::Fill);

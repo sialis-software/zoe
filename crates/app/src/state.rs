@@ -14,8 +14,15 @@ use std::{fs, io};
 
 // ---- settings ------------------------------------------------------------------------------
 
-pub const BIBLE_SIZES: RangeInclusive<f32> = 12.0..=36.0;
-pub const NOTES_SIZES: RangeInclusive<f32> = 12.0..=32.0;
+/// The size of the text in Bible panes: the reading text and everything beside it (footnotes,
+/// dictionary entries, margin cards). Other text in the pane is in proportion. It is not a
+/// setting: the whole interface is scaled instead (`Settings::scale`).
+pub const BIBLE_SIZE: f32 = 20.0;
+/// The size of the text in note panes.
+pub const NOTES_SIZE: f32 = 17.0;
+/// The scale of the whole interface, in percent, at least and at most; and what it is to begin with.
+pub const SCALES: RangeInclusive<u32> = 50..=200;
+pub const DEFAULT_SCALE: u32 = 100;
 
 /// How many seconds in front of the reader make a chapter read, at least and at most.
 pub const READ_SECONDS: std::ops::Range<u32> = 10..600;
@@ -26,13 +33,9 @@ pub const READ_SECONDS: std::ops::Range<u32> = 10..600;
 pub struct Settings {
     /// The color scheme: the name of one of iced's themes ("Dark", "Light", "Nord", …).
     pub theme: String,
-    /// Size of the text in Bible panes: the reading text and everything beside it (footnotes,
-    /// dictionary entries, margin cards). Other text in the pane is in proportion.
-    #[serde(alias = "reading_size")]
-    pub bible_size: f32,
-    /// Size of the text in note panes.
-    #[serde(alias = "note_size")]
-    pub notes_size: f32,
+    /// How large the whole interface is, in percent of its normal size (`BIBLE_SIZE` and
+    /// `NOTES_SIZE` are the text at 100).
+    pub scale: u32,
     /// The family the Bible and notes are set in; `None` is the interface font.
     pub font: Option<String>,
     /// The pens: each is a shortcut for making a note on the selected text with a tag, in a color.
@@ -143,16 +146,14 @@ pub fn default_pens() -> Vec<PenDef> {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: Theme::Dark.to_string(), bible_size: 19.0, notes_size: 17.0, font: None, pens: default_pens(), reading_log_auto: false, reading_log_seconds: 30, reading_log_daily: true, bookmarks_daily: false, vim_mode: false, format_bar: true, reader_margins: false }
+        Settings { theme: Theme::Dark.to_string(), scale: DEFAULT_SCALE, font: None, pens: default_pens(), reading_log_auto: false, reading_log_seconds: 30, reading_log_daily: true, bookmarks_daily: false, vim_mode: false, format_bar: true, reader_margins: false }
     }
 }
 
 impl Settings {
     /// Settings that make sense, whatever the file said.
     pub fn sanitized(mut self) -> Self {
-        let fix = |v: f32, r: &RangeInclusive<f32>, default: f32| if v.is_finite() { v.clamp(*r.start(), *r.end()) } else { default };
-        self.bible_size = fix(self.bible_size, &BIBLE_SIZES, 19.0);
-        self.notes_size = fix(self.notes_size, &NOTES_SIZES, 17.0);
+        self.scale = self.scale.clamp(*SCALES.start(), *SCALES.end());
         self.font = self.font.filter(|f| !f.trim().is_empty());
         self.reading_log_seconds = self.reading_log_seconds.clamp(READ_SECONDS.start, READ_SECONDS.end);
         // Pens: tags in one form, each once, colors that are colors.
@@ -499,7 +500,7 @@ mod tests {
         assert_eq!(store.session(), None);
         assert!(store.layouts().is_empty());
 
-        let settings = Settings { theme: "Nord".into(), bible_size: 22.0, notes_size: 15.0, font: Some("Georgia".into()), pens: default_pens(), ..Settings::default() };
+        let settings = Settings { theme: "Nord".into(), scale: 125, font: Some("Georgia".into()), pens: default_pens(), ..Settings::default() };
         store.save_settings(&settings).unwrap();
         store.save_session(&sample()).unwrap();
         store.save_layouts(&[NamedLayout { name: "Study".into(), workspace: sample() }]).unwrap();
@@ -525,11 +526,14 @@ mod tests {
     fn settings_files_missing_fields_or_with_bad_values_are_repaired() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().to_path_buf());
-        fs::write(dir.path().join("settings.json"), r#"{ "theme": "Dracula", "reading_size": 400, "font": "" }"#).unwrap();
+        fs::write(dir.path().join("settings.json"), r#"{ "theme": "Dracula", "scale": 4000, "reading_size": 22, "font": "" }"#).unwrap();
         let s = store.settings();
         assert_eq!(s.theme, "Dracula");
-        assert_eq!(s.bible_size, *BIBLE_SIZES.end());
-        assert_eq!(s.notes_size, 17.0, "missing: the default");
+        assert_eq!(s.scale, *SCALES.end());
+        let s = Store::new(dir.path().to_path_buf()).settings();
+        assert_eq!(s.scale, *SCALES.end());
+        fs::write(dir.path().join("settings.json"), r#"{ "theme": "Dracula", "bible_size": 30, "font": "" }"#).unwrap();
+        assert_eq!(store.settings().scale, DEFAULT_SCALE, "the sizes of before are not a scale: missing, the default");
         assert_eq!(s.font, None);
         assert_eq!(s.theme(), Theme::Dracula);
         assert_eq!(Settings { theme: "Nonsense".into(), ..Settings::default() }.theme(), Theme::Dark);

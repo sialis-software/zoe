@@ -239,7 +239,7 @@ impl CommentaryTab {
             .on_action(CommentaryMsg::Action)
             .on_link(CommentaryMsg::Link)
             .on_scroll(CommentaryMsg::Scrolled)
-            .size(sh.settings.notes_size)
+            .size(crate::state::NOTES_SIZE)
             .font(sh.settings.text_font())
             .padding(24)
             .height(Length::Fill);

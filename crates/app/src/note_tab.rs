@@ -857,9 +857,9 @@ impl NoteTab {
 
     /// The card of choices for the link being written, to float by the caret: a scrolling list of rows (the one
     /// that will be taken lit), as the reader's floating cards are elements of their own.
-    fn choices_card<'a>(&'a self, sh: &Shared) -> Option<Element<'a, NoteMsg>> {
+    fn choices_card<'a>(&'a self) -> Option<Element<'a, NoteMsg>> {
         let list = self.completion.as_ref()?;
-        let size = sh.settings.notes_size;
+        let size = crate::state::NOTES_SIZE;
         let row_height = size * CHOICE_ROW;
         let mut rows = column![];
         for (i, item) in list.items.iter().enumerate() {
@@ -919,7 +919,7 @@ impl NoteTab {
             CompletionEvent::Move(by) => {
                 list.selected = (list.selected as isize + by).rem_euclid(len.max(1)) as usize;
                 // The row chosen is kept in the card's view.
-                let row = sh.settings.notes_size * CHOICE_ROW;
+                let row = crate::state::NOTES_SIZE * CHOICE_ROW;
                 let (top, view) = (list.selected as f32 * row, list.items.len().min(CHOICES_SHOWN) as f32 * row);
                 let at = self.choices_offset;
                 let wanted = if top < at { Some(top) } else if top + row > at + view { Some(top + row - view) } else { None };
@@ -1334,7 +1334,7 @@ impl NoteTab {
         let mut editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
             .id(self.editor_id())
             .on_action(NoteMsg::Action)
-            .completion(self.choices_card(sh), NoteMsg::Completion)
+            .completion(self.choices_card(), NoteMsg::Completion)
             .follow_links(true)
             .on_link(NoteMsg::OpenLink)
             .on_link_menu(NoteMsg::LinkMenu)
@@ -1342,7 +1342,7 @@ impl NoteTab {
             .on_scroll(NoteMsg::Scrolled)
             .embed(move |target| sh.embed_for(&module, target))
             .placeholder("Nothing read yet")
-            .size(sh.settings.notes_size)
+            .size(crate::state::NOTES_SIZE)
             .font(sh.settings.text_font())
             .padding(16)
             .height(Length::Fill);
@@ -1447,7 +1447,7 @@ impl NoteTab {
             let module = module.unwrap_or(ModuleId(String::new()));
             let embed_module = module.clone();
             // The choices for a link being written, floating by the caret.
-            let choices = self.choices_card(sh);
+            let choices = self.choices_card();
             let mut editor = live_editor(&self.doc, Palette::for_theme(&sh.theme()))
                 .id(self.editor_id())
                 .on_action(NoteMsg::Action)
@@ -1461,7 +1461,7 @@ impl NoteTab {
                 .on_jumped(|| NoteMsg::Jumped)
                 .embed(move |target| sh.embed_for(&embed_module, target))
                 .placeholder("Write here…")
-                .size(sh.settings.notes_size)
+                .size(crate::state::NOTES_SIZE)
                 .font(sh.settings.text_font())
                 .padding(16)
                 .height(Length::Fill);
@@ -1902,7 +1902,7 @@ impl NoteTab {
             move |at| NoteMsg::LinkMenu(for_menu.clone(), at),
             move |at| NoteMsg::LinkDrag(for_pull.clone(), at),
         );
-        let size = sh.settings.notes_size * 0.95;
+        let size = crate::state::NOTES_SIZE * 0.95;
         let mut block = column![reference_link].spacing(6);
         if let Some(found) = found {
             let font = sh.settings.text_font();

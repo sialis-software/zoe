@@ -29,17 +29,8 @@ pub const CARD_BODY_MAX: f32 = 136.0;
 
 /// The size of the text in the cards beside the reading text (footnotes, dictionary entries,
 /// margin notes): a little smaller than the reading text, so the notes sit quietly beside it.
-fn card_size(sh: &Shared) -> f32 {
-    sh.settings.bible_size * CARD_TEXT_SCALE
-}
+const CARD_SIZE: f32 = crate::state::BIBLE_SIZE * 0.75;
 
-const CARD_TEXT_SCALE: f32 = 0.75;
-
-/// How tall a card's text may get before it scrolls: at the default text size, `CARD_BODY_MAX`,
-/// and in proportion to the size after that.
-fn card_body_max(sh: &Shared) -> f32 {
-    CARD_BODY_MAX * sh.settings.bible_size / crate::state::Settings::default().bible_size
-}
 /// Width of the text column. A reader wider than this plus room for cards shows a margin
 /// beside it; a narrower one has no margin and floats a card under a clicked mark instead.
 pub const TEXT_COLUMN: f32 = 640.0;
@@ -511,7 +502,7 @@ impl BibleTab {
             .follow_links(true)
             .fit_width()
             .height(Length::Shrink)
-            .size(card_size(sh) * scale)
+            .size(CARD_SIZE * scale)
             .font(sh.settings.text_font())
             .padding([2.0, 0.0])
             .on_action(move |action| BibleMsg::CardText(key.clone(), action))
@@ -548,7 +539,7 @@ impl BibleTab {
 
     /// A dictionary entry: the word in its language and its transliteration, then the definition.
     fn word_body<'a>(&self, sh: &Shared, key: String, e: &study_core::LexiconEntry) -> Element<'a, BibleMsg> {
-        let size = card_size(sh);
+        let size = CARD_SIZE;
         let mut head = String::new();
         if !e.lemma.is_empty() {
             head.push_str(&format!("**{}**", markdown_text(&e.lemma)));
@@ -1714,7 +1705,7 @@ impl BibleTab {
 
     /// The button at the foot of the text that puts the chapter in the reading log.
     fn log_button<'a>(&'a self, sh: &'a Shared) -> Element<'a, BibleMsg> {
-        let size = sh.settings.bible_size * 0.62;
+        let size = crate::state::BIBLE_SIZE * 0.62;
         // Quiet: words in the faint text color with no box, lit when pointed at. A green check mark
         // says the chapter was read today; pressing it again takes the mark back.
         let read = sh.read_on(self.book, self.chapter_no, &chrono::Local::now());
@@ -1767,7 +1758,7 @@ impl BibleTab {
     /// Previous and next chapter, to put at the top and bottom of the text.
     fn chapter_links<'a>(&'a self, sh: &'a Shared, reading: bool) -> Element<'a, BibleMsg> {
         let (prev, next) = self.neighbours(sh);
-        let size = sh.settings.bible_size * 0.7;
+        let size = crate::state::BIBLE_SIZE * 0.7;
         let link = |label: String, msg: BibleMsg, target: Option<ChapterId>| {
             let b = button(text(label).size(size)).padding([2, 6]).style(button::text);
             if target.is_some() { b.on_press(msg) } else { b }
@@ -1911,7 +1902,7 @@ impl BibleTab {
             strongs_in_margin: self.margin_showing && self.in_margin.strongs,
             footnotes_in_margin: self.margin_showing && self.in_margin.footnotes,
             refs_in_margin: self.margin_showing && self.in_margin.refs,
-            body: sh.settings.bible_size,
+            body: crate::state::BIBLE_SIZE,
             font: sh.settings.text_font(),
             module: sh.module_abbreviation(&self.module),
         }
@@ -2013,7 +2004,7 @@ impl BibleTab {
     /// The tags of the mark being written in: each can be taken off, and others added, with the
     /// ones in use offered as the name is typed.
     fn card_tags<'a>(&'a self, sh: &'a Shared, index: usize, with_look: bool) -> Element<'a, BibleMsg> {
-        let meta = sh.settings.bible_size * 0.7;
+        let meta = crate::state::BIBLE_SIZE * 0.7;
         let tags = sh.marks.get(index).map(|m| m.tags.clone()).unwrap_or_default();
         let chip = |label: String, color: Option<Color>, msg: BibleMsg| {
             let color = color.unwrap_or(Color::from_rgb(0.62, 0.65, 0.72));
@@ -2126,7 +2117,7 @@ impl BibleTab {
 
     /// The card for a footnote or a dictionary entry opened by a click.
     pub fn note_card_view<'a>(&'a self, sh: &'a Shared, card: &'a NoteCard, fill: bool) -> Element<'a, BibleMsg> {
-        let (size, font) = (card_size(sh), sh.settings.text_font());
+        let (size, font) = (CARD_SIZE, sh.settings.text_font());
         let (label, body): (String, Element<'_, BibleMsg>) = match &card.content {
             NoteContent::Footnote(note) => {
                 ("Footnote".into(), self.footnote_body(sh, "popup".into(), note))
@@ -2181,7 +2172,7 @@ impl BibleTab {
         let color = hex_color(mark.shown_color(), 1.0).unwrap_or(Color::WHITE);
         let writing = self.editing == Some(index);
 
-        let meta = card_size(sh) * 0.7;
+        let meta = CARD_SIZE * 0.7;
         // The marked words are lit in the text, and the card is joined to them: their quote on the card would say it
         // twice. What it says first is its tags (and, for a mark on a whole verse, which verse, as nothing is lit).
         // A card with neither has no line at the top.
@@ -2212,14 +2203,14 @@ impl BibleTab {
                 .on_link_menu(BibleMsg::CardLinkMenu)
                 .on_link_drag(BibleMsg::CardLinkDrag)
                 .embed(move |target| sh.embed_for(&module, target))
-                .size(card_size(sh))
+                .size(CARD_SIZE)
                 .font(sh.settings.text_font())
                 .padding(4)
                 // The editor scrolls itself once its text outgrows this.
-                .max_height(card_body_max(sh))
+                .max_height(CARD_BODY_MAX)
                 .into()
         } else if bare {
-            button(text("Add a note…").size(card_size(sh)).font(sh.settings.text_font()))
+            button(text("Add a note…").size(CARD_SIZE).font(sh.settings.text_font()))
                 .padding(0)
                 .width(Length::Fill)
                 .style(button::text)
@@ -2230,10 +2221,10 @@ impl BibleTab {
             // text scrolls inside the card instead of making the card tall.
             live_view(Document::new(&full), pal)
                 .fit_width()
-                .size(card_size(sh))
+                .size(CARD_SIZE)
                 .font(sh.settings.text_font())
                 .padding([2.0, 0.0])
-                .max_height(card_body_max(sh))
+                .max_height(CARD_BODY_MAX)
                 .on_link(BibleMsg::OpenLink)
                 .on_link_menu(BibleMsg::CardLinkMenu)
                 .on_link_drag(BibleMsg::CardLinkDrag)
@@ -2285,7 +2276,7 @@ impl BibleTab {
     fn new_mark_card<'a>(&'a self, sh: &'a Shared, index: usize) -> Element<'a, BibleMsg> {
         let mark = &sh.marks[index];
         let color = hex_color(mark.shown_color(), 1.0).unwrap_or(Color::WHITE);
-        let meta = card_size(sh) * 0.7;
+        let meta = CARD_SIZE * 0.7;
         let mut content = column![].spacing(6).width(Length::Fill);
         // (A mark on a whole verse has nothing lit in the text: say which verse.)
         if mark.is_verse_level() {
@@ -2302,10 +2293,10 @@ impl BibleTab {
                     .on_link_menu(BibleMsg::CardLinkMenu)
                     .on_link_drag(BibleMsg::CardLinkDrag)
                     .embed(move |target| sh.embed_for(&module, target))
-                    .size(card_size(sh))
+                    .size(CARD_SIZE)
                     .font(sh.settings.text_font())
                     .padding(4)
-                    .max_height(card_body_max(sh)),
+                    .max_height(CARD_BODY_MAX),
             );
         }
         let small = |label: &'static str, msg: BibleMsg| button(text(label).size(meta)).padding([2, 6]).style(button::text).on_press(msg);
@@ -2402,10 +2393,10 @@ impl BibleTab {
             Err(e) => text(e.clone()).into(),
         };
         let bold = Font { weight: font::Weight::Bold, ..sh.settings.text_font() };
-        let title = text(format!("{} {}", self.book, self.chapter_no)).size(sh.settings.bible_size * 1.6).font(bold);
+        let title = text(format!("{} {}", self.book, self.chapter_no)).size(crate::state::BIBLE_SIZE * 1.6).font(bold);
         // Small, just to the right of the title: the notes that link to the chapter.
         // (The icon takes its own color, in the text's, faint: a button's text color does not reach a picture.)
-        let links = button(crate::icons::Icon::Backlinks.view_text(sh.settings.bible_size * 0.7, 0.4))
+        let links = button(crate::icons::Icon::Backlinks.view_text(crate::state::BIBLE_SIZE * 0.7, 0.4))
             .padding([2, 4])
             .style(|theme: &Theme, status| {
                 let lit = matches!(status, button::Status::Hovered | button::Status::Pressed);
@@ -2454,7 +2445,7 @@ pub fn reference_card<'a>(
         Some((_, BibleMsg::OpenWord(key))) => Some(key.clone()),
         _ => None,
     };
-    let meta = card_size(sh) * 0.7;
+    let meta = CARD_SIZE * 0.7;
     let mut header = row![text(label.to_string()).size(meta).style(text::secondary)]
         .spacing(16)
         .align_y(iced::Alignment::Center);
@@ -2466,7 +2457,7 @@ pub fn reference_card<'a>(
     }
     let width = if fill { Length::Fill } else { Length::Shrink };
     let body = scrollable(container(body).padding([0, 8]).width(width)).height(Length::Shrink);
-    let card: Element<'a, BibleMsg> = container(column![header, container(body).max_height(card_body_max(sh))].spacing(6).width(width))
+    let card: Element<'a, BibleMsg> = container(column![header, container(body).max_height(CARD_BODY_MAX)].spacing(6).width(width))
         .padding(10)
         .width(width)
         .style(move |theme: &Theme| container::Style {

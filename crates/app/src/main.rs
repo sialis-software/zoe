@@ -76,6 +76,7 @@ fn main() -> iced::Result {
     iced::daemon(App::live, App::update, App::window_view)
         .title(App::window_title)
         .theme(App::window_theme)
+        .scale_factor(App::window_scale)
         .default_font(fonts::UI)
         .subscription(App::subscription)
         .run()
@@ -396,8 +397,8 @@ enum Message {
     ResizeSplit(SplitId, f32),
     ToggleZoom(PaneId),
     SetTheme(Theme),
-    SetBibleSize(f32),
-    SetNotesSize(f32),
+    /// The scale of the interface, in percent.
+    SetScale(u32),
     SetFont(FontChoice),
     ResetSettings,
     /// Which page of the settings window shows.
@@ -1935,8 +1936,7 @@ impl App {
                 Task::none()
             }
             Message::SetTheme(theme) => self.change_settings(|s| s.theme = theme.to_string()),
-            Message::SetBibleSize(size) => self.change_settings(|s| s.bible_size = size.round()),
-            Message::SetNotesSize(size) => self.change_settings(|s| s.notes_size = size.round()),
+            Message::SetScale(percent) => self.change_settings(|s| s.scale = percent),
             Message::SetFont(FontChoice(font)) => self.change_settings(|s| s.font = font),
             // The look of the app only: the pens are the vault's own and are kept.
             Message::ResetSettings => self.change_settings(|s| {
@@ -2787,6 +2787,11 @@ impl App {
         self.theme()
     }
 
+    /// The whole interface, every window, is drawn at the scale the settings give.
+    fn window_scale(&self, _window: iced::window::Id) -> f32 {
+        self.sh.settings.scale as f32 / 100.0
+    }
+
     fn window_title(&self, window: iced::window::Id) -> String {
         if Some(window) == self.settings_window {
             "Settings".into()
@@ -3065,9 +3070,12 @@ impl App {
         use iced::widget::{checkbox, slider};
         let settings = &self.sh.settings;
         let label = |t: &'static str| text(t).size(13);
-        let size_row = |value: f32, range: std::ops::RangeInclusive<f32>, msg: fn(f32) -> Message| {
-            row![slider(range, value, msg).step(1.0), text(format!("{value:.0}")).size(13).width(26)].spacing(10).align_y(iced::Center)
-        };
+        let scale_row = row![
+            slider(state::SCALES, settings.scale, Message::SetScale).step(5u32),
+            text(format!("{}%", settings.scale)).size(13).width(40),
+        ]
+        .spacing(10)
+        .align_y(iced::Center);
         let mut fonts = vec![FontChoice(None)];
         fonts.extend(self.families.iter().cloned().map(|f| FontChoice(Some(f))));
         column![
@@ -3081,10 +3089,9 @@ impl App {
                 .into(),
             ),
             section(
-                "Text",
+                "Text and size",
                 column![
-                    column![label("Bible pane text size"), size_row(settings.bible_size, state::BIBLE_SIZES, Message::SetBibleSize)].spacing(6),
-                    column![label("Notes pane text size"), size_row(settings.notes_size, state::NOTES_SIZES, Message::SetNotesSize)].spacing(6),
+                    column![label("Scale of the whole interface"), scale_row].spacing(6),
                     column![
                         label("Bible and note font"),
                         pick_list(fonts, Some(FontChoice(settings.font.clone().filter(|f| !state::is_system_alias(f)))), Message::SetFont).text_size(13).width(Length::Fill)
@@ -3946,20 +3953,22 @@ mod tests {
         let id = app.panes[0].tabs[0];
         let _ = app.update(Message::SetTheme(Theme::Light));
         assert_eq!(app.theme(), Theme::Light);
-        let _ = app.update(Message::SetBibleSize(24.4));
-        let _ = app.update(Message::SetNotesSize(15.0));
+        let _ = app.update(Message::SetScale(125));
         let _ = app.update(Message::SetFont(FontChoice(Some("Georgia".into()))));
         let Some(Tab::Bible(tab)) = app.tabs.get(&id) else { panic!("no Bible tab") };
         let options = tab.view_options(&app.sh);
-        assert_eq!(options.body, 24.0);
+        assert_eq!(options.body, state::BIBLE_SIZE, "the text size is the same at every scale: the whole interface is what is scaled");
+        assert_eq!(app.window_scale(iced::window::Id::unique()), 1.25);
         assert_eq!(options.font, Font::with_name("Georgia"));
 
         let kept = Store::new(dir.path().join("state")).settings();
         assert_eq!(kept, app.sh.settings);
-        assert_eq!((kept.theme.as_str(), kept.bible_size, kept.notes_size, kept.font.as_deref()), ("Light", 24.0, 15.0, Some("Georgia")));
+        assert_eq!((kept.theme.as_str(), kept.scale, kept.font.as_deref()), ("Light", 125, Some("Georgia")));
 
-        let _ = app.update(Message::SetBibleSize(500.0));
-        assert_eq!(app.sh.settings.bible_size, *state::BIBLE_SIZES.end());
+        let _ = app.update(Message::SetScale(5000));
+        assert_eq!(app.sh.settings.scale, *state::SCALES.end());
+        let _ = app.update(Message::SetScale(1));
+        assert_eq!(app.sh.settings.scale, *state::SCALES.start());
         let _ = app.update(Message::ResetSettings);
         assert_eq!(Store::new(dir.path().join("state")).settings(), Settings::default());
     }
@@ -3986,8 +3995,8 @@ mod tests {
         assert_eq!(app.settings_window, Some(window));
         assert!(!app.families.is_empty() || state::installed_families().is_empty());
         let _ = app.update(Message::TogglePanel(Panel::Layouts));
-        let _ = app.update(Message::SetBibleSize(30.0));
-        assert_eq!(app.sh.settings.bible_size, 30.0);
+        let _ = app.update(Message::SetScale(150));
+        assert_eq!(app.sh.settings.scale, 150);
         let _ = app.update(Message::CloseRequested(window));
         assert_eq!(app.settings_window, None);
         let _ = app.update(Message::OpenSettings);
@@ -4540,7 +4549,7 @@ mod tests {
         fn click_scan_to(&mut self, bottom: usize, done: impl Fn(&App) -> bool) -> Option<(f32, f32)> {
             // (From below the chapter's title, which has a small button beside it.)
             for y in (250..bottom).step_by(14) {
-                for x in (50..560).step_by(10) {
+                for x in (50..700).step_by(5) {
                     let (x, y) = (x as f32, y as f32);
                     self.cursor = mouse::Cursor::Available(Point::new(x, y));
                     self.press();
@@ -4903,11 +4912,11 @@ mod tests {
         app.pen_editing = Some(0);
         let _ = app.update(Message::SettingsTab(SettingsTab::Pens));
         assert_eq!((app.settings_tab, app.pen_editing), (SettingsTab::Pens, None), "an open color list is put away");
-        let _ = app.update(Message::SetBibleSize(30.0));
+        let _ = app.update(Message::SetScale(150));
         let pens = app.sh.settings.pens.clone();
         assert!(!pens.is_empty());
         let _ = app.update(Message::ResetSettings);
-        assert_eq!(app.sh.settings.bible_size, Settings::default().bible_size);
+        assert_eq!(app.sh.settings.scale, Settings::default().scale);
         assert_eq!(app.sh.settings.pens, pens);
     }
 
@@ -6075,8 +6084,15 @@ mod tests {
         };
         let changed = differ(&shut, &open);
         assert!(changed > 1000, "the menu opened under the drop-down: {changed} pixels differ");
-        // A choice in it (the first, just under the box) is taken, and the menu shuts.
-        h.click(px, py + 26.0);
+        // A choice in it is taken, and the menu shuts. (The menu opens under the box or, where it would not fit, over it, and
+        // which it is follows the text size; so rows are tried from above the box to below it, each time with the menu opened again.)
+        for dy in (-160..=60).step_by(4) {
+            h.click(px, py + dy as f32);
+            if h.app.sh.marks[index].style != MarkStyle::None {
+                break;
+            }
+            h.click(px, py);
+        }
         assert_ne!(h.app.sh.marks[index].style, MarkStyle::None, "a look was chosen");
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
         h.cursor = mouse::Cursor::Unavailable;
@@ -6243,8 +6259,8 @@ mod tests {
     fn double_click_then_drag_selects_whole_words() {
         let mut h = Harness::new(App::new());
         let (_, y) = h.select_some_reader_text();
-        // Clear the exploratory selection, then double-click and drag along the same line.
-        h.move_to(700.0, 700.0);
+        // Clear the exploratory selection (a click on the text it is in), then double-click and drag along the same line.
+        h.move_to(200.0, y);
         h.press();
         h.release();
         // (A double-click past the end of a short line selects nothing: find a line with text at x=100.)
@@ -6257,7 +6273,7 @@ mod tests {
                 h.press();
                 h.release();
                 let hit = h.app.bible().text_selection.is_some();
-                h.move_to(700.0, 700.0);
+                h.move_to(200.0, y);
                 h.press();
                 h.release();
                 hit
@@ -6566,7 +6582,7 @@ mod tests {
             h.named(Named::ArrowDown);
         }
         assert_eq!(h.app.note().completion.as_ref().map(|c| c.selected), Some(12));
-        let row = h.app.sh.settings.notes_size * 1.7;
+        let row = state::NOTES_SIZE * 1.7;
         assert!(h.app.note().choices_offset + 8.0 * row >= 13.0 * row - 0.5, "row 12 is within the eight shown: {}", h.app.note().choices_offset);
         // A click on a row takes it.
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
@@ -8238,7 +8254,7 @@ mod tests {
             let _ = h.app.update(Message::Bible(id, BibleMsg::SetInMargin(NoteKind::Strongs, true)));
         }
         if let Ok(size) = std::env::var("SNAP_BIBLE") {
-            let _ = h.app.update(Message::SetBibleSize(size.parse().unwrap()));
+            let _ = h.app.update(Message::SetScale(size.parse().unwrap()));
         }
         if let Ok(panel) = std::env::var("SNAP_PANEL") {
             if panel == "layouts" {
@@ -8249,8 +8265,7 @@ mod tests {
                     let _ = h.app.update(Message::LayoutDraft("Evening".into()));
                 }
             }
-            let _ = h.app.update(Message::SetBibleSize(24.0));
-            let _ = h.app.update(Message::SetNotesSize(20.0));
+            let _ = h.app.update(Message::SetScale(120));
             let _ = h.app.update(Message::SetFont(FontChoice(Some("Georgia".into()))));
             if panel == "layouts" {
                 if !h.app.naming {
@@ -9178,7 +9193,7 @@ mod tests {
             let w = h.size.width as usize;
             let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
             let mut part = Vec::new();
-            for y in 338..438usize {
+            for y in 350..450usize {
                 part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
             }
             part
@@ -9186,7 +9201,7 @@ mod tests {
         h.cursor = mouse::Cursor::Unavailable;
         let first = card(&mut h);
         // The bar's right arrow, under the top card.
-        h.click(1298.0, 454.0);
+        h.click(1289.0, 467.0);
         h.cursor = mouse::Cursor::Unavailable;
         let second = card(&mut h);
         assert_ne!(first, second, "the next note is on top");
@@ -9211,21 +9226,21 @@ mod tests {
             let w = h.size.width as usize;
             let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
             let mut part = Vec::new();
-            for y in 330..430usize {
+            for y in 350..450usize {
                 part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
             }
             part
         };
         // The pointer on the footnote's marker, then on "born again" a few words on.
-        h.move_to(399.0, 351.0);
+        h.move_to(503.0, 371.0);
         let footnote = card(&mut h);
-        h.move_to(240.0, 390.0);
+        h.move_to(344.0, 404.0);
         let mark = card(&mut h);
         assert_ne!(footnote, mark, "each comes to the top as it is pointed at");
-        h.move_to(399.0, 351.0);
+        h.move_to(503.0, 371.0);
         assert_eq!(card(&mut h), footnote);
         // With its note on top, a click on the mark edits it.
-        h.click(240.0, 390.0);
+        h.click(344.0, 404.0);
         assert!(h.app.bible().editing.is_some());
     }
 
@@ -9286,7 +9301,7 @@ mod tests {
         // Clicking a mark floats its card under the click, as in a reader with no margin.
         h.size = Size::new(1500.0, 800.0);
         h.feed(Event::Window(iced::window::Event::RedrawRequested(std::time::Instant::now())));
-        h.click(240.0, 390.0);
+        h.click(344.0, 404.0);
         assert!(h.app.bible().popup.is_some(), "the click on \"born again\" floated its card");
         assert!(h.app.bible().editing.is_none(), "and did not start writing in the margin");
         assert!(h.app.bible().floating(&h.app.sh).is_some());
@@ -9402,21 +9417,21 @@ mod tests {
             let w = h.size.width as usize;
             let all = h.renderer.screenshot(Size::new(h.size.width as u32, h.size.height as u32), 1.0, iced::Color::BLACK);
             let mut part = Vec::new();
-            for y in 590..780usize {
+            for y in 700..799usize {
                 part.extend_from_slice(&all[(y * w + 1060) * 4..(y * w + 1450) * 4]);
             }
             part
         };
         h.cursor = mouse::Cursor::Unavailable;
         let calm = stack(&mut h);
-        // "God" and "world" are different words with different entries.
-        h.move_to(767.0, 662.0);
+        // "God" and "loved" are different words with different entries.
+        h.move_to(858.0, 720.0);
         let god = stack(&mut h);
         assert_ne!(god, calm, "its entry came up");
-        h.move_to(935.0, 662.0);
+        h.move_to(927.0, 720.0);
         let world = stack(&mut h);
         assert_ne!(world, god, "each word has its own entry");
-        h.move_to(767.0, 662.0);
+        h.move_to(858.0, 720.0);
         assert_eq!(stack(&mut h), god);
     }
 

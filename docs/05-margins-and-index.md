@@ -180,7 +180,7 @@ Not built yet. The prototype's marks have no `series` key. This section records 
 
 What the person chose and what the app makes are kept apart, in the places the XDG convention names (on macOS and Linux alike; `%APPDATA%\zoe` and `%LOCALAPPDATA%\zoe` on Windows):
 
-- **Config**, `$XDG_CONFIG_HOME/zoe` (`~/.config/zoe`): `config.json` (the vault and the module folders chosen), `settings.json` (look and feel, text sizes, font), and `layouts.json` (saved layouts).
+- **Config**, `$XDG_CONFIG_HOME/zoe` (`~/.config/zoe`): `config.json` (the vault and the module folders chosen), `settings.json` (look and feel, scale, font), and `layouts.json` (saved layouts).
 - **Data**, `$XDG_DATA_HOME/zoe` (`~/.local/share/zoe`): `session.json` (what was open at shutdown), `cache/` (the search indexes, which can be deleted), and `vault/` (the vault made when none was chosen).
 - **Modules** are not the app's: `$XDG_CONFIG_HOME/sword` (`~/.config/sword`), shared with other SWORD programs.
 
