@@ -185,6 +185,8 @@ pub enum NoteMsg {
     /// The hamburger menu (rename, delete).
     ToggleMenu,
     CloseMenu,
+    /// Show or hide the bar of formatting buttons (a setting, so for every note).
+    ToggleFormatBar,
     PickerQuery(String),
     ToggleGroup(String),
     /// Narrow the list to a tag, or lift that again.
@@ -1089,6 +1091,12 @@ impl NoteTab {
                 self.picker = None;
             }
             NoteMsg::CloseMenu => self.menu_open = false,
+            NoteMsg::ToggleFormatBar => {
+                self.menu_open = false;
+                let mut settings = sh.settings.clone();
+                settings.format_bar = !settings.format_bar;
+                sh.set_settings(settings);
+            }
             NoteMsg::AskDelete => {
                 self.menu_open = false;
                 self.confirm_delete = sh.notes.contains_key(&self.path);
@@ -1581,7 +1589,20 @@ impl NoteTab {
         .spacing(2)
         .align_y(iced::Center);
         let sideways = scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0));
-        container(scrollable(container(bar).padding([0, 16])).direction(sideways)).padding([4, 0]).into()
+        let hide = crate::icons::with_tip(
+            button(container(Icon::ChevronUp.view_text(16.0, 1.0)).center(Length::Fill))
+                .width(28)
+                .height(28)
+                .padding(0)
+                .style(move |theme: &Theme, status| format_button_style(theme, status, false))
+                .on_press(NoteMsg::ToggleFormatBar),
+            "Hide the formatting buttons (they come back from the menu)",
+            iced::widget::tooltip::Position::Left,
+        );
+        // The hiding button stays at the right end while the buttons scroll; the bar sits close under the line above it.
+        container(row![scrollable(container(bar).padding([0, 16])).direction(sideways).width(Length::Fill), container(hide).padding([0, 8])].align_y(iced::Center))
+            .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 4.0, left: 0.0 })
+            .into()
     }
 
     /// The mode line under the text: "-- NORMAL --", and the command being typed.
@@ -1617,6 +1638,8 @@ impl NoteTab {
             }
         }
         if !self.read_only() {
+            let label = if sh.settings.format_bar { "Hide formatting" } else { "Show formatting" };
+            items = items.push(item(crate::icons::Icon::Bold, label, NoteMsg::ToggleFormatBar));
             items = items.push(item(crate::icons::Icon::Trash, "Delete", NoteMsg::AskDelete));
         }
         container(items).padding(6).width(170).style(crate::popup_style).into()

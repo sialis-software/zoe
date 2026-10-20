@@ -3974,6 +3974,17 @@ mod tests {
     }
 
     #[test]
+    fn the_formatting_bar_is_hidden_by_its_button_and_brought_back_from_the_notes_menu() {
+        let mut app = App::new();
+        let id = app.nid();
+        assert!(app.sh.settings.format_bar);
+        let _ = app.update(Message::Note(id, NoteMsg::ToggleFormatBar));
+        assert!(!app.sh.settings.format_bar, "hidden for every note");
+        let _ = app.update(Message::Note(id, NoteMsg::ToggleFormatBar));
+        assert!(app.sh.settings.format_bar, "and shown again");
+    }
+
+    #[test]
     fn the_layouts_panel_closes_on_outside_clicks_and_settings_has_its_own_window() {
         let mut app = App::new();
         let _ = app.update(Message::TogglePanel(Panel::Layouts));

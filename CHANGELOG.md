@@ -4,6 +4,7 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+- The formatting bar has a button at its right end to hide it (it comes back from "Show formatting" in the note's menu, or from Settings), and sits closer under the line above it.
 - A `[[` that opens nothing (typed in code, say, before a link on the same line) no longer hides the link after it.
 - The two text size sliders are replaced by one scale for the whole interface, in percent (Settings, Appearance). The Bible text is 20 and the notes text 17 at 100%, a little larger Bible text than before (19). The sizes you had set are not carried over: the scale starts at 100%.
 - Every button that is only a picture now says what it does when you point at it (back and forward, the menu, search, close and new tab, the speaker, the color dots, the small crosses), with its shortcut where it has one.
