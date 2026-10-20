@@ -1694,6 +1694,8 @@ impl BibleTab {
                 self.where_notes_show(),
                 rule::horizontal(1),
                 button(text("Commentary\u{2026}").size(14)).padding([2, 0]).style(button::text).on_press(BibleMsg::OpenCommentary),
+                hinted(button(text("Search the Bible").size(14)).padding([2, 0]).style(button::text).on_press(BibleMsg::OpenSearch).into(), Command::Search),
+                hinted(button(text("Reader mode").size(14)).padding([2, 0]).style(button::text).on_press(BibleMsg::ReadingMode).into(), Command::ReaderMode),
             ]
             .spacing(10),
         )
@@ -1823,34 +1825,70 @@ impl BibleTab {
         (modules, books, chapters)
     }
 
+    /// The bar above the text. When the pane is too narrow for all of it, reader mode and then search
+    /// leave it, one at a time, and are found in the menu (which always lists them).
     fn toolbar<'a>(&'a self, sh: &'a Shared, outer: crate::shared::Outer) -> Element<'a, BibleMsg> {
         let (modules, books, chapters) = self.choices(sh);
-        let current = ChapterChoice(self.book, self.chapter_no);
-        let module = modules.iter().find(|m| m.0 == self.module).cloned();
-        let menu = crate::icons::Icon::Menu.square_button(31, "Open menu", BibleMsg::ToggleMenu);
-        let search = crate::icons::Icon::Search.square_button(31, crate::commands::tip("Search the Bible", crate::commands::Command::Search), BibleMsg::OpenSearch);
-        let reading = crate::icons::Icon::Expand.square_button(31, crate::commands::tip("Enter reader mode", crate::commands::Command::ReaderMode), BibleMsg::ReadingMode);
-        let arrow = |icon: crate::icons::Icon, on: bool, tip: String, msg: BibleMsg| icon.arrow_button(on, tip, msg);
-        // Right-clicking either lists the places the tab has been.
-        let nav = iced::widget::mouse_area(
-            row![
-                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, crate::commands::tip("Back", crate::commands::Command::Back), BibleMsg::Back),
-                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, crate::commands::tip("Forward", crate::commands::Command::Forward), BibleMsg::Forward),
-            ]
-            .spacing(4),
-        )
-        .on_right_press(BibleMsg::ToggleHistory);
-        let bar = row![
-            nav,
-            pick_list(modules, module, BibleMsg::PickModule),
-            pick_list(books, Some(BookChoice(self.book)), BibleMsg::PickBook),
-            pick_list(chapters, Some(current), BibleMsg::PickChapter),
-            space::horizontal(),
-            row![reading, search, menu].spacing(4),
+        let widest = |labels: Vec<String>| labels.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+        // What the three pickers need (the widest of what each offers, as a picker is as wide as that), by a guess at
+        // a letter's width, and the rest of the bar's parts: the history buttons, the gaps, the padding and the menu.
+        let wants: [f32; 3] = [
+            widest(modules.iter().map(ToString::to_string).collect()),
+            widest(books.iter().map(ToString::to_string).collect()),
+            widest(chapters.iter().map(ToString::to_string).collect()),
         ]
-        .spacing(12)
-        .align_y(iced::Center);
-        container(bar).padding([8, 16]).into()
+        .map(|chars| chars * 9.5 + 44.0);
+        let needed = 32.0 + 66.0 + wants.iter().sum::<f32>() + 12.0 * 5.0 + 31.0;
+        let module = modules.iter().find(|m| m.0 == self.module).cloned();
+        container(iced::widget::responsive(move |size| {
+            let (modules, books, chapters, module) = (modules.clone(), books.clone(), chapters.clone(), module.clone());
+            let menu = crate::icons::Icon::Menu.square_button(31, "Open menu", BibleMsg::ToggleMenu);
+            let search = crate::icons::Icon::Search.square_button(31, crate::commands::tip("Search the Bible", crate::commands::Command::Search), BibleMsg::OpenSearch);
+            let reading = crate::icons::Icon::Expand.square_button(31, crate::commands::tip("Enter reader mode", crate::commands::Command::ReaderMode), BibleMsg::ReadingMode);
+            let arrow = |icon: crate::icons::Icon, on: bool, tip: String, msg: BibleMsg| icon.arrow_button(on, tip, msg);
+            // Right-clicking either lists the places the tab has been.
+            let nav = iced::widget::mouse_area(
+                row![
+                    arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, crate::commands::tip("Back", crate::commands::Command::Back), BibleMsg::Back),
+                    arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, crate::commands::tip("Forward", crate::commands::Command::Forward), BibleMsg::Forward),
+                ]
+                .spacing(4),
+            )
+            .on_right_press(BibleMsg::ToggleHistory);
+            // Each of search and reader mode is 31 and a gap more than the menu alone, and they go one at a time: reader
+            // mode first, search last.
+            let spare = size.width - needed;
+            let right: Element<'_, BibleMsg> = if spare >= 2.0 * 35.0 {
+                row![reading, search, menu].spacing(4).into()
+            } else if spare >= 35.0 {
+                row![search, menu].spacing(4).into()
+            } else {
+                menu
+            };
+            // The pickers' row takes what is left (and cuts off what does not fit, if they are
+            // at their least), so that the buttons beside it keep their size.
+            // They are as wide as what they offer while there is room for that, and when there is not they are all made
+            // narrower in the same proportion.
+            let total: f32 = wants.iter().sum();
+            let ratio = ((total + spare) / total).clamp(0.0, 1.0);
+            let width = |i: usize| if ratio >= 1.0 { Length::Shrink } else { Length::Fixed((wants[i] * ratio).max(56.0)) };
+            let pickers = container(
+                row![
+                    pick_list(modules, module, BibleMsg::PickModule).width(width(0)),
+                    pick_list(books, Some(BookChoice(self.book)), BibleMsg::PickBook).width(width(1)),
+                    pick_list(chapters, Some(ChapterChoice(self.book, self.chapter_no)), BibleMsg::PickChapter).width(width(2)),
+                ]
+                .spacing(12),
+            )
+            .width(Length::Fill)
+            .clip(true);
+            let bar = row![nav, pickers, right]
+            .spacing(12)
+            .align_y(iced::Center);
+            container(bar).padding([8, 16]).into()
+        }))
+        .height(Length::Fixed(8.0 + 31.0 + 8.0))
+        .into()
     }
 
     pub(crate) fn view_options(&self, sh: &Shared) -> reader::ViewOptions {
