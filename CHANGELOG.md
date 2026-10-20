@@ -4,6 +4,8 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+- Every button that is only a picture now says what it does when you point at it (back and forward, the menu, search, close and new tab, the speaker, the color dots, the small crosses), with its shortcut where it has one.
+
 ## [0.6.0] - 2026-10-17
 
 - "Add Note" on the toolbar under a selection is now "Add Mark", and it opens a card of its own: the caret is in the tags (Enter adds a tag and stays for the next, Tab goes on to the words), then a color (choosing one makes the mark a highlight in it) and a drop-down for the look, then buttons. The words are not shown until you press "Add note" (or Tab). A mark with tags and no words is no longer thrown away when you stop. Marks made with a pen work as before.

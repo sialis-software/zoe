@@ -269,11 +269,11 @@ impl DictTab {
             sh.backend.dictionaries().into_iter().map(|d| DictChoice(d.id, d.abbreviation)).collect();
         let current = choices.iter().find(|c| c.0 == self.module).cloned();
         // The same bar as the Bible tab's: a dictionary picker, then the entry wanted.
-        let arrow = |icon: crate::icons::Icon, on: bool, msg: DictMsg| icon.arrow_button(on, msg);
+        let arrow = |icon: crate::icons::Icon, on: bool, tip: String, msg: DictMsg| icon.arrow_button(on, tip, msg);
         let bar = row![
             row![
-                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, DictMsg::Back),
-                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, DictMsg::Forward),
+                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, crate::commands::tip("Back", crate::commands::Command::Back), DictMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, crate::commands::tip("Forward", crate::commands::Command::Forward), DictMsg::Forward),
             ]
             .spacing(4),
             pick_list(choices, current, DictMsg::PickModule),
@@ -294,7 +294,11 @@ impl DictTab {
                     head = head.push(self.selectable(sh, "lemma", crate::bible_tab::markdown_text(&e.lemma), 34.0, false));
                     if crate::speech::can_say(&e.lemma) {
                         head = head.push(
-                            button(crate::icons::Icon::Speaker.view(22.0)).padding([2, 6]).style(button::text).on_press(DictMsg::Speak(e.lemma.clone())),
+                            crate::icons::with_tip(
+                                button(crate::icons::Icon::Speaker.view(22.0)).padding([2, 6]).style(button::text).on_press(DictMsg::Speak(e.lemma.clone())),
+                                "Say the word aloud",
+                                iced::widget::tooltip::Position::Bottom,
+                            ),
                         );
                     }
                 }

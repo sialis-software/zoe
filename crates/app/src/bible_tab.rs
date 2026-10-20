@@ -560,7 +560,7 @@ impl BibleTab {
         let text = self.card_text(sh, key, markdown);
         // Said aloud by the system's voice, where it has one for the language.
         if !e.lemma.is_empty() && crate::speech::can_say(&e.lemma) {
-            let say = button(crate::icons::Icon::Speaker.view(size)).padding([2, 4]).style(button::text).on_press(BibleMsg::Speak(e.lemma.clone()));
+            let say = crate::icons::tip(button(crate::icons::Icon::Speaker.view(size)).padding([2, 4]).style(button::text).on_press(BibleMsg::Speak(e.lemma.clone())), "Say the word aloud");
             return row![say, text].spacing(4).into();
         }
         text
@@ -1724,10 +1724,13 @@ impl BibleTab {
         };
         let mark = button(text(label).size(size)).padding([4, 10]).style(move |theme, status| quiet(theme, status, read)).on_press(BibleMsg::LogChapter);
         // To its left, a small clock: the days the chapter was read, in a card.
-        let history = button(crate::icons::Icon::History.view(size + 2.0))
-            .padding([4, 6])
-            .style(move |theme, status| quiet(theme, status, false))
-            .on_press(BibleMsg::ToggleReadCard);
+        let history = crate::icons::tip(
+            button(crate::icons::Icon::History.view(size + 2.0))
+                .padding([4, 6])
+                .style(move |theme, status| quiet(theme, status, false))
+                .on_press(BibleMsg::ToggleReadCard),
+            "Show the days this chapter was read",
+        );
         // The card is an overlay, as the reader's other cards are: over the text under its button, let go of by a click
         // elsewhere or Escape, not making room.
         let card = self.read_card.then(|| self.read_card_view(sh, size));
@@ -1823,30 +1826,15 @@ impl BibleTab {
         let (modules, books, chapters) = self.choices(sh);
         let current = ChapterChoice(self.book, self.chapter_no);
         let module = modules.iter().find(|m| m.0 == self.module).cloned();
-        let menu = button(container(crate::icons::Icon::Menu.view(18.0)).center(Length::Fill))
-            .width(31)
-            .height(31)
-            .padding(0)
-            .style(button::secondary)
-            .on_press(BibleMsg::ToggleMenu);
-        let search = button(container(crate::icons::Icon::Search.view(18.0)).center(Length::Fill))
-            .width(31)
-            .height(31)
-            .padding(0)
-            .style(button::secondary)
-            .on_press(BibleMsg::OpenSearch);
-        let reading = button(container(crate::icons::Icon::Expand.view(18.0)).center(Length::Fill))
-            .width(31)
-            .height(31)
-            .padding(0)
-            .style(button::secondary)
-            .on_press(BibleMsg::ReadingMode);
-        let arrow = |icon: crate::icons::Icon, on: bool, msg: BibleMsg| icon.arrow_button(on, msg);
+        let menu = crate::icons::Icon::Menu.square_button(31, "Open menu", BibleMsg::ToggleMenu);
+        let search = crate::icons::Icon::Search.square_button(31, crate::commands::tip("Search the Bible", crate::commands::Command::Search), BibleMsg::OpenSearch);
+        let reading = crate::icons::Icon::Expand.square_button(31, crate::commands::tip("Enter reader mode", crate::commands::Command::ReaderMode), BibleMsg::ReadingMode);
+        let arrow = |icon: crate::icons::Icon, on: bool, tip: String, msg: BibleMsg| icon.arrow_button(on, tip, msg);
         // Right-clicking either lists the places the tab has been.
         let nav = iced::widget::mouse_area(
             row![
-                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, BibleMsg::Back),
-                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, BibleMsg::Forward),
+                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, crate::commands::tip("Back", crate::commands::Command::Back), BibleMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, crate::commands::tip("Forward", crate::commands::Command::Forward), BibleMsg::Forward),
             ]
             .spacing(4),
         )
@@ -2038,6 +2026,7 @@ impl BibleTab {
                     ..button::Style::default()
                 })
                 .on_press(BibleMsg::CardColors);
+            let dot = crate::icons::tip(dot, "Choose a color");
             let panel = open.then(|| {
                 container(crate::color_grid(
                     crate::state::PEN_COLORS.iter().position(|c| c.eq_ignore_ascii_case(&mark.color)).unwrap_or(usize::MAX),

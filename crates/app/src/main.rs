@@ -185,7 +185,7 @@ fn color_grid<'a, M: Clone + 'a>(chosen: usize, on: impl Fn(usize) -> M) -> Elem
         for i in places {
             let color = bible_tab::hex_color(state::PEN_COLORS[i], 1.0).unwrap_or(iced::Color::WHITE);
             let ringed = i == chosen % state::PEN_COLORS.len().max(1) && chosen != usize::MAX;
-            cells = cells.push(
+            cells = cells.push(icons::tip(
                 button(space::horizontal())
                     .width(22)
                     .height(22)
@@ -200,7 +200,8 @@ fn color_grid<'a, M: Clone + 'a>(chosen: usize, on: impl Fn(usize) -> M) -> Elem
                         ..button::Style::default()
                     })
                     .on_press(on(i)),
-            );
+                "Use this color",
+            ));
         }
         grid = grid.push(cells);
     }
@@ -3135,17 +3136,19 @@ impl App {
     fn pens_settings(&self) -> Element<'_, Message> {
         let swatch = |hex: &str, msg: Message| -> Element<'_, Message> {
             let color = bible_tab::hex_color(hex, 1.0).unwrap_or(iced::Color::WHITE);
-            button(space::horizontal())
-                .width(22)
-                .height(22)
-                .padding(0)
-                .style(move |_: &Theme, _| button::Style {
-                    background: Some(color.into()),
-                    border: iced::Border { radius: 11.0.into(), color: iced::Color { a: 0.5, ..iced::Color::WHITE }, width: 1.0 },
-                    ..button::Style::default()
-                })
-                .on_press(msg)
-                .into()
+            icons::tip(
+                button(space::horizontal())
+                    .width(22)
+                    .height(22)
+                    .padding(0)
+                    .style(move |_: &Theme, _| button::Style {
+                        background: Some(color.into()),
+                        border: iced::Border { radius: 11.0.into(), color: iced::Color { a: 0.5, ..iced::Color::WHITE }, width: 1.0 },
+                        ..button::Style::default()
+                    })
+                    .on_press(msg),
+                "Choose a color",
+            )
         };
         let mut list = column![].spacing(4);
         for (i, pen) in self.sh.settings.pens.iter().enumerate() {
@@ -3155,7 +3158,7 @@ impl App {
                     swatch(&pen.color, Message::EditPenColor(i)),
                     text(format!("#{}", pen.tag)).size(13).width(Length::Fill),
                     button(text(style).size(12)).padding([1, 8]).style(button::secondary).on_press(Message::CyclePenStyle(i)),
-                    button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(Message::RemovePen(i)),
+                    icons::tip(button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(Message::RemovePen(i)), "Remove mark pen"),
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -3211,7 +3214,7 @@ impl App {
                         .padding([4, 8])
                         .style(button::text)
                         .on_press(Message::LoadLayout(layout.name.clone())),
-                    button(text("\u{00D7}").size(14)).padding([2, 8]).style(button::text).on_press(Message::DeleteLayout(layout.name.clone())),
+                    icons::tip(button(text("\u{00D7}").size(14)).padding([2, 8]).style(button::text).on_press(Message::DeleteLayout(layout.name.clone())), "Delete layout"),
                 ]
                 .align_y(iced::Center),
             );
@@ -3301,8 +3304,8 @@ impl App {
         let outer = self.outer(id);
         let bar = container(
             row![
-                icons::Icon::Back.arrow_button(outer.back, Message::NavTab(id, true)),
-                icons::Icon::Forward.arrow_button(outer.forward, Message::NavTab(id, false)),
+                icons::Icon::Back.arrow_button(outer.back, crate::commands::tip("Back", crate::commands::Command::Back), Message::NavTab(id, true)),
+                icons::Icon::Forward.arrow_button(outer.forward, crate::commands::tip("Forward", crate::commands::Command::Forward), Message::NavTab(id, false)),
             ]
             .spacing(4),
         )
@@ -3667,7 +3670,7 @@ impl App {
             .interaction(iced::mouse::Interaction::Pointer);
             let chip = row![
                 name,
-                button(text("×").size(15)).padding([2, 6]).style(button::text).on_press(Message::CloseTab(id)),
+                icons::with_tip(button(text("×").size(15)).padding([2, 6]).style(button::text).on_press(Message::CloseTab(id)), crate::commands::tip("Close tab", crate::commands::Command::CloseTab), tooltip::Position::Bottom),
             ]
             .align_y(iced::Center);
             let lit = self.drag.as_ref().is_some_and(|d| d.over == Some(Over::Chip(id)));
@@ -3699,12 +3702,16 @@ impl App {
         }
         bar = bar.push(
             // As tall as a tab, with the plus in the middle of it.
-            button(container(text("+").size(17)).center(Length::Fill))
-                .width(30)
-                .height(30)
-                .padding(0)
-                .style(button::text)
-                .on_press(Message::NewTab(pane.id)),
+            icons::with_tip(
+                button(container(text("+").size(17)).center(Length::Fill))
+                    .width(30)
+                    .height(30)
+                    .padding(0)
+                    .style(button::text)
+                    .on_press(Message::NewTab(pane.id)),
+                crate::commands::tip("New tab", crate::commands::Command::NewTab),
+                tooltip::Position::Bottom,
+            ),
         );
         let bar = container(bar)
             .width(Length::Fill)

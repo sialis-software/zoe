@@ -545,7 +545,7 @@ impl App {
             status = status.push(
                 row![
                     text(n.text.clone()).size(13).style(style).width(Length::Fill),
-                    button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(mm(ManagerMsg::Dismiss)),
+                    crate::icons::tip(button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(mm(ManagerMsg::Dismiss)), "Dismiss"),
                 ]
                 .align_y(iced::Center),
             );

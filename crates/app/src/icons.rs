@@ -3,7 +3,7 @@
 //!
 //! The files are plain strokes on a 24 unit square; the colour in them is replaced when drawn.
 
-use iced::widget::{button, container, svg};
+use iced::widget::{button, container, svg, text, tooltip};
 use iced::{Color, Element, Length, Theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +100,18 @@ impl Icon {
     /// A history button (back, forward), dressed like the dropdowns beside it. When there is nowhere
     /// to go it is plainly off: no fill, only a faint outline, and the arrow faint, so it does not
     /// look like the ones that work.
-    pub fn arrow_button<'a, M: Clone + 'a>(self, on: bool, message: M) -> Element<'a, M> {
+    pub fn arrow_button<'a, M: Clone + 'a>(self, on: bool, tip: impl Into<String>, message: M) -> Element<'a, M> {
+        with_tip(self.arrow_button_bare(on, message), tip, tooltip::Position::Bottom)
+    }
+
+    /// The square, secondary-styled button of a tab's bar (the menu, search) holding this icon, with the tip it must have.
+    pub fn square_button<'a, M: Clone + 'a>(self, side: impl Into<Length>, tip: impl Into<String>, message: M) -> Element<'a, M> {
+        let side = side.into();
+        let b = button(container(self.view(18.0)).center(Length::Fill)).width(side).height(side).padding(0).style(button::secondary).on_press(message);
+        with_tip(b, tip, tooltip::Position::Bottom)
+    }
+
+    fn arrow_button_bare<'a, M: Clone + 'a>(self, on: bool, message: M) -> Element<'a, M> {
         let size = |b: button::Button<'a, M>| b.width(31).height(31).padding(0);
         if on {
             return size(button(container(self.view_text(18.0, 1.0)).center(Length::Fill)))
@@ -143,9 +154,27 @@ impl Icon {
     }
 }
 
+/// A button (or anything) with the app's tooltip over it: the action it does, and its shortcut where it has one
+/// (see `commands::tip`). Every button that is only a picture goes through this or a constructor above that takes the tip.
+pub fn with_tip<'a, M: 'a>(content: impl Into<Element<'a, M>>, tip: impl Into<String>, position: tooltip::Position) -> Element<'a, M> {
+    tooltip(content, container(text(tip.into()).size(12)).padding(4).style(container::rounded_box), position).into()
+}
+
+/// `with_tip` below the thing, as most are.
+pub fn tip<'a, M: 'a>(content: impl Into<Element<'a, M>>, tip: impl Into<String>) -> Element<'a, M> {
+    with_tip(content, tip, tooltip::Position::Bottom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tipped_button_is_a_tooltip_and_the_square_one_asks_for_its_tip() {
+        let _: Element<'_, ()> = with_tip(button(text("x")), "Close tab", tooltip::Position::Bottom);
+        let _: Element<'_, ()> = Icon::Menu.square_button(31, "Open menu", ());
+        let _: Element<'_, ()> = Icon::Back.arrow_button(false, "Back", ());
+    }
 
     const ALL: [Icon; 22] = [
         Icon::Link,

@@ -214,14 +214,14 @@ impl CommentaryTab {
         let current = commentaries.iter().find(|c| c.0 == self.module).cloned();
         let books: Vec<BookChoice> = Book::all().map(BookChoice).collect();
         let chapters: Vec<u16> = (1..=sword::chapter_count(self.book)).collect();
-        let arrow = |icon: crate::icons::Icon, on: bool, msg: CommentaryMsg| {
+        let arrow = |icon: crate::icons::Icon, on: bool, tip: &'static str, msg: CommentaryMsg| {
             let b = button(container(icon.view(18.0)).center(Length::Fill)).width(31).height(31).padding(0).style(button::secondary);
-            if on { b.on_press(msg) } else { b }
+            crate::icons::with_tip(if on { b.on_press(msg) } else { b }, tip, iced::widget::tooltip::Position::Bottom)
         };
         let bar = row![
             row![
-                arrow(crate::icons::Icon::Back, self.neighbour(false).is_some(), CommentaryMsg::PrevChapter),
-                arrow(crate::icons::Icon::Forward, self.neighbour(true).is_some(), CommentaryMsg::NextChapter),
+                arrow(crate::icons::Icon::Back, self.neighbour(false).is_some(), "Previous chapter", CommentaryMsg::PrevChapter),
+                arrow(crate::icons::Icon::Forward, self.neighbour(true).is_some(), "Next chapter", CommentaryMsg::NextChapter),
             ]
             .spacing(4),
             pick_list(commentaries, current, CommentaryMsg::PickModule),

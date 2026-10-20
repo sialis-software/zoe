@@ -50,6 +50,14 @@ impl Shortcut {
     }
 }
 
+/// A tooltip's text for the button of a command: what it does, then its shortcut where it has one (`Back (⌘[)`).
+pub fn tip(action: &str, command: Command) -> String {
+    match command.shortcut() {
+        Some(shortcut) => format!("{action} ({})", shortcut.display()),
+        None => action.to_string(),
+    }
+}
+
 impl Command {
     pub const ALL: [Command; 18] = [
         Command::Settings,
@@ -222,6 +230,13 @@ impl MenuState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_tip_names_the_action_and_the_shortcut_when_there_is_one() {
+        let back = super::tip("Back", super::Command::Back);
+        assert!(back.starts_with("Back (") && back.ends_with(')') && back.contains('['), "{back}");
+        assert_eq!(super::tip("Reader mode", super::Command::ReaderMode), "Reader mode");
+    }
+
     use super::*;
 
     #[test]

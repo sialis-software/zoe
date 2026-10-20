@@ -1334,7 +1334,7 @@ impl NoteTab {
                     .on_submit(NoteMsg::CommitRename)
                     .size(16)
                     .padding([4, 10]),
-                square(text("\u{00D7}").size(18).into(), NoteMsg::CancelRename),
+                crate::icons::with_tip(square(text("\u{00D7}").size(18).into(), NoteMsg::CancelRename), "Cancel rename", iced::widget::tooltip::Position::Bottom),
             ]
             .spacing(6)
             .into(),
@@ -1353,11 +1353,11 @@ impl NoteTab {
             .on_press(NoteMsg::TogglePicker)
             .into(),
         };
-        let arrow = |icon: crate::icons::Icon, on: bool, msg: NoteMsg| icon.arrow_button(on, msg);
+        let arrow = |icon: crate::icons::Icon, on: bool, tip: String, msg: NoteMsg| icon.arrow_button(on, tip, msg);
         let mut header = row![
             row![
-                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, NoteMsg::Back),
-                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, NoteMsg::Forward),
+                arrow(crate::icons::Icon::Back, self.history.can_back() || outer.back, crate::commands::tip("Back", crate::commands::Command::Back), NoteMsg::Back),
+                arrow(crate::icons::Icon::Forward, self.history.can_forward() || outer.forward, crate::commands::tip("Forward", crate::commands::Command::Forward), NoteMsg::Forward),
             ]
             .spacing(4),
             container(who).width(Length::Fill),
@@ -1365,7 +1365,7 @@ impl NoteTab {
         .spacing(16)
         .align_y(iced::Center);
         // The menu at the right edge, as in the Bible tab.
-        header = header.push(square(crate::icons::Icon::Menu.view(18.0), NoteMsg::ToggleMenu));
+        header = header.push(crate::icons::with_tip(square(crate::icons::Icon::Menu.view(18.0), NoteMsg::ToggleMenu), "Open menu", iced::widget::tooltip::Position::Bottom));
 
         // With no note at all there is nothing to select or edit: just a way to make one.
         let no_notes = sh.first_ordinary_note().is_empty() && !sh.notes.contains_key(&self.path);
@@ -1736,6 +1736,7 @@ impl NoteTab {
                 ..button::Style::default()
             })
             .on_press(NoteMsg::MarkColors);
+        let dot = crate::icons::tip(dot, "Choose a color");
         // The colors are a panel over the window under the swatch: it does not make the section taller.
         let panel = open.then(|| {
             container(crate::color_grid(
@@ -1866,7 +1867,7 @@ impl NoteTab {
                 row![
                     text(format!("{name}{kind}")).size(12).style(text::secondary).width(90),
                     control,
-                    button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(NoteMsg::PropRemove(i)),
+                    crate::icons::tip(button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(NoteMsg::PropRemove(i)), "Remove property"),
                 ]
                 .spacing(8)
                 .align_y(iced::Center),
@@ -1884,7 +1885,7 @@ impl NoteTab {
                 text_input("name", &self.new_key).on_input(NoteMsg::NewKey).on_submit(NoteMsg::AddProp).size(13).padding([3, 6]).width(140),
                 pick_list(PropType::ALL.to_vec(), Some(self.new_type), NoteMsg::NewType).text_size(13).padding([3, 8]),
                 button(text("Add").size(12)).padding([3, 10]).style(button::secondary).on_press_maybe(ok.then_some(NoteMsg::AddProp)),
-                button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(NoteMsg::ToggleAddProp),
+                crate::icons::tip(button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(NoteMsg::ToggleAddProp), "Cancel new property"),
             ]
             .spacing(8)
             .align_y(iced::Center)

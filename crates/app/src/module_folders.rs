@@ -146,7 +146,7 @@ impl App {
             list = list.push(
                 row![
                     text(tidy(folder)).size(12).width(Length::Fill),
-                    button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(Message::Modules(ModulesMsg::Remove(i))),
+                    crate::icons::tip(button(text("\u{00D7}").size(14)).padding([0, 6]).style(button::text).on_press(Message::Modules(ModulesMsg::Remove(i))), "Remove folder"),
                 ]
                 .align_y(iced::Center),
             );
