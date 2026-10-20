@@ -4,6 +4,8 @@ What changed in each version of Zoe, newest first. The part under **Unreleased**
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-20
+
 - In a note tab the first actions of the menu (new note, copy link, backlinks) are buttons beside it while the pane is wide enough, and are in the menu again, last first, as it narrows. Rename, show or hide formatting, and delete are only in the menu, which is left out when nothing is in it.
 - The first run's welcome window is simpler: the Create vault button is in the middle, the folder is in dim text under it, and Persecution mode is a single switch at the foot, with a few words of what it does as a tooltip.
 - A new vault has a note, "Welcome to Zoe", that shows the editor by example: links to notes, headings and passages, a verse quoted from the Bible, and a list of tasks to tick.
