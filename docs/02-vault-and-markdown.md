@@ -47,7 +47,6 @@ All keys optional unless noted. Keys are flat (not nested) so other tools can sh
 | `tags` | all | list of topics (see §4) |
 | `created` | all | ISO-8601 timestamp |
 | `aliases` | documents | alternative names for link resolution |
-| `series` | all (marks, notes, documents) | the series this file belongs to; a list of wikilinks (see §4, 05 §9) |
 | `anchor`, `style`, `color` | `margin` | see 05 §2 |
 | `module`, `quote`, `prefix`, `suffix` | `margin` (word-level only) | omitted on verse-level marks, which are tied to the reference and show in every module |
 | `refs` | documents | optional loose Scripture references in addition to body links |
@@ -77,7 +76,6 @@ Three separate axes, deliberately not mixed:
 
 - **`type`** — structural, known to the app. Small closed set.
 - **Tags** — the user's own topics, free-form. Both frontmatter `tags: [grace]` and inline `#grace` are read. Hierarchy with slashes: `#topic/grace`. The app writes a tag only on behalf of a pen (a pen can carry a tag, e.g. yellow = `promise`).
-- **Series** — a named, curated collection that cuts across file types and folders: a study's documents, its margin notes and highlights, related notes. Unlike a tag it has its own document and identity, and may be ordered. Membership is declared by the member: `series: ["[[Romans Study]]"]` (quoted, as YAML needs). A file can be in several series. Planned, not yet built; see 05 §9.
 - **Task checkboxes** — `- [ ]` / `- [x]` in any document. The app may offer cross-vault views of open items later, but ordinary documents stay ordinary markdown.
 
 ## 5. Link syntax

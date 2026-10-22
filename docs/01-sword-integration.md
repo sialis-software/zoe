@@ -115,7 +115,7 @@ A window of its own, opened like the settings window, for the modules in every f
 ## 8. Rust landscape and licensing
 
 - **rsword_chirho** (docs.rs, v0.3.0, GPL-2.0-or-later): pure-Rust port claiming zText/zCom/zLD/RawGenBook and multiple versifications. Young and apparently single-author; evaluate quality before depending on it. Pre-1.0, naming suggests an unusual provenance — read the code before trusting it.
-- The reference **libsword is GPL-2**. Independent reimplementation from the *format* is legally cleaner than translating C++; but if we copy/translate source or depend on a GPL crate, our application must be GPL-compatible. **Decision needed (see 04):** GPL application (simplest, fits ecosystem — Xiphos and BibleTime are GPL) vs. clean-room format reader under a permissive license.
+- The reference **libsword is GPL-2**. Independent reimplementation from the *format* is legally cleaner than translating C++; but if we copy/translate source or depend on a GPL crate, our application must be GPL-compatible. Zoe is a clean-room format reader under permissive licenses (MIT or Apache-2.0), so no GPL source is copied or translated; GPL implementations serve only as format references.
 - Other readers exist as format references: **pysword** (Python, ztext/ztext4/rawtext/rawtext4), **swordjs** (zText only). Both are useful as a second implementation to cross-check.
 - Existing C++ tools (`mod2imp`, `diatheke`, `osis2mod`) make an ideal **oracle** for tests.
 

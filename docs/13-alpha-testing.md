@@ -1,6 +1,6 @@
 # Giving an alpha to testers
 
-For the person releasing: make a release as usual (`scripts/release.sh minor`, or `patch` for a follow-up, then push the commit and the tag). The Release workflow drafts a GitHub release with the macOS, Windows, and Linux downloads. Tick **Set as a pre-release** when publishing the draft, and send the testers the link (the repository must be public or the testers invited to it; see `11-releasing.md`). Until the packages are signed, send the notes below with it.
+An alpha is released as in `11-releasing.md`, and the draft GitHub release is published with **Set as a pre-release** ticked. Until the packages are signed, send the notes below with the link.
 
 Versions stay plain numbers (0.4.0, 0.4.1): a suffix such as `-alpha.1` is not handled by `release.sh`'s ordering and is not a valid macOS bundle version.
 

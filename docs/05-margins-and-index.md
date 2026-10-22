@@ -136,46 +136,7 @@ The app now runs on a real vault and real modules (crates `vault`, `sword`).
 - **Seed data**: an empty vault is seeded with four linked notes and nine marks anchored in ASV's real text (a quote a module words differently is skipped). `zoe --reseed` restores the samples without touching other files.
 - **Index**: SQLite in the data folder's `cache/` (outside the vault, per §6): `files`, `links` (verse/embed/note/sword links plus each mark's anchor, as book/chapter/verse ranges), and an FTS5 table. It syncs incrementally by content hash on start and per save, and a test deletes and rebuilds it. The UI does not read it yet: `annotated_verses` and "notes on this selection" still scan the in-memory notes. Verse ranges use (book, chapter, v1, v2) rather than the integer ordinals sketched above; switch when versification mapping arrives.
 
-## 8. Open questions
-
-- Highlights across translations: word-level marks stay with their module and verse-level marks show everywhere. Is best-effort word re-matching in other modules worth it later?
-- Overlapping marks of different pens on the same words: layering rules, and whether the UI offers "show only pen X".
-- Margin column vs. inline threshold (pane width), and per-user preference.
-- Does a long margin note belong in the margin at all, or should long text promote to a document automatically?
-- Printing/exporting a chapter with its margins (PDF/markdown) — nice to have.
-
-## 9. Series (planned)
-
-A **series** is a collection of related files of any kind: documents, margin notes, highlights. It is for organisation that folders and tags do not give: a study of Romans might include a document per week, forty highlights spread across the epistle, and a few free-standing notes, all in different places on disk.
-
-Not built yet. The prototype's marks have no `series` key. This section records the intended design so nothing built now rules it out.
-
-**Representation (recommended)**
-- A series is a **document** (`type: series`) with a title and optional description body. It can live anywhere; `series/` is the suggested default.
-- **Members declare membership** with a frontmatter key, on any file including a bare highlight:
-  ```yaml
-  series: ["[[Romans Study]]", "[[Advent 2026]]"]
-  ```
-  Wikilinks, not plain names, so the existing rename handling (02 §7) rewrites them and no second naming mechanism is needed.
-- The **index derives membership** as a new link kind (`series`) in the `links` table (§6). "Everything in this series" is a backlink query. Nothing about series needs to be stored outside markdown, so the invariant in §6 still holds.
-- **Ordering** is optional and lives in the series document (an ordered list of links in its body). Without it, members sort by `created`.
-
-**Why not the alternatives**
-- *Tags:* a tag is a flat topic label with no identity of its own. A series has a description, can be ordered, and is something you open.
-- *Folders:* a file lives in one folder, and marks live in `margins/`. Membership has to cut across both.
-- *A manifest file listing members:* ordering is natural there, but members would not describe themselves, a heavily highlighted series would put hundreds of entries in one file that merges badly when synced, and renaming a member would need the manifest edited.
-
-**Ideas this enables**
-- An **active series**: while it is set, newly created marks, margin notes, and documents join it automatically.
-- A series view: its members by date, or by the passage each covers (derived from anchors and links).
-- Marks in the chooser (reader) can show which series they belong to.
-- A series exported as a single document or as a SWORD-style book (see 02 §6). An ordered series is close to a user "book", so those may merge later.
-
-**Open questions**
-- Can series nest (a series within a series)? Sub-series are probably better modelled by ordering plus sections in the series document.
-- Does a series carry a Scripture scope, or is that always derived from its members?
-- Should `books/` and `studies/` be absorbed into series, leaving one concept?
-- Does deleting a series document remove membership, or leave dangling links that the app offers to repair?
+## 8. Configuration, names, and packaging
 
 ### Config and data
 
@@ -195,7 +156,7 @@ The app is called Zoe. The hidden folder in a vault is `.zoe` (earlier `.bible-s
 
 `scripts/package.sh [macos|windows|linux|all]` makes the packages with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) (config: `Packager.toml`; `cargo install cargo-packager cargo-xwin --locked`), from a Mac. They land in `target/dist`, unsigned:
 
-- macOS: `Zoe.app` and a `.dmg`, for this Mac's architecture.
+- macOS: `Zoe.app` and a `.dmg`, for the building Mac's architecture.
 - Windows: an NSIS installer for x64, cross-built with `cargo xwin` (needs brew's `llvm@21`, `lld@21`, and `makensis`). The icon and name are written into the .exe by `crates/app/build.rs`, and a release build has no console window.
 - Linux: a `.deb` and an AppImage, built in a `rust:1-bookworm` Docker container (`LINUX_PLATFORM=linux/amd64` for x86_64, slowly, by emulation).
 

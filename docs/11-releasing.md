@@ -66,7 +66,7 @@ What it needs, once (an Apple Developer Program membership, US$99 a year):
 
 1. **A Developer ID Application certificate.** developer.apple.com, Certificates, add one of the type "Developer ID Application" (or in Xcode: Settings, Accounts, Manage Certificates). Find it in Keychain Access, export it with its private key as `zoe-signing.p12`, with a password of your own.
 2. **An App Store Connect API key.** appstoreconnect.apple.com, Users and Access, Integrations, Team Keys: make one with the Developer role. Download `AuthKey_XXXXXXXXXX.p8` (it can be downloaded once). Note the Key ID and the Issuer ID at the top of that page.
-3. **Put them in GitHub as secrets** (Settings, Secrets and variables, Actions, or `gh secret set` from the repository). Feeding each from a file keeps it out of your shell history and out of any conversation:
+3. **Put them in GitHub as secrets** (Settings, Secrets and variables, Actions, or `gh secret set` from the repository). Feeding each from a file or a prompt keeps it out of the shell history:
 
    ```
    base64 -i zoe-signing.p12 | gh secret set MACOS_CERTIFICATE
@@ -76,11 +76,11 @@ What it needs, once (an Apple Developer Program membership, US$99 a year):
    gh secret set APPLE_API_ISSUER                    # asks for it
    ```
 
-   Then delete the `.p12` and `.p8` from the Downloads folder (keep them in a password manager).
+   Then delete the local `.p12` and `.p8` files.
 
 Without the secrets the image is made unsigned and the run shows a warning (so that releases can go out before the Apple account is ready).
 
-To sign by hand on this Mac (for a build to give someone directly):
+To sign by hand on a Mac (for a build to give someone directly):
 
 ```
 xcrun notarytool store-credentials zoe-notary --key AuthKey_XXXXXXXXXX.p8 --key-id <KEY ID> --issuer <ISSUER ID>
@@ -114,8 +114,8 @@ To add a migration, put an entry in `upgrade::MIGRATIONS` (`version`: the releas
 
 ## 6. Trying an upgrade end to end
 
-1. Check out the old release (`git checkout v0.2.0`), build and install it: `scripts/bundle-macos.sh && scripts/install-macos.sh`. Run it, make some marks and notes, change a setting. (0.2.0 is from before versions were noted, so it leaves no `version.json`; from the next release on, the file is there.)
-2. Back on the branch with the new work, add the changelog lines and `scripts/release.sh minor`, then `scripts/install-macos.sh`.
-3. Start it: the toast says it updated ("Updated to 0.3.0": the old version was never noted, so there is no "from"); `~/.local/share/zoe/backups/earlier-to-0.3.0/` holds the old settings and session, and `version.json` says 0.3.0. From then on a release says "Updated to X from Y" and the backup is `Y-to-X`.
-4. To see a downgrade, install the old release again: no warning from 0.2.0 (it knows nothing of versions), but from the next release on an older one is warned of what it opens, and `version.json` keeps the newer version.
-5. To rehearse an upgrade without touching the real folders: `ZOE_HOME=/tmp/zoe-try` with the old and the new build, in turn. The installed app takes `ZOE_HOME` too: `ZOE_HOME=/tmp/zoe-try /Applications/Zoe.app/Contents/MacOS/Zoe`.
+1. Check out the old release tag, build it, and run it with a throwaway folder: `ZOE_HOME=/tmp/zoe-try cargo run -p zoe`. Make some marks and notes and change a setting.
+2. Check out the new work and run it with the same `ZOE_HOME`. The toast says "Updated to X from Y", `backups/Y-to-X/` holds the old settings and session, and `version.json` says X.
+3. To see a downgrade, run the old build again with the same `ZOE_HOME`: a build that records versions warns of what it opens, and `version.json` keeps the newer version.
+
+A release made before versions were noted leaves no `version.json`, so its upgrade says "Updated to X" with no "from" and the backup is `earlier-to-X`.

@@ -56,7 +56,7 @@ The app is mostly **rich text**: selectable, inline-clickable (verse refs, Stron
 
 Facts here move quickly; **re-verify current state of each before choosing**.
 
-**Decision:** native is preferred, and Phase 1 prototypes the UI against a mock `core` backend (see 04 §2). The recommendation below stands as the method.
+**Decision:** native is preferred. The recommendation below stands as the method.
 
 **Recommendation:** keep all logic in GUI-agnostic crates (above), then run a 1–2 week spike rendering a verse-with-clickable-refs passage + a markdown editor in iced and a webview option, and decide on evidence. If "native Rust" is a hard requirement, iced is the likely candidate with a custom editor widget on `cosmic-text`; if it is a preference, a webview shell removes most of the UI risk.
 

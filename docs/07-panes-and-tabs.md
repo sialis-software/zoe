@@ -118,12 +118,6 @@ Three small JSON files in `<data home>/state/`, written through a temporary file
 
 A saved workspace holds the split tree (axes and sizes), each pane's tabs and which one shows, the focused and zoomed pane, and per tab what it shows: Bible module, book, chapter, scroll, and which markers are on; note path; dictionary and key. Restoring leaves out a tab whose module or note is gone (a chapter the module lacks opens at its first), drops panes left empty, and changes nothing if no tab at all can be put back.
 
-## Not yet
-
-- A tab's back/forward history, and a note's cursor and scroll, are not kept between sessions or in saved layouts.
-- Browsing or searching a dictionary's keys (a dictionary tab looks up one key at a time).
-- More tab types: search results, a commentary.
-
 ## Icons
 
 Icons are SVG files in `crates/app/assets/icons` (strokes on a 24 unit square, no colour of their own), built into the program and drawn by `icons.rs` in the colour of a secondary button's label. To add one: drop in an SVG with `viewBox="0 0 24 24"`, add a variant to `Icon`, and use `Icon::X.view(size)`. Anything that is a picture should be one of these, not text glyphs or boxes drawn in code.
