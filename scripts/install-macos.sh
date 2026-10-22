@@ -39,14 +39,16 @@ if [ "$channel" = dev ] && [ -z "$force" ]; then
 fi
 
 target=/Applications/Zoe.app
+# Only the installed app counts: a Zoe from a build for developing, or the phone app in a simulator, is not in the way.
+running() { pgrep -f "^$target/Contents/MacOS/Zoe" >/dev/null; }
 before=""
 [ -d "$target" ] && before=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$target/Contents/Info.plist" 2>/dev/null || true)
 
-if pgrep -x Zoe >/dev/null; then
+if running; then
     echo "Zoe is running: asking it to quit."
     osascript -e 'tell application "Zoe" to quit' >/dev/null 2>&1 || true
-    for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -x Zoe >/dev/null || break; sleep 1; done
-    if pgrep -x Zoe >/dev/null; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do running || break; sleep 1; done
+    if running; then
         echo "It is still running: quit it, then run this again." >&2
         exit 1
     fi
