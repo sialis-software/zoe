@@ -70,6 +70,8 @@ pub enum DictMsg {
     Text(String, Action),
     /// A link in the entry's text (to another entry): the app decides where it opens, as for any link.
     Link(study_core::markdown::LinkTarget),
+    /// The pointer came onto a link in the entry's text (at this point of the window), or left it.
+    LinkHover(Option<(study_core::markdown::LinkTarget, iced::Point)>),
 }
 
 pub struct DictTab {
@@ -161,6 +163,8 @@ impl DictTab {
             DictMsg::OpenVerse(..) => {}
             // Following a link is for the workspace to do.
             DictMsg::Link(_) => {}
+            // Showing a card for it is for the workspace to do.
+            DictMsg::LinkHover(_) => {}
             // The text is read, not written: only what selects or moves is taken.
             DictMsg::Text(name, action) => {
                 if matches!(
@@ -255,6 +259,7 @@ impl DictTab {
             .on_action(move |action| DictMsg::Text(name.clone(), action))
             .follow_links(true)
             .on_link(DictMsg::Link)
+            .on_link_hover(DictMsg::LinkHover)
             .into();
         if !quiet {
             return editor;

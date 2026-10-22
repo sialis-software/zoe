@@ -113,6 +113,9 @@ pub struct LiveEditor<'a, Message> {
     on_link_menu: Option<Box<dyn Fn(LinkTarget, Point) -> Message + 'a>>,
     /// A link pressed and then dragged: the link, and where the pointer is (in the window).
     on_link_drag: Option<Box<dyn Fn(LinkTarget, Point) -> Message + 'a>>,
+    /// The pointer came onto a link showing as its label (the link, and where the pointer is, in the window), or
+    /// left the link it was on (none).
+    on_link_hover: Option<Box<dyn Fn(Option<(LinkTarget, Point)>) -> Message + 'a>>,
     embed: Option<Box<EmbedFn<'a>>>,
     /// A text that is read, selected and copied but not changed: nothing is revealed as raw
     /// source and there is no caret to see.
@@ -177,6 +180,7 @@ fn editor<'a, Message>(doc: Cow<'a, Document>, pal: Palette, read_only: bool) ->
         on_link: None,
         on_link_menu: None,
         on_link_drag: None,
+        on_link_hover: None,
         embed: None,
         reading: false,
         on_scroll: None,
@@ -306,6 +310,11 @@ impl<'a, Message> LiveEditor<'a, Message> {
     /// Called when a link is followed (Cmd/Ctrl-click).
     pub fn on_link_drag(mut self, f: impl Fn(LinkTarget, Point) -> Message + 'a) -> Self {
         self.on_link_drag = Some(Box::new(f));
+        self
+    }
+
+    pub fn on_link_hover(mut self, f: impl Fn(Option<(LinkTarget, Point)>) -> Message + 'a) -> Self {
+        self.on_link_hover = Some(Box::new(f));
         self
     }
 
@@ -499,6 +508,8 @@ struct State {
     /// Remembered x for repeated Up/Down.
     goal_x: Option<f32>,
     drag: Option<Drag>,
+    /// The link the pointer is on, as last told to `on_link_hover`.
+    hovered: Option<LinkTarget>,
     last_click: Option<Click>,
     modifiers: keyboard::Modifiers,
     /// Where the caret was when we last made sure it was in view.
@@ -1375,7 +1386,23 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for LiveEditor<'_, Message>
                 }
             }
 
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                if let (Some(f), Some(_)) = (&self.on_link_hover, state.hovered.take()) {
+                    shell.publish(f(None));
+                }
+            }
+
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some(f) = &self.on_link_hover {
+                    let over = match self.content_point(state, bounds, cursor) {
+                        Some(p) if state.drag.is_none() => self.link_at(state, p).filter(|(_, raw)| !raw).map(|(t, _)| t),
+                        _ => None,
+                    };
+                    if over != state.hovered {
+                        state.hovered = over.clone();
+                        shell.publish(f(over.zip(cursor.position())));
+                    }
+                }
                 let Some(drag) = state.drag.as_mut() else { return };
                 if !drag.moved {
                     let travelled = match (drag.origin, cursor.position()) {

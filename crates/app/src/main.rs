@@ -283,6 +283,8 @@ struct App {
     modifiers: iced::keyboard::Modifiers,
     /// The menu of where to open a link, while it is open.
     link_menu: Option<LinkMenu>,
+    /// The card of the Strong's entry a link under the pointer is for.
+    link_hover: Option<LinkHover>,
     /// The chapter in front of the reader, for the reading log.
     reading: Option<Reading>,
     /// The tabs that were showing at the last update, to tell which came into view and which left.
@@ -366,6 +368,27 @@ struct LinkMenu {
     at: iced::Point,
     spec: Spec,
     from: TabId,
+}
+
+/// A Strong's entry to show a summary card of, near the pointer (in the window).
+struct LinkHover {
+    at: iced::Point,
+    entry: study_core::LexiconEntry,
+}
+
+/// Whether `key` is a Strong's number (`G25`, `H215`).
+fn is_strongs_key(key: &str) -> bool {
+    let digits = key.strip_prefix(['G', 'H']).unwrap_or("");
+    (1..=4).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The first `max` characters of `text`, its white space made single spaces, with an ellipsis if it goes on.
+fn summary(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(max) {
+        Some((end, _)) => format!("{}\u{2026}", flat[..end].trim_end()),
+        None => flat,
+    }
 }
 
 /// A Bible tab shown alone. It ends when the number of tabs changes or another comes forward.
@@ -582,6 +605,7 @@ impl App {
             next_split: 1,
             modifiers: iced::keyboard::Modifiers::empty(),
             link_menu: None,
+            link_hover: None,
             shown: std::collections::BTreeSet::new(),
             reading: None,
             drag: None,
@@ -1397,6 +1421,9 @@ impl App {
         let ambient = matches!(
             &message,
             Message::Bible(_, BibleMsg::MarginChanged(_) | BibleMsg::AutoScroll(_) | BibleMsg::SelectionChanged(None))
+                | Message::Note(_, NoteMsg::LinkHover(_))
+                | Message::Log(_, NoteMsg::LinkHover(_))
+                | Message::Dict(_, DictMsg::LinkHover(_))
                 | Message::Tick(_)
                 | Message::ReadingTick
                 | Message::SaveSession
@@ -1414,6 +1441,14 @@ impl App {
         };
         if !ambient && !matches!(message, Message::MenuOpen(_) | Message::MenuCopy) {
             self.link_menu = None;
+        }
+        if !ambient {
+            self.link_hover = None;
+        }
+        // The pointer on a link, or off it: a Strong's number gets a card, nothing else does.
+        if let Message::Note(_, NoteMsg::LinkHover(over)) | Message::Log(_, NoteMsg::LinkHover(over)) | Message::Dict(_, DictMsg::LinkHover(over)) = &message {
+            self.link_hover = over.as_ref().and_then(|(target, at)| self.hover_for(&Spec::from_target(target), *at));
+            return Task::none();
         }
         // The layouts panel is a pop-up too: it stays for what is done in it.
         let in_panel = matches!(
@@ -1629,7 +1664,8 @@ impl App {
                         self.show_backlinks(id, Target::Note(path));
                         task
                     }
-                    None => task,
+                    // (Taken before, where the pointer's moves are.)
+                    Some(note_tab::Request::Hover(_)) | None => task,
                 }
             }
             Message::Search(id, msg) => {
@@ -2976,6 +3012,8 @@ impl App {
         }
         if let Some(menu) = &self.link_menu {
             layers.push(self.link_menu_view(menu));
+        } else if let Some(hover) = &self.link_hover {
+            layers.push(self.link_hover_view(hover));
         }
         stack(layers).into()
     }
@@ -2994,6 +3032,56 @@ impl App {
                 .into()
             }
         }
+    }
+
+    /// The card to show for a pointer at `at` on a link to `spec`, if the link is a Strong's number a dictionary has.
+    fn hover_for(&self, spec: &Spec, at: iced::Point) -> Option<LinkHover> {
+        let (module, key) = match spec {
+            Spec::Word { key } => (self.sh.backend.strongs_dictionary(key)?, key),
+            Spec::Dict { module, key } => (self.resolve_dictionary(module, key)?, key),
+            _ => return None,
+        };
+        if !is_strongs_key(key) {
+            return None;
+        }
+        let entry = self.sh.backend.dictionary_entry(&module, key)?;
+        Some(LinkHover { at, entry })
+    }
+
+    /// A summary of a Strong's entry (the word, how it is said, what it means), just under the pointer, or above it
+    /// where there is no room below.
+    fn link_hover_view(&self, hover: &LinkHover) -> Element<'_, Message> {
+        const WIDTH: f32 = 320.0;
+        const ROOM: f32 = 190.0;
+        let entry = &hover.entry;
+        let mut head = row![].spacing(10).align_y(iced::Alignment::Center);
+        if !entry.lemma.is_empty() {
+            head = head.push(text(entry.lemma.clone()).size(22).font(fonts::UI));
+        }
+        if !entry.transliteration.is_empty() {
+            head = head.push(text(entry.transliteration.clone()).size(14).font(fonts::UI).style(text::secondary));
+        }
+        head = head.push(space::horizontal()).push(text(entry.key.clone()).size(12).style(text::secondary));
+        let card = container(
+            column![head, text(summary(&entry.definition, 280)).size(13).font(fonts::UI)].spacing(6),
+        )
+        .padding([8, 12])
+        .width(WIDTH)
+        .style(popup_style);
+        let window = self.window_size;
+        let x = hover.at.x.min(window.width - WIDTH - 8.0).max(8.0);
+        let above = hover.at.y + 18.0 + ROOM > window.height;
+        let padding = if above {
+            iced::Padding { left: x, bottom: (window.height - hover.at.y + 8.0).max(0.0), ..iced::Padding::ZERO }
+        } else {
+            iced::Padding { left: x, top: hover.at.y + 18.0, ..iced::Padding::ZERO }
+        };
+        container(card)
+            .padding(padding)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(if above { iced::alignment::Vertical::Bottom } else { iced::alignment::Vertical::Top })
+            .into()
     }
 
     /// The menu of where to open a link, at the pointer.
@@ -10234,6 +10322,37 @@ mod tests {
         let bible = app.bid();
         let _ = app.update(Message::Bible(bible, BibleMsg::OpenWord("G99999".into())));
         assert!(app.sh.status.contains("No installed dictionary has G99999"));
+    }
+
+    #[test]
+    fn the_pointer_on_a_strongs_link_shows_a_card_of_its_entry_until_it_leaves_or_anything_is_done() {
+        let mut app = App::new();
+        let note = app.nid();
+        let at = iced::Point::new(100.0, 120.0);
+        let strongs = LinkTarget::Sword { module: "Strongs".into(), key: "G25".into() };
+        let _ = app.update(Message::Note(note, NoteMsg::LinkHover(Some((strongs.clone(), at)))));
+        let hover = app.link_hover.as_ref().expect("a card for the entry");
+        assert_eq!((hover.entry.key.as_str(), hover.entry.lemma.as_str(), hover.at), ("G25", "ἀγαπάω", at));
+        // Moving about on the link, or onto the dictionary tab's own, keeps it; leaving it takes it away.
+        let _ = app.update(Message::Note(note, NoteMsg::LinkHover(Some((strongs.clone(), at)))));
+        assert!(app.link_hover.is_some());
+        let _ = app.update(Message::Note(note, NoteMsg::LinkHover(None)));
+        assert!(app.link_hover.is_none());
+        // A click (or any other doing) puts it away too.
+        let _ = app.update(Message::Note(note, NoteMsg::LinkHover(Some((strongs, at)))));
+        let _ = app.update(Message::Note(note, NoteMsg::CancelDelete));
+        assert!(app.link_hover.is_none());
+        // Only a Strong's number has one: not a note, nor a number nobody defines.
+        for other in [LinkTarget::Note("Nicodemus".into()), LinkTarget::Sword { module: "Strongs".into(), key: "G99999".into() }, LinkTarget::Sword { module: "Strongs".into(), key: "G9999".into() }] {
+            let _ = app.update(Message::Note(note, NoteMsg::LinkHover(Some((other, at)))));
+            assert!(app.link_hover.is_none());
+        }
+    }
+
+    #[test]
+    fn a_summary_keeps_the_start_of_a_text_on_one_line() {
+        assert_eq!(summary("from  a\nroot", 50), "from a root");
+        assert_eq!(summary("ἀγαπάω ἀγαπάω", 6), "ἀγαπάω\u{2026}");
     }
 
     #[test]

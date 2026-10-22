@@ -48,6 +48,7 @@ impl LogTab {
                 | NoteMsg::OpenLink(_)
                 | NoteMsg::LinkMenu(..)
                 | NoteMsg::LinkDrag(..)
+                | NoteMsg::LinkHover(_)
                 | NoteMsg::Scrolled(_)
                 | NoteMsg::Completion(_)
                 | NoteMsg::ChoicesScrolled(_)

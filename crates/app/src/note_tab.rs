@@ -161,6 +161,8 @@ pub enum NoteMsg {
     LinkMenu(LinkTarget, iced::Point),
     /// A link in the text pulled away, at this point of the window.
     LinkDrag(LinkTarget, iced::Point),
+    /// The pointer came onto a link in the text (at this point of the window), or left it.
+    LinkHover(Option<(LinkTarget, iced::Point)>),
     PickNote(NoteChoice),
     /// Back or forward along the notes this tab has shown.
     Back,
@@ -453,6 +455,8 @@ pub enum Request {
     Menu(Spec, iced::Point),
     /// A link has been picked up: carry it, from this point of the window.
     Drag(Spec, iced::Point),
+    /// The pointer is on a link (at this point of the window), or has left it.
+    Hover(Option<(Spec, iced::Point)>),
     /// Show the notes that link to the note at this path in a tab.
     Backlinks(String),
 }
@@ -1116,6 +1120,7 @@ impl NoteTab {
             NoteMsg::OpenLink(target) => return (task, Some(Request::Open(Spec::from_target(&target)))),
             NoteMsg::LinkDrag(target, at) => return (task, Some(Request::Drag(Spec::from_target(&target), at))),
             NoteMsg::LinkMenu(target, at) => return (task, Some(Request::Menu(Spec::from_target(&target), at))),
+            NoteMsg::LinkHover(over) => return (task, Some(Request::Hover(over.map(|(target, at)| (Spec::from_target(&target), at))))),
             NoteMsg::PickNote(NoteChoice(path)) => self.open(sh, path),
             NoteMsg::Back => self.step(sh, true),
             NoteMsg::Forward => self.step(sh, false),
@@ -1350,6 +1355,7 @@ impl NoteTab {
             .on_link(NoteMsg::OpenLink)
             .on_link_menu(NoteMsg::LinkMenu)
             .on_link_drag(NoteMsg::LinkDrag)
+            .on_link_hover(NoteMsg::LinkHover)
             .on_scroll(NoteMsg::Scrolled)
             .embed(move |target| sh.embed_for(&module, target))
             .placeholder("Nothing read yet")
@@ -1487,6 +1493,7 @@ impl NoteTab {
                 .on_link(NoteMsg::OpenLink)
                 .on_link_menu(NoteMsg::LinkMenu)
                 .on_link_drag(NoteMsg::LinkDrag)
+            .on_link_hover(NoteMsg::LinkHover)
                 .on_scroll(NoteMsg::Scrolled)
                 .caret_to_top(self.jump)
                 .on_jumped(|| NoteMsg::Jumped)
