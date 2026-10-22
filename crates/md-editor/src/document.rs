@@ -1,6 +1,6 @@
 //! The editable document: raw markdown text, a selection, and an undo log. Every change is an
 //! edit to the source string, so what is on screen can never disagree with what is saved
-//! (docs/06 §6). No layout here: vertical movement and visual line ends are the widget's job.
+//! (docs/06). No layout here: vertical movement and visual line ends are the widget's job.
 
 use crate::blocks::{self, Block, Kind, block_at};
 use crate::render::Reveal;
@@ -476,6 +476,9 @@ impl Document {
         }
         self.reparse();
         self.redo.clear();
+        // An edit can turn a line into a list item around the caret (`- [ ` closing to `- [ ]`):
+        // the caret then leaves the marker, which is hidden now.
+        let after = if after.is_empty() { Selection::caret(self.snap_caret(after.head)) } else { after };
         self.selection = after;
 
         let merge = group.is_some()
@@ -527,6 +530,16 @@ impl Document {
         let range = self.selection.range();
         let group = (typing && !text.contains('\n')).then_some(Group::Typing);
         self.replace(range, text, group);
+        // `- [ ` closed to `- [ ]` is a task, but one with no text yet: the space that ends the box
+        // comes with it, so what is typed next is the task and not part of the box.
+        if typing && self.selection.is_empty() {
+            let head = self.selection.head;
+            let block = &self.blocks[block_at(&self.blocks, head)];
+            let boxed = matches!(block.kind, Kind::Item { task: Some(_), .. }) && head == block.range.end;
+            if boxed && self.source[..head].ends_with(']') {
+                self.replace(head..head, " ", group);
+            }
+        }
     }
 
     /// What typing `c` does when it opens or closes a pair (see [`Document::insert`]); whether it was
@@ -839,6 +852,17 @@ mod tests {
 
     fn caret_at(d: &mut Document, at: usize) {
         d.perform(Action::SetCaret { offset: at, extend: false });
+    }
+
+    #[test]
+    fn typing_a_task_box_leaves_the_caret_after_it() {
+        let mut d = doc("");
+        type_str(&mut d, "- [ ");
+        assert_eq!(d.source(), "- [ ] ", "with the space after the box");
+        assert_eq!(d.selection.head, 6, "not inside the hidden box");
+        type_str(&mut d, "x");
+        assert_eq!(d.source(), "- [ ] x");
+        assert_eq!(d.blocks[0].kind, Kind::Item { indent: 0, ordered: None, task: Some(false) });
     }
 
     #[test]
